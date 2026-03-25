@@ -5,8 +5,6 @@ import (
 	"log"
 	"strings"
 	"time"
-	"unicode"
-
 	. "github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/provider"
@@ -40,13 +38,23 @@ var (
 	previewBorder = BrightBlack
 
 	// compose
-	composeTo      string
-	composeCC      string
-	composeSubject string
-	composeModeStr string
-	editor         *compose.Editor
-	replyThreadID  string
-	replyMsg       *provider.Message
+	composeTo         string
+	composeCC         string
+	composeSubject    string
+	composeModeStr    string
+	composeStatusLine string
+	editor            *compose.Editor
+	replyThreadID     string
+	replyMsg          *provider.Message
+
+	// compose search
+	composeSearchQuery  string
+	composeSearchPrompt string
+	composeSearchFwd    bool
+
+	// compose discard prompt
+	showDiscardPrompt bool
+	modalStyle        = Style{FG: Hex(0x2d2d2d), BG: Hex(0xfaf8f5)}
 )
 
 type ThreadRow struct {
@@ -193,24 +201,28 @@ func main() {
 			}
 		}).
 		Handle("c", func() {
-			resetCompose()
-			app.Go("compose")
+			openCompose(app)
 		}).
 		Handle("r", func() {
 			if threadSel >= 0 && threadSel < len(threadRows) {
 				row := threadRows[threadSel]
 				if row.MsgIdx < 0 && row.ThreadIdx < len(state.threads) {
+					openCompose(app)
 					setupReply(state.threads[row.ThreadIdx])
-					app.Go("compose")
 				}
 			}
 		})
 
 	// compose view — editor first, omnibox for actions
 	editor = compose.NewEditor(compose.NewDocument(), "")
-	editor.SetSize(80, 24)
+	editor.SetApp(app)
 	composeModeStr = editor.Mode().String()
 	composeSubject = ""
+
+	// wire enterInsertMode for operator text object combos
+	compose.SetEnterInsertMode(func(a *App, e *compose.Editor) {
+		composeEnterInsertMode(a, e)
+	})
 
 	// derive subject from editor content on every change
 	editor.OnChange = func() {
@@ -220,323 +232,88 @@ func main() {
 		composeModeStr = editor.Mode().String()
 	}
 
-	composeStatusLine := ""
-	updateComposeStatus := func() {
-		composeModeStr = editor.Mode().String()
-		subj := composeSubject
-		if subj == "" {
-			subj = "(no subject — use # heading)"
-		}
-		to := composeTo
-		if to == "" {
-			to = "(no recipient — :to to set)"
-		}
-		composeStatusLine = fmt.Sprintf("to: %s    subject: %s", to, subj)
-	}
+	// start spell check
+	editor.StartSpellResultWorker(app.RequestRender)
 
-	showOmnibox := false
-	omniboxInput := ""
-	omniboxError := ""
-
-	execOmniCommand := func(cmd string) {
-		parts := strings.SplitN(strings.TrimSpace(cmd), " ", 2)
-		action := parts[0]
-		arg := ""
-		if len(parts) > 1 {
-			arg = strings.TrimSpace(parts[1])
-		}
-
-		switch action {
-		case "send", "s":
-			if composeTo == "" {
-				omniboxError = "set recipient first — :to <address>"
-				return
-			}
-			sendMessage(app)
-			showOmnibox = false
-			return
-		case "to":
-			if arg == "" {
-				omniboxError = "usage: :to <address>"
-				return
-			}
-			composeTo = arg
-		case "cc":
-			if arg == "" {
-				omniboxError = "usage: :cc <address>"
-				return
-			}
-			composeCC = arg
-		case "subject", "sub":
-			if arg == "" {
-				omniboxError = "usage: :subject <text>"
-				return
-			}
-			composeSubject = arg
-		case "discard", "q":
-			resetCompose()
-			showOmnibox = false
-			app.Go("main")
-			return
-		default:
-			omniboxError = fmt.Sprintf("unknown: %s (try: send, to, cc, subject, discard)", action)
-			return
-		}
-		showOmnibox = false
-		omniboxError = ""
-		updateComposeStatus()
-	}
-
+	// compose view layout
 	app.View("compose",
 		VBox(
-			// editor takes all available space
 			LayerView(editor.Layer()).Grow(1),
-
-			// status line at bottom
 			HBox.Gap(2)(
 				Text(&composeModeStr).Bold(),
 				Text(&composeStatusLine).Dim(),
 			),
-
-			// omnibox overlay at bottom
-			If(&showOmnibox).Then(
-				HBox(
-					Text(":"),
-					Text(&omniboxInput),
+			If(&showDiscardPrompt).Then(
+				Overlay.Centered().Backdrop().BackdropFG(BrightBlack)(
+					VBox.Border(BorderRounded).BorderFG(Hex(0xcccccc)).Fill(Hex(0xfaf8f5)).CascadeStyle(&modalStyle).Width(40)(
+						SpaceH(1),
+						Text("discard changes?").Bold().Style(Style{Align: AlignCenter}).Width(38),
+						SpaceH(1),
+						HBox(
+							Space(),
+							Text("y").Bold(),
+							Text(" discard").Dim(),
+							SpaceW(4),
+							Text("n").Bold(),
+							Text(" cancel").Dim(),
+							Space(),
+						),
+						SpaceH(1),
+					),
 				),
 			),
-			If(&showOmnibox).Then(
-				If(&omniboxError).Eq("").
-					Then(Text("send  to <addr>  cc <addr>  subject <text>  discard").Dim()).
-					Else(Text(&omniboxError).Bold()),
+		),
+	).NoCounts()
+
+	// render callback — glyph calls this with correct viewport size
+	editor.Layer().Render = func() {
+		w := editor.Layer().ViewportWidth()
+		h := editor.Layer().ViewportHeight()
+		if w > 0 && h > 0 {
+			editor.SetSize(w, h)
+			editor.UpdateDisplay()
+		}
+	}
+	editor.Layer().AlwaysRender = true
+
+	// compose search view (for / and ?)
+	app.View("compose-search",
+		VBox(
+			HBox(
+				Text(&composeSearchPrompt).Bold(),
+				Text(&composeSearchQuery),
 			),
 		),
-	).NoCounts().
-		// omnibox trigger
-		Handle(":", func() {
-			if editor.Mode() == compose.ModeNormal && !showOmnibox {
-				showOmnibox = true
-				omniboxInput = ""
-				omniboxError = ""
+	).
+		Handle("<CR>", func() {
+			q := composeSearchQuery
+			fwd := composeSearchFwd
+			composeSearchQuery = ""
+			app.ShowCursor()
+			app.PopView()
+			if q != "" {
+				editor.Search(q, fwd)
+			}
+			editor.Refresh()
+		}).
+		Handle("<Esc>", func() {
+			composeSearchQuery = ""
+			app.ShowCursor()
+			app.PopView()
+			editor.Refresh()
+		}).
+		Handle("<BS>", func() {
+			if len(composeSearchQuery) > 0 {
+				runes := []rune(composeSearchQuery)
+				composeSearchQuery = string(runes[:len(runes)-1])
 			}
 		}).
-		// vim normal mode
-		Handle("i", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.EnterInsert()
-				updateComposeStatus()
-			}
-		}).
-		Handle("a", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.EnterInsertAfter()
-				updateComposeStatus()
-			}
-		}).
-		Handle("A", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.EnterInsertLineEnd()
-				updateComposeStatus()
-			}
-		}).
-		Handle("I", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.EnterInsertLineStart()
-				updateComposeStatus()
-			}
-		}).
-		Handle("o", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.OpenBelow()
-				updateComposeStatus()
-			}
-		}).
-		Handle("O", func() {
-			if showOmnibox {
-				return
-			}
-			if editor.Mode() == compose.ModeNormal {
-				editor.OpenAbove()
-				updateComposeStatus()
-			}
-		}).
-		Handle("<Escape>", func() {
-			if showOmnibox {
-				showOmnibox = false
-				omniboxError = ""
-				return
-			}
-			editor.EnterNormal()
-			updateComposeStatus()
-		}).
-		Handle("h", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.Left(1))
-		}).
-		Handle("l", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.Right(1))
-		}).
-		Handle("k", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.Up(1))
-		}).
-		Handle("j", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.Down(1))
-		}).
-		Handle("w", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.NextWordStart(1))
-		}).
-		Handle("b", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.PrevWordStart(1))
-		}).
-		Handle("e", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.SetCursor(editor.NextWordEnd(1))
-		}).
-		Handle("u", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.Undo()
-		}).
-		Handle("<C-r>", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.Redo()
-		}).
-		Handle("dd", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.DeleteLine()
-		}).
-		Handle("x", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.DeleteChar()
-		}).
-		Handle("p", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.Put()
-		}).
-		Handle("P", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.PutBefore()
-		}).
-		Handle("J", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.JoinLines()
-		}).
-		Handle("<C-d>", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.ScrollHalfPageDown()
-		}).
-		Handle("<C-u>", func() {
-			if showOmnibox || editor.Mode() != compose.ModeNormal {
-				return
-			}
-			editor.ScrollHalfPageUp()
-		})
+		NoCounts()
 
-	// route unmatched keys to editor (insert mode) or omnibox
-	if router, ok := app.ViewRouter("compose"); ok {
-		router.HandleUnmatched(func(k riffkey.Key) bool {
-			// omnibox input
-			if showOmnibox {
-				if k.Special == riffkey.SpecialBackspace {
-					if len(omniboxInput) > 0 {
-						omniboxInput = omniboxInput[:len(omniboxInput)-1]
-					}
-					omniboxError = ""
-					app.RequestRender()
-					return true
-				}
-				if k.Special == riffkey.SpecialEnter {
-					execOmniCommand(omniboxInput)
-					app.RequestRender()
-					return true
-				}
-				if k.Rune != 0 && k.Mod == 0 && unicode.IsPrint(k.Rune) {
-					omniboxInput += string(k.Rune)
-					omniboxError = ""
-					app.RequestRender()
-					return true
-				}
-				return false
-			}
-
-			// editor insert mode
-			if editor.Mode() != compose.ModeInsert {
-				return false
-			}
-			if k.Paste != "" {
-				editor.InsertText(k.Paste)
-				editor.UpdateDisplay()
-				updateComposeStatus()
-				app.RequestRender()
-				return true
-			}
-			if k.Special == riffkey.SpecialBackspace {
-				editor.Backspace()
-				editor.UpdateDisplay()
-				updateComposeStatus()
-				app.RequestRender()
-				return true
-			}
-			if k.Special == riffkey.SpecialEnter {
-				editor.NewLine()
-				editor.UpdateDisplay()
-				updateComposeStatus()
-				app.RequestRender()
-				return true
-			}
-			if k.Rune != 0 && k.Mod == 0 && unicode.IsPrint(k.Rune) {
-				editor.InsertChar(k.Rune)
-				editor.UpdateDisplay()
-				updateComposeStatus()
+	if searchRouter, ok := app.ViewRouter("compose-search"); ok {
+		searchRouter.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune != 0 && k.Mod == 0 {
+				composeSearchQuery += string(k.Rune)
 				app.RequestRender()
 				return true
 			}
@@ -544,11 +321,14 @@ func main() {
 		})
 	}
 
-	// resize handler for editor
-	app.OnResize(func(w, h int) {
-		editor.SetSize(w, h-3) // subtract status line + omnibox
-		editor.UpdateDisplay()
-	})
+	// wire all normal mode keybindings on the compose view's router
+	if composeRouter, ok := app.ViewRouter("compose"); ok {
+		setupComposeNormalMode(composeRouter, app, editor)
+		composeRouter.AddOnAfter(func() {
+			editor.Refresh()
+			updateComposeStatus()
+		})
+	}
 
 	// spinner
 	go func() {
@@ -734,12 +514,18 @@ func resetCompose() {
 	composeTo = ""
 	composeCC = ""
 	composeSubject = ""
+	composeStatusLine = ""
 	replyThreadID = ""
 	replyMsg = nil
-	editor = compose.NewEditor(compose.NewDocument(), "")
-	editor.SetSize(80, 24)
-	editor.EnterInsert()
-	composeModeStr = editor.Mode().String()
+	// reset editor document — keep the same editor instance (LayerView references its Layer)
+	editor.ResetDocument(compose.NewDocument())
+}
+
+func openCompose(app *App) {
+	resetCompose()
+	app.Go("compose")
+	editor.Refresh()
+	updateComposeStatus()
 }
 
 func setupReply(thread provider.Thread) {
@@ -957,3 +743,367 @@ func seedFakeData() {
 		},
 	}
 }
+
+// compose keybinding architecture — mirrors wed's main.go via cmd/test
+
+func updateComposeStatus() {
+	composeModeStr = editor.Mode().String()
+	subj := composeSubject
+	if subj == "" {
+		subj = "(# heading = subject)"
+	}
+	to := composeTo
+	if to == "" {
+		to = "(: to set recipient)"
+	}
+	composeStatusLine = fmt.Sprintf("to: %s    subject: %s", to, subj)
+}
+
+func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor) {
+	// exit compose
+	exitCompose := func() { resetCompose(); app.HideCursor(); app.Go("main") }
+
+	router.Handle("<C-q>", func(_ riffkey.Match) { exitCompose() })
+
+	router.Handle("<Esc>", func(_ riffkey.Match) {
+		ed.ExitDialogueIfEmpty()
+		if !ed.Dirty() {
+			exitCompose()
+			return
+		}
+		showDiscardPrompt = true
+		confirm := riffkey.NewRouter().Name("confirm-discard").NoCounts()
+		dismiss := func() { showDiscardPrompt = false; app.Pop() }
+		confirm.Handle("y", func(_ riffkey.Match) { dismiss(); exitCompose() })
+		confirm.Handle("Y", func(_ riffkey.Match) { dismiss(); exitCompose() })
+		confirm.Handle("<CR>", func(_ riffkey.Match) { dismiss(); exitCompose() })
+		confirm.Handle("n", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
+		confirm.Handle("N", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
+		confirm.Handle("<Esc>", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
+		confirm.AddOnAfter(func() { app.RequestRender() })
+		app.Push(confirm)
+	})
+
+	// ex-style commands
+	router.Handle(":send<CR>", func(_ riffkey.Match) {
+		if composeTo != "" { sendMessage(app) }
+	})
+	router.Handle(":s<CR>", func(_ riffkey.Match) {
+		if composeTo != "" { sendMessage(app) }
+	})
+
+	// movement
+	router.Handle("h", func(m riffkey.Match) { ed.Left(m.Count) })
+	router.Handle("l", func(m riffkey.Match) { ed.Right(m.Count) })
+	router.Handle("j", func(m riffkey.Match) { ed.Down(m.Count) })
+	router.Handle("k", func(m riffkey.Match) { ed.Up(m.Count) })
+	router.Handle("<Left>", func(m riffkey.Match) { ed.Left(m.Count) })
+	router.Handle("<Right>", func(m riffkey.Match) { ed.Right(m.Count) })
+	router.Handle("<Down>", func(m riffkey.Match) { ed.Down(m.Count) })
+	router.Handle("<Up>", func(m riffkey.Match) { ed.Up(m.Count) })
+	router.Handle("gj", func(m riffkey.Match) { ed.BlockDown(m.Count) })
+	router.Handle("gk", func(m riffkey.Match) { ed.BlockUp(m.Count) })
+	router.Handle("0", func(_ riffkey.Match) { ed.LineStart() })
+	router.Handle("$", func(_ riffkey.Match) { ed.LineEnd() })
+	router.Handle("^", func(_ riffkey.Match) { ed.FirstNonBlank() })
+	router.Handle("gg", func(_ riffkey.Match) { ed.DocStart() })
+	router.Handle("G", func(_ riffkey.Match) { ed.DocEnd() })
+	router.Handle("w", func(m riffkey.Match) { ed.NextWordStart(m.Count) })
+	router.Handle("b", func(m riffkey.Match) { ed.PrevWordStart(m.Count) })
+	router.Handle("e", func(m riffkey.Match) { ed.NextWordEnd(m.Count) })
+
+	// scrolling
+	router.Handle("<C-d>", func(_ riffkey.Match) { ed.ScrollHalfPageDown() })
+	router.Handle("<C-u>", func(_ riffkey.Match) { ed.ScrollHalfPageUp() })
+	router.Handle("<C-f>", func(_ riffkey.Match) { ed.ScrollPageDown() })
+	router.Handle("<C-b>", func(_ riffkey.Match) { ed.ScrollPageUp() })
+	router.Handle("<C-e>", func(_ riffkey.Match) { ed.ScrollLineDown() })
+	router.Handle("<C-y>", func(_ riffkey.Match) { ed.ScrollLineUp() })
+	router.Handle("zz", func(_ riffkey.Match) { ed.ScrollCenter() })
+	router.Handle("zt", func(_ riffkey.Match) { ed.ScrollTop() })
+	router.Handle("zb", func(_ riffkey.Match) { ed.ScrollBottom() })
+
+	// view modes
+	router.Handle("zT", func(_ riffkey.Match) { ed.ToggleTypewriterMode() })
+	router.Handle("zf", func(_ riffkey.Match) { ed.ToggleFocusMode() })
+	router.Handle("zF", func(_ riffkey.Match) { ed.CycleFocusScope() })
+	router.Handle("gz", func(_ riffkey.Match) { ed.ToggleZenMode() })
+	router.Handle("zr", func(_ riffkey.Match) { ed.ToggleRawMode() })
+	router.Handle("\\t", func(_ riffkey.Match) { ed.ToggleTheme() })
+
+	// spell check
+	router.Handle("zg", func(_ riffkey.Match) { ed.AddWordToDictionary() })
+	router.Handle("]e", func(_ riffkey.Match) { ed.NextMisspelled() })
+	router.Handle("[e", func(_ riffkey.Match) { ed.PrevMisspelled() })
+
+	// section navigation
+	router.Handle("]S", func(_ riffkey.Match) { ed.NextSameLevel() })
+	router.Handle("[S", func(_ riffkey.Match) { ed.PrevSameLevel() })
+
+	// heading promote/demote
+	router.Handle("g>", func(_ riffkey.Match) { ed.PromoteHeading() })
+	router.Handle("g<", func(_ riffkey.Match) { ed.DemoteHeading() })
+
+	// move blocks
+	router.Handle("<A-j>", func(_ riffkey.Match) { ed.MoveBlockDown() })
+	router.Handle("<A-k>", func(_ riffkey.Match) { ed.MoveBlockUp() })
+
+	// visual mode
+	router.Handle("v", func(_ riffkey.Match) { ed.EnterVisual(); composeSetupVisualRouter(app, ed) })
+	router.Handle("V", func(_ riffkey.Match) { ed.EnterVisualLine(); composeSetupVisualRouter(app, ed) })
+	router.Handle("<C-v>", func(_ riffkey.Match) { ed.EnterVisualBlock(); composeSetupVisualRouter(app, ed) })
+
+	// insert mode
+	router.Handle("i", func(_ riffkey.Match) { ed.EnterInsert(); composeEnterInsertMode(app, ed) })
+	router.Handle("a", func(_ riffkey.Match) { ed.EnterInsertAfter(); composeEnterInsertMode(app, ed) })
+	router.Handle("I", func(_ riffkey.Match) { ed.EnterInsertLineStart(); composeEnterInsertMode(app, ed) })
+	router.Handle("A", func(_ riffkey.Match) { ed.EnterInsertLineEnd(); composeEnterInsertMode(app, ed) })
+	router.Handle("o", func(_ riffkey.Match) { ed.OpenBelow(); composeEnterInsertMode(app, ed) })
+	router.Handle("O", func(_ riffkey.Match) { ed.OpenAbove(); composeEnterInsertMode(app, ed) })
+
+	// editing
+	router.Handle("x", func(m riffkey.Match) { for range m.Count { ed.DeleteChar() } })
+	replaceRouter := riffkey.NewRouter().Name("replace").NoCounts()
+	replaceRouter.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+	replaceRouter.HandleUnmatched(func(k riffkey.Key) bool {
+		if k.Rune != 0 && k.Mod == 0 { ed.ReplaceChar(k.Rune); app.Pop(); return true }
+		return false
+	})
+	replaceRouter.AddOnAfter(func() { ed.Refresh() })
+	router.Handle("r", func(_ riffkey.Match) { app.Push(replaceRouter) })
+
+	router.Handle("dd", func(m riffkey.Match) { for range m.Count { ed.DeleteLine() } })
+	router.Handle("dj", func(m riffkey.Match) { for range m.Count + 1 { ed.DeleteLine() } })
+	router.Handle("dk", func(m riffkey.Match) {
+		for range m.Count + 1 { if ed.Cursor().Block > 0 { ed.BlockUp(1) }; ed.DeleteLine() }
+	})
+	router.Handle("D", func(_ riffkey.Match) {
+		ed.Delete(compose.Range{Start: ed.Cursor(), End: compose.Pos{Block: ed.Cursor().Block, Col: ed.CurrentBlock().Length()}})
+	})
+	router.Handle("J", func(m riffkey.Match) { for range m.Count { ed.JoinLines() } })
+	router.Handle("~", func(_ riffkey.Match) { ed.ToggleCase() })
+	router.Handle("u", func(_ riffkey.Match) { ed.Undo() })
+	router.Handle("<C-r>", func(_ riffkey.Match) { ed.Redo() })
+	router.Handle("yy", func(_ riffkey.Match) { ed.Yank(ed.InnerBlock()) })
+	router.Handle("p", func(_ riffkey.Match) { ed.Put() })
+	router.Handle("P", func(_ riffkey.Match) { ed.PutBefore() })
+	router.Handle("cc", func(_ riffkey.Match) { ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed) })
+	router.Handle("cj", func(m riffkey.Match) {
+		for range m.Count { ed.DeleteLine() }; ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed)
+	})
+	router.Handle("ck", func(m riffkey.Match) {
+		for range m.Count { if ed.Cursor().Block > 0 { ed.BlockUp(1) }; ed.DeleteLine() }
+		ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed)
+	})
+	router.Handle("C", func(_ riffkey.Match) {
+		ed.Change(compose.Range{Start: ed.Cursor(), End: compose.Pos{Block: ed.Cursor().Block, Col: ed.CurrentBlock().Length()}})
+		composeEnterInsertMode(app, ed)
+	})
+
+	// f/F/t/T
+	composeFindChar := func(action func(rune)) {
+		cr := riffkey.NewRouter().Name("char").NoCounts()
+		cr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+		cr.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune != 0 && k.Mod == 0 { action(k.Rune); app.Pop(); return true }
+			return false
+		})
+		app.Push(cr)
+	}
+	router.Handle("f", func(_ riffkey.Match) { composeFindChar(ed.FindChar) })
+	router.Handle("F", func(_ riffkey.Match) { composeFindChar(ed.FindCharBack) })
+	router.Handle("t", func(_ riffkey.Match) { composeFindChar(ed.TillChar) })
+	router.Handle("T", func(_ riffkey.Match) { composeFindChar(ed.TillCharBack) })
+	router.Handle(";", func(_ riffkey.Match) { ed.RepeatFind() })
+	router.Handle(",", func(_ riffkey.Match) { ed.RepeatFindReverse() })
+
+	// marks
+	composeMarkPrompt := func(action func(rune)) {
+		mr := riffkey.NewRouter().Name("mark").NoCounts()
+		mr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+		mr.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune >= 'a' && k.Rune <= 'z' && k.Mod == 0 { action(k.Rune); app.Pop(); return true }
+			return false
+		})
+		app.Push(mr)
+	}
+	router.Handle("m", func(_ riffkey.Match) { composeMarkPrompt(ed.SetMark) })
+	router.Handle("'", func(_ riffkey.Match) { composeMarkPrompt(func(r rune) { ed.GotoMarkLine(r) }) })
+	router.Handle("`", func(_ riffkey.Match) { composeMarkPrompt(func(r rune) { ed.GotoMark(r) }) })
+
+	// search
+	composeStartSearch := func(forward bool) {
+		if forward { composeSearchPrompt = "/" } else { composeSearchPrompt = "?" }
+		composeSearchQuery = ""
+		composeSearchFwd = forward
+		app.HideCursor()
+		app.PushView("compose-search")
+	}
+	router.Handle("/", func(_ riffkey.Match) { composeStartSearch(true) })
+	router.Handle("?", func(_ riffkey.Match) { composeStartSearch(false) })
+	router.Handle("n", func(_ riffkey.Match) { ed.SearchNext() })
+	router.Handle("N", func(_ riffkey.Match) { ed.SearchPrev() })
+	router.Handle("*", func(_ riffkey.Match) {
+		word := ed.InnerWord()
+		if word.Start.Block == word.End.Block {
+			if b := ed.CurrentBlock(); b != nil {
+				runes := []rune(b.Text())
+				if word.Start.Col < len(runes) && word.End.Col <= len(runes) {
+					if p := string(runes[word.Start.Col:word.End.Col]); p != "" { ed.Search(p, true) }
+				}
+			}
+		}
+	})
+	router.Handle("#", func(_ riffkey.Match) {
+		word := ed.InnerWord()
+		if word.Start.Block == word.End.Block {
+			if b := ed.CurrentBlock(); b != nil {
+				runes := []rune(b.Text())
+				if word.Start.Col < len(runes) && word.End.Col <= len(runes) {
+					if p := string(runes[word.Start.Col:word.End.Col]); p != "" { ed.Search(p, false) }
+				}
+			}
+		}
+	})
+
+	// screen jumps
+	router.Handle("H", func(_ riffkey.Match) { ed.GotoScreenTop() })
+	router.Handle("M", func(_ riffkey.Match) { ed.GotoScreenMiddle() })
+	router.Handle("L", func(_ riffkey.Match) { ed.GotoScreenBottom() })
+	router.Handle("<C-o>", func(_ riffkey.Match) { ed.JumpBack() })
+	router.Handle("<C-i>", func(_ riffkey.Match) { ed.JumpForward() })
+	router.Handle("-", func(_ riffkey.Match) { ed.PrevLineFirstNonBlank() })
+	router.Handle("+", func(_ riffkey.Match) { ed.NextLineFirstNonBlank() })
+	router.Handle("<C-a>", func(_ riffkey.Match) { ed.IncrementNumber(1) })
+	router.Handle("<C-x>", func(_ riffkey.Match) { ed.IncrementNumber(-1) })
+	router.Handle(".", func(_ riffkey.Match) { ed.RepeatLastAction() })
+
+	// sentences
+	router.Handle(")", func(m riffkey.Match) { for range m.Count { ed.NextSentence() } })
+	router.Handle("(", func(m riffkey.Match) { for range m.Count { ed.PrevSentence() } })
+	router.Handle("gs)", func(_ riffkey.Match) { ed.SwapSentenceNext() })
+	router.Handle("gs(", func(_ riffkey.Match) { ed.SwapSentencePrev() })
+
+	// operator × text object combos
+	compose.RegisterOperatorTextObjects(app, ed)
+
+	// block type
+	router.Handle("g0", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockParagraph) })
+	router.Handle("g1", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH1) })
+	router.Handle("g2", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH2) })
+	router.Handle("g3", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH3) })
+	router.Handle("g4", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH4) })
+	router.Handle("g5", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH5) })
+	router.Handle("g6", func(_ riffkey.Match) { ed.SetBlockType(compose.BlockH6) })
+	router.Handle("g-", func(_ riffkey.Match) { ed.InsertDivider() })
+	router.Handle("gyiw", func(_ riffkey.Match) { ed.YankStyle() })
+	router.Handle("gpiw", func(_ riffkey.Match) { ed.PasteStyle(ed.InnerWord()) })
+
+	// templates
+	router.Handle("gth", func(_ riffkey.Match) { ed.CycleTemplate("headings") })
+	router.Handle("gtq", func(_ riffkey.Match) { ed.CycleTemplate("quotes") })
+	router.Handle("gtd", func(_ riffkey.Match) { ed.CycleTemplate("dividers") })
+	router.Handle("gtl", func(_ riffkey.Match) { ed.CycleTemplate("lists") })
+	router.Handle("gtc", func(_ riffkey.Match) { ed.CycleTemplate("code") })
+	router.Handle("gtt", func(_ riffkey.Match) { ed.CycleTemplate("tables") })
+	router.Handle("gt@", func(_ riffkey.Match) { ed.CycleTemplate("dialogue") })
+	router.Handle("gBt", func(_ riffkey.Match) { ed.ApplyBundle("typewriter") })
+	router.Handle("gBm", func(_ riffkey.Match) { ed.ApplyBundle("minimal") })
+	router.Handle("gBa", func(_ riffkey.Match) { ed.ApplyBundle("academic") })
+	router.Handle("gBc", func(_ riffkey.Match) { ed.ApplyBundle("creative") })
+
+	// matchers
+	compose.RegisterMatchers(app, ed)
+}
+
+func composeEnterInsertMode(app *App, ed *compose.Editor) {
+	r := riffkey.NewRouter().Name("insert").NoCounts()
+
+	r.Handle("<Esc>", func(_ riffkey.Match) {
+		ed.EnterNormal()
+		app.Pop()
+	})
+	r.Handle("<CR>", func(_ riffkey.Match) { ed.NewLine() })
+	r.Handle("<S-CR>", func(_ riffkey.Match) { ed.YieldToNextSpeaker() })
+	r.Handle("<C-n>", func(_ riffkey.Match) { ed.YieldToNextSpeaker() })
+	r.Handle("<BS>", func(_ riffkey.Match) { ed.Backspace() })
+	r.Handle("<Del>", func(_ riffkey.Match) { ed.DeleteChar() })
+	r.Handle("<Left>", func(_ riffkey.Match) { ed.Left(1) })
+	r.Handle("<Right>", func(_ riffkey.Match) { ed.Right(1) })
+	r.Handle("<Up>", func(_ riffkey.Match) { ed.Up(1) })
+	r.Handle("<Down>", func(_ riffkey.Match) { ed.Down(1) })
+	r.Handle("<Space>", func(_ riffkey.Match) { ed.InsertChar(' ') })
+	r.Handle("<C-w>", func(_ riffkey.Match) { ed.DeleteWordBack() })
+	r.Handle("<C-u>", func(_ riffkey.Match) { ed.DeleteToLineStart() })
+
+	r.Handle("<Tab>", func(_ riffkey.Match) {
+		b := ed.CurrentBlock()
+		if b != nil && b.Type == compose.BlockDialogue {
+			ed.ToggleDialogueMode()
+		} else {
+			ed.InsertText("    ")
+		}
+	})
+
+	r.HandleUnmatched(func(k riffkey.Key) bool {
+		if k.IsPaste() {
+			ed.InsertText(k.Paste)
+			ed.Refresh()
+			return true
+		}
+		if k.Rune != 0 && k.Mod == 0 {
+			ed.InsertChar(k.Rune)
+			ed.Refresh()
+			return true
+		}
+		return false
+	})
+
+	r.AddOnAfter(func() { ed.Refresh(); updateComposeStatus() })
+	app.Push(r)
+}
+
+func composeSetupVisualRouter(app *App, ed *compose.Editor) {
+	r := riffkey.NewRouter().Name("visual").NoCounts()
+
+	r.Handle("<Esc>", func(_ riffkey.Match) { ed.ExitVisual(); app.Pop() })
+	r.Handle("v", func(_ riffkey.Match) {
+		if ed.CurrentVisualMode() == compose.VisualChar { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualChar) }
+	})
+	r.Handle("V", func(_ riffkey.Match) {
+		if ed.CurrentVisualMode() == compose.VisualLine { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualLine) }
+	})
+	r.Handle("<C-v>", func(_ riffkey.Match) {
+		if ed.CurrentVisualMode() == compose.VisualBlock { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualBlock) }
+	})
+
+	r.Handle("h", func(_ riffkey.Match) { ed.Left(1) })
+	r.Handle("l", func(_ riffkey.Match) { ed.Right(1) })
+	r.Handle("j", func(_ riffkey.Match) { ed.Down(1) })
+	r.Handle("k", func(_ riffkey.Match) { ed.Up(1) })
+	r.Handle("<Left>", func(_ riffkey.Match) { ed.Left(1) })
+	r.Handle("<Right>", func(_ riffkey.Match) { ed.Right(1) })
+	r.Handle("<Up>", func(_ riffkey.Match) { ed.Up(1) })
+	r.Handle("<Down>", func(_ riffkey.Match) { ed.Down(1) })
+	r.Handle("w", func(_ riffkey.Match) { ed.NextWordStart(1) })
+	r.Handle("b", func(_ riffkey.Match) { ed.PrevWordStart(1) })
+	r.Handle("e", func(_ riffkey.Match) { ed.NextWordEnd(1) })
+	r.Handle("0", func(_ riffkey.Match) { ed.LineStart() })
+	r.Handle("$", func(_ riffkey.Match) { ed.LineEnd() })
+	r.Handle("^", func(_ riffkey.Match) { ed.FirstNonBlank() })
+	r.Handle("gg", func(_ riffkey.Match) { ed.DocStart() })
+	r.Handle("G", func(_ riffkey.Match) { ed.DocEnd() })
+	r.Handle("o", func(_ riffkey.Match) { ed.SwapVisualEnds() })
+	r.Handle("O", func(_ riffkey.Match) { ed.SwapVisualEnds() })
+
+	compose.RegisterVisualTextObjects(r, ed)
+	compose.RegisterVisualOperators(r, app, ed)
+
+	r.Handle("~", func(_ riffkey.Match) { ed.ToggleCaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
+	r.Handle("U", func(_ riffkey.Match) { ed.UppercaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
+	r.Handle("u", func(_ riffkey.Match) { ed.LowercaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
+
+	r.AddOnAfter(func() { ed.Refresh() })
+	app.Push(r)
+}
+

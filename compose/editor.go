@@ -294,6 +294,28 @@ func (e *Editor) SetApp(app *glyph.App) {
 	e.app = app
 }
 
+// ResetDocument replaces the editor's document and resets all editing state
+func (e *Editor) ResetDocument(doc *Document) {
+	e.doc = doc
+	e.cursor = Pos{}
+	e.mode = ModeNormal
+	e.visualStart = Pos{}
+	e.undoStack = nil
+	e.redoStack = nil
+	e.yankText = ""
+	e.yankStyle = StyleNone
+	e.marks = make(map[rune]Pos)
+	e.topLine = 0
+	e.dirty = false
+	e.searchPattern = ""
+	e.jumpList = nil
+	e.jumpListIdx = 0
+	e.dialogueCharMode = false
+	e.characterHistory = nil
+	e.InvalidateCache()
+	e.rebuildCharacterHistory()
+}
+
 // SetSize sets the screen dimensions and invalidates the cache
 func (e *Editor) SetSize(w, h int) {
 	e.screenWidth = w
