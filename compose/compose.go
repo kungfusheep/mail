@@ -5,6 +5,17 @@ import (
 	"strings"
 )
 
+// Subject extracts the subject from the first heading block, or empty string
+func (e *Editor) Subject() string {
+	for _, block := range e.doc.Blocks {
+		switch block.Type {
+		case BlockH1, BlockH2, BlockH3:
+			return block.Text()
+		}
+	}
+	return ""
+}
+
 // ToHTML converts the document to HTML for email sending
 func (e *Editor) ToHTML() string {
 	var b strings.Builder
