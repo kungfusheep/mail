@@ -2,13 +2,13 @@ package main
 
 import (
 	"fmt"
-	"log"
-	"strings"
-	"time"
 	. "github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/riffkey"
+	"log"
+	"strings"
+	"time"
 )
 
 // app state — single source of truth
@@ -24,10 +24,10 @@ var state struct {
 // ui state
 var (
 	// display slices derived from app state
-	folderNames  []string
-	threadRows   []ThreadRow
-	folderSel    int
-	threadSel    int
+	folderNames []string
+	threadRows  []ThreadRow
+	folderSel   int
+	threadSel   int
 
 	statusText string
 	pane       int // 0=folders, 1=threads, 2=preview
@@ -38,28 +38,36 @@ var (
 	previewBorder = BrightBlack
 
 	// compose
-	composeTo         string
-	composeCC         string
-	composeSubject    string
-	composeModeStr    string
-	composeStatusLine string
-	editor            *compose.Editor
-	replyThreadID     string
-	replyMsg          *provider.Message
+	composeTo      string
+	composeCC      string
+	composeSubject string
+	editor         *compose.Editor
+	replyThreadID  string
+	replyMsg       *provider.Message
 
 	// compose search
 	composeSearchQuery  string
 	composeSearchPrompt string
 	composeSearchFwd    bool
 
-	// compose discard prompt
+	// compose ui state
 	showDiscardPrompt bool
+	sendPanelFocused  bool
 	modalStyle        = Style{FG: Hex(0x2d2d2d), BG: Hex(0xfaf8f5)}
+
+	// send panel fields
+	fieldTo      InputState
+	fieldCC      InputState
+	fieldSubject InputState
+	fieldFocus   FocusGroup
+	labelTo      = Hex(0xcccccc)
+	labelCC      = Hex(0xcccccc)
+	labelSub     = Hex(0xcccccc)
 )
 
 type ThreadRow struct {
 	ThreadIdx int
-	MsgIdx    int    // -1 for thread header, >= 0 for message
+	MsgIdx    int // -1 for thread header, >= 0 for message
 	Label     string
 	Detail    string
 	Date      string
@@ -85,7 +93,7 @@ func main() {
 				Space(),
 				Spinner(&frame).Frames(SpinnerDots),
 			),
-			HBox(
+			HBox.Grow(1)(
 				VBox.Grow(1).Border(BorderRounded).BorderFG(&folderBorder).Title("Folders")(
 					List(&folderNames).
 						Selection(&folderSel).
@@ -216,7 +224,6 @@ func main() {
 	// compose view — editor first, omnibox for actions
 	editor = compose.NewEditor(compose.NewDocument(), "")
 	editor.SetApp(app)
-	composeModeStr = editor.Mode().String()
 	composeSubject = ""
 
 	// wire enterInsertMode for operator text object combos
@@ -229,7 +236,6 @@ func main() {
 		if s := editor.Subject(); s != "" {
 			composeSubject = s
 		}
-		composeModeStr = editor.Mode().String()
 	}
 
 	// start spell check
@@ -239,10 +245,32 @@ func main() {
 	app.View("compose",
 		VBox(
 			LayerView(editor.Layer()).Grow(1),
-			HBox.Gap(2)(
-				Text(&composeModeStr).Bold(),
-				Text(&composeStatusLine).Dim(),
+
+			VBox.Fill(Hex(0xfaf8f5))(
+				SpaceH(1),
+				HBox(Space(), VBox.Width(60)(
+					HBox.Gap(1)(
+						Text("TO").FG(&labelTo),
+						TextInput{Field: &fieldTo, FocusGroup: &fieldFocus, FocusIndex: 0,
+							Placeholder: "·····", PlaceholderStyle: Style{FG: Hex(0xcccccc)},
+							Style: Style{FG: Hex(0x2d2d2d)}},
+					),
+					HBox.Gap(1)(
+						Text("CC").FG(&labelCC),
+						TextInput{Field: &fieldCC, FocusGroup: &fieldFocus, FocusIndex: 1,
+							Placeholder: "·····", PlaceholderStyle: Style{FG: Hex(0xcccccc)},
+							Style: Style{FG: Hex(0x2d2d2d)}},
+					),
+					HBox.Gap(1)(
+						Text("SUBJECT").FG(&labelSub),
+						TextInput{Field: &fieldSubject, FocusGroup: &fieldFocus, FocusIndex: 2,
+							Placeholder: "·····", PlaceholderStyle: Style{FG: Hex(0xcccccc)},
+							Style: Style{FG: Hex(0x2d2d2d)}},
+					),
+				), Space()),
+				SpaceH(1),
 			),
+
 			If(&showDiscardPrompt).Then(
 				Overlay.Centered().Backdrop().BackdropFG(BrightBlack)(
 					VBox.Border(BorderRounded).BorderFG(Hex(0xcccccc)).Fill(Hex(0xfaf8f5)).CascadeStyle(&modalStyle).Width(40)(
@@ -251,11 +279,9 @@ func main() {
 						SpaceH(1),
 						HBox(
 							Space(),
-							Text("y").Bold(),
-							Text(" discard").Dim(),
+							Text("y").Bold(), Text(" discard").Dim(),
 							SpaceW(4),
-							Text("n").Bold(),
-							Text(" cancel").Dim(),
+							Text("n").Bold(), Text(" cancel").Dim(),
 							Space(),
 						),
 						SpaceH(1),
@@ -326,7 +352,9 @@ func main() {
 		setupComposeNormalMode(composeRouter, app, editor)
 		composeRouter.AddOnAfter(func() {
 			editor.Refresh()
-			updateComposeStatus()
+			if sendPanelFocused {
+				app.HideCursor()
+			}
 		})
 	}
 
@@ -514,10 +542,13 @@ func resetCompose() {
 	composeTo = ""
 	composeCC = ""
 	composeSubject = ""
-	composeStatusLine = ""
 	replyThreadID = ""
 	replyMsg = nil
-	// reset editor document — keep the same editor instance (LayerView references its Layer)
+	fieldTo.Clear()
+	fieldCC.Clear()
+	fieldSubject.Clear()
+	fieldFocus.Current = -1
+	sendPanelFocused = false
 	editor.ResetDocument(compose.NewDocument())
 }
 
@@ -525,7 +556,6 @@ func openCompose(app *App) {
 	resetCompose()
 	app.Go("compose")
 	editor.Refresh()
-	updateComposeStatus()
 }
 
 func setupReply(thread provider.Thread) {
@@ -598,31 +628,31 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m1a", ThreadID: "t1", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Alice Chen", Email: "alice@example.com"},
-					To:   []provider.Address{{Name: "Team", Email: "team@example.com"}},
-					Subject: "production deploy blocked on failing e2e tests",
-					Date:    now.Add(-2 * time.Hour),
+					From:     provider.Address{Name: "Alice Chen", Email: "alice@example.com"},
+					To:       []provider.Address{{Name: "Team", Email: "team@example.com"}},
+					Subject:  "production deploy blocked on failing e2e tests",
+					Date:     now.Add(-2 * time.Hour),
 					TextBody: "hey team,\n\nthe e2e suite is failing on the checkout flow tests.\nlooks like the session token changes from last week broke the auth fixture.\n\ni've pinned the deploy pipeline until we fix this. can someone\ntake a look at the fixture setup in test/e2e/auth_helper.go?\n\nthanks,\nalice",
-					Read: true, MessageID: "<m1a@example.com>",
+					Read:     true, MessageID: "<m1a@example.com>",
 				},
 				{
 					ID: "m1b", ThreadID: "t1", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Bob Kumar", Email: "bob@example.com"},
-					To:   []provider.Address{{Name: "Team", Email: "team@example.com"}},
-					Subject: "re: production deploy blocked on failing e2e tests",
-					Date:    now.Add(-90 * time.Minute),
+					From:     provider.Address{Name: "Bob Kumar", Email: "bob@example.com"},
+					To:       []provider.Address{{Name: "Team", Email: "team@example.com"}},
+					Subject:  "re: production deploy blocked on failing e2e tests",
+					Date:     now.Add(-90 * time.Minute),
 					TextBody: "i can take a look. the session token format changed from\njwt to opaque tokens — the fixture is still generating jwts.\n\nshould be a quick fix, i'll push a branch in 30 min.\n\nbob",
-					Read: true, InReplyTo: "<m1a@example.com>",
+					Read:     true, InReplyTo: "<m1a@example.com>",
 					MessageID: "<m1b@example.com>",
 				},
 				{
 					ID: "m1c", ThreadID: "t1", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Carol Zhang", Email: "carol@example.com"},
-					To:   []provider.Address{{Name: "Team", Email: "team@example.com"}},
-					Subject: "re: production deploy blocked on failing e2e tests",
-					Date:    now.Add(-12 * time.Minute),
+					From:     provider.Address{Name: "Carol Zhang", Email: "carol@example.com"},
+					To:       []provider.Address{{Name: "Team", Email: "team@example.com"}},
+					Subject:  "re: production deploy blocked on failing e2e tests",
+					Date:     now.Add(-12 * time.Minute),
 					TextBody: "bob's fix looks good. i ran the full suite locally and\neverything passes now. unblocking the deploy.\n\ncarol",
-					Read: false, InReplyTo: "<m1b@example.com>",
+					Read:     false, InReplyTo: "<m1b@example.com>",
 					MessageID: "<m1c@example.com>",
 				},
 			},
@@ -636,12 +666,12 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m2a", ThreadID: "t2", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Dave Park", Email: "dave@example.com"},
-					To:   []provider.Address{{Name: "Engineering", Email: "eng@example.com"}},
-					Subject: "weekly engineering sync — march 24",
-					Date:    now.Add(-3 * time.Hour),
+					From:     provider.Address{Name: "Dave Park", Email: "dave@example.com"},
+					To:       []provider.Address{{Name: "Engineering", Email: "eng@example.com"}},
+					Subject:  "weekly engineering sync — march 24",
+					Date:     now.Add(-3 * time.Hour),
 					TextBody: "notes from today's sync:\n\n- api gateway migration is 80% complete\n- new hire onboarding starts next monday\n- reminder: code freeze for v2.4 is thursday\n\naction items:\n1. finish gateway canary rollout (eve)\n2. update runbook for new auth flow (bob)\n3. schedule load test for wednesday (alice)\n\ndave",
-					Read: true, MessageID: "<m2a@example.com>",
+					Read:     true, MessageID: "<m2a@example.com>",
 				},
 			},
 		},
@@ -656,31 +686,31 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m3a", ThreadID: "t3", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Eve Santos", Email: "eve@example.com"},
-					To:   []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
-					Subject: "api rate limiting — proposal for v2",
-					Date:    now.Add(-26 * time.Hour),
+					From:     provider.Address{Name: "Eve Santos", Email: "eve@example.com"},
+					To:       []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
+					Subject:  "api rate limiting — proposal for v2",
+					Date:     now.Add(-26 * time.Hour),
 					TextBody: "i've been working on a new rate limiting approach for the api.\n\ncurrent system: fixed window, 1000 req/min per api key\nproposed: sliding window with token bucket, configurable per endpoint\n\nthe main wins:\n- burst tolerance without long-term abuse\n- per-endpoint granularity (search can be tighter than reads)\n- better observability — we can track token consumption patterns\n\ndraft doc is here. thoughts?\n\neve",
-					Read: true, MessageID: "<m3a@example.com>",
+					Read:     true, MessageID: "<m3a@example.com>",
 				},
 				{
 					ID: "m3b", ThreadID: "t3", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Alice Chen", Email: "alice@example.com"},
-					To:   []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
-					Subject: "re: api rate limiting — proposal for v2",
-					Date:    now.Add(-20 * time.Hour),
+					From:     provider.Address{Name: "Alice Chen", Email: "alice@example.com"},
+					To:       []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
+					Subject:  "re: api rate limiting — proposal for v2",
+					Date:     now.Add(-20 * time.Hour),
 					TextBody: "this looks solid. one concern: the token bucket refill rate\nneeds to account for our bursty enterprise clients. some of\nthem legitimately spike to 5x normal during their batch jobs.\n\ncan we add a \"burst multiplier\" config per api key tier?\n\nalice",
-					Read: true, InReplyTo: "<m3a@example.com>",
+					Read:     true, InReplyTo: "<m3a@example.com>",
 					MessageID: "<m3b@example.com>",
 				},
 				{
 					ID: "m3c", ThreadID: "t3", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Frank Liu", Email: "frank@example.com"},
-					To:   []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
-					Subject: "re: api rate limiting — proposal for v2",
-					Date:    now.Add(-5 * time.Hour),
+					From:     provider.Address{Name: "Frank Liu", Email: "frank@example.com"},
+					To:       []provider.Address{{Name: "Backend", Email: "backend@example.com"}},
+					Subject:  "re: api rate limiting — proposal for v2",
+					Date:     now.Add(-5 * time.Hour),
 					TextBody: "+1 on the burst multiplier idea. also we should make sure\nthe 429 response includes a retry-after header with the\nactual token refill time, not just a generic \"try later\".\n\nfrank",
-					Read: false, InReplyTo: "<m3b@example.com>",
+					Read:     false, InReplyTo: "<m3b@example.com>",
 					MessageID: "<m3c@example.com>",
 				},
 			},
@@ -694,12 +724,12 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m4a", ThreadID: "t4", Labels: []string{"INBOX"},
-					From: provider.Address{Name: "Office Supplies Co", Email: "orders@officesupplies.example.com"},
-					To:   []provider.Address{{Email: "pete@example.com"}},
-					Subject: "office furniture order confirmation",
-					Date:    now.Add(-1 * 24 * time.Hour),
+					From:     provider.Address{Name: "Office Supplies Co", Email: "orders@officesupplies.example.com"},
+					To:       []provider.Address{{Email: "pete@example.com"}},
+					Subject:  "office furniture order confirmation",
+					Date:     now.Add(-1 * 24 * time.Hour),
 					TextBody: "your order #OSC-7234 has been confirmed.\n\nitems:\n- standing desk frame (black) x1\n- monitor arm (dual) x1\n- desk mat (dark grey, 90x40) x1\n\nestimated delivery: march 28\n\nthank you for your order.",
-					Read: true, MessageID: "<m4a@officesupplies.example.com>",
+					Read:     true, MessageID: "<m4a@officesupplies.example.com>",
 				},
 			},
 		},
@@ -712,12 +742,12 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m5a", ThreadID: "t5", Labels: []string{"INBOX", "STARRED"},
-					From: provider.Address{Name: "Grace Torres", Email: "grace@example.com"},
-					To:   []provider.Address{{Name: "Engineering", Email: "eng@example.com"}},
-					Subject: "security audit results — q1 2026",
-					Date:    now.Add(-2 * 24 * time.Hour),
+					From:     provider.Address{Name: "Grace Torres", Email: "grace@example.com"},
+					To:       []provider.Address{{Name: "Engineering", Email: "eng@example.com"}},
+					Subject:  "security audit results — q1 2026",
+					Date:     now.Add(-2 * 24 * time.Hour),
 					TextBody: "hi all,\n\nthe q1 security audit is complete. summary:\n\n- 0 critical findings\n- 2 high (both in legacy auth, already patched)\n- 5 medium (dependency updates, tracking in jira)\n- 12 low/informational\n\nfull report attached. the two high findings were:\n1. session tokens not invalidated on password change\n2. csrf token reuse across form submissions\n\nboth patches are deployed as of yesterday.\n\ngrace",
-					Read: true, MessageID: "<m5a@example.com>",
+					Read:     true, MessageID: "<m5a@example.com>",
 				},
 			},
 		},
@@ -732,12 +762,12 @@ func seedFakeData() {
 			Messages: []provider.Message{
 				{
 					ID: "m6a", ThreadID: "t6", Labels: []string{"SENT"},
-					From: provider.Address{Email: "pete@example.com"},
-					To:   []provider.Address{{Name: "Dave Park", Email: "dave@example.com"}},
-					Subject: "re: lunch wednesday?",
-					Date:    now.Add(-4 * time.Hour),
+					From:     provider.Address{Email: "pete@example.com"},
+					To:       []provider.Address{{Name: "Dave Park", Email: "dave@example.com"}},
+					Subject:  "re: lunch wednesday?",
+					Date:     now.Add(-4 * time.Hour),
 					TextBody: "yeah sounds good, the ramen place on 5th? 12:30?\n\npete",
-					Read: true, MessageID: "<m6a@example.com>",
+					Read:     true, MessageID: "<m6a@example.com>",
 				},
 			},
 		},
@@ -745,19 +775,6 @@ func seedFakeData() {
 }
 
 // compose keybinding architecture — mirrors wed's main.go via cmd/test
-
-func updateComposeStatus() {
-	composeModeStr = editor.Mode().String()
-	subj := composeSubject
-	if subj == "" {
-		subj = "(# heading = subject)"
-	}
-	to := composeTo
-	if to == "" {
-		to = "(: to set recipient)"
-	}
-	composeStatusLine = fmt.Sprintf("to: %s    subject: %s", to, subj)
-}
 
 func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor) {
 	// exit compose
@@ -777,19 +794,107 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 		confirm.Handle("y", func(_ riffkey.Match) { dismiss(); exitCompose() })
 		confirm.Handle("Y", func(_ riffkey.Match) { dismiss(); exitCompose() })
 		confirm.Handle("<CR>", func(_ riffkey.Match) { dismiss(); exitCompose() })
-		confirm.Handle("n", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
-		confirm.Handle("N", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
-		confirm.Handle("<Esc>", func(_ riffkey.Match) { dismiss(); updateComposeStatus() })
+		confirm.Handle("n", func(_ riffkey.Match) { dismiss() })
+		confirm.Handle("N", func(_ riffkey.Match) { dismiss() })
+		confirm.Handle("<Esc>", func(_ riffkey.Match) { dismiss() })
 		confirm.AddOnAfter(func() { app.RequestRender() })
 		app.Push(confirm)
 	})
 
+	// send panel — Tab focuses the fields, Esc/Enter/Tab-past-end returns to editor
+	fieldStates := []*InputState{&fieldTo, &fieldCC, &fieldSubject}
+	labels := []*Color{&labelTo, &labelCC, &labelSub}
+	dimColor := Hex(0xcccccc)
+	activeColor := Hex(0x2d2d2d)
+
+	syncLabels := func() {
+		for i, l := range labels {
+			if sendPanelFocused && fieldFocus.Current == i {
+				*l = activeColor
+			} else {
+				*l = dimColor
+			}
+		}
+	}
+
+	bindCurrentField := func(fr *riffkey.Router) {
+		f := fieldStates[fieldFocus.Current]
+		th := riffkey.NewTextHandler(&f.Value, &f.Cursor)
+		fr.HandleUnmatched(th.HandleKey)
+		fr.NoCounts()
+		syncLabels()
+	}
+
+	exitFields := func() {
+		composeTo = fieldTo.Value
+		composeCC = fieldCC.Value
+		composeSubject = fieldSubject.Value
+		fieldFocus.Current = -1
+		sendPanelFocused = false
+		syncLabels()
+		app.Pop()
+		ed.Refresh()
+	}
+
+	router.Handle("<Tab>", func(_ riffkey.Match) {
+		sendPanelFocused = true
+		fieldFocus.Current = 0
+		app.HideCursor()
+
+		fr := riffkey.NewRouter().Name("send-fields")
+		bindCurrentField(fr)
+
+		fr.Handle("<Tab>", func(_ riffkey.Match) {
+			next := fieldFocus.Current + 1
+			if next >= len(fieldStates) {
+				exitFields()
+				return
+			}
+			fieldFocus.Current = next
+			bindCurrentField(fr)
+		})
+		fr.Handle("<S-Tab>", func(_ riffkey.Match) {
+			prev := fieldFocus.Current - 1
+			if prev < 0 {
+				exitFields()
+				return
+			}
+			fieldFocus.Current = prev
+			bindCurrentField(fr)
+		})
+		fr.Handle("<Esc>", func(_ riffkey.Match) { exitFields() })
+		fr.Handle("<CR>", func(_ riffkey.Match) {
+			// Enter on last field exits, otherwise advances
+			next := fieldFocus.Current + 1
+			if next >= len(fieldStates) {
+				exitFields()
+				return
+			}
+			fieldFocus.Current = next
+			bindCurrentField(fr)
+		})
+
+		fr.AddOnAfter(func() { app.RequestRender() })
+		app.Push(fr)
+	})
+
+	// send — Ctrl-S from editor or send panel
+	router.Handle("<C-s>", func(_ riffkey.Match) {
+		if composeTo != "" {
+			sendMessage(app)
+		}
+	})
+
 	// ex-style commands
 	router.Handle(":send<CR>", func(_ riffkey.Match) {
-		if composeTo != "" { sendMessage(app) }
+		if composeTo != "" {
+			sendMessage(app)
+		}
 	})
 	router.Handle(":s<CR>", func(_ riffkey.Match) {
-		if composeTo != "" { sendMessage(app) }
+		if composeTo != "" {
+			sendMessage(app)
+		}
 	})
 
 	// movement
@@ -862,25 +967,50 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 	router.Handle("O", func(_ riffkey.Match) { ed.OpenAbove(); composeEnterInsertMode(app, ed) })
 
 	// editing
-	router.Handle("x", func(m riffkey.Match) { for range m.Count { ed.DeleteChar() } })
+	router.Handle("x", func(m riffkey.Match) {
+		for range m.Count {
+			ed.DeleteChar()
+		}
+	})
 	replaceRouter := riffkey.NewRouter().Name("replace").NoCounts()
 	replaceRouter.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
 	replaceRouter.HandleUnmatched(func(k riffkey.Key) bool {
-		if k.Rune != 0 && k.Mod == 0 { ed.ReplaceChar(k.Rune); app.Pop(); return true }
+		if k.Rune != 0 && k.Mod == 0 {
+			ed.ReplaceChar(k.Rune)
+			app.Pop()
+			return true
+		}
 		return false
 	})
 	replaceRouter.AddOnAfter(func() { ed.Refresh() })
 	router.Handle("r", func(_ riffkey.Match) { app.Push(replaceRouter) })
 
-	router.Handle("dd", func(m riffkey.Match) { for range m.Count { ed.DeleteLine() } })
-	router.Handle("dj", func(m riffkey.Match) { for range m.Count + 1 { ed.DeleteLine() } })
+	router.Handle("dd", func(m riffkey.Match) {
+		for range m.Count {
+			ed.DeleteLine()
+		}
+	})
+	router.Handle("dj", func(m riffkey.Match) {
+		for range m.Count + 1 {
+			ed.DeleteLine()
+		}
+	})
 	router.Handle("dk", func(m riffkey.Match) {
-		for range m.Count + 1 { if ed.Cursor().Block > 0 { ed.BlockUp(1) }; ed.DeleteLine() }
+		for range m.Count + 1 {
+			if ed.Cursor().Block > 0 {
+				ed.BlockUp(1)
+			}
+			ed.DeleteLine()
+		}
 	})
 	router.Handle("D", func(_ riffkey.Match) {
 		ed.Delete(compose.Range{Start: ed.Cursor(), End: compose.Pos{Block: ed.Cursor().Block, Col: ed.CurrentBlock().Length()}})
 	})
-	router.Handle("J", func(m riffkey.Match) { for range m.Count { ed.JoinLines() } })
+	router.Handle("J", func(m riffkey.Match) {
+		for range m.Count {
+			ed.JoinLines()
+		}
+	})
 	router.Handle("~", func(_ riffkey.Match) { ed.ToggleCase() })
 	router.Handle("u", func(_ riffkey.Match) { ed.Undo() })
 	router.Handle("<C-r>", func(_ riffkey.Match) { ed.Redo() })
@@ -889,11 +1019,21 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 	router.Handle("P", func(_ riffkey.Match) { ed.PutBefore() })
 	router.Handle("cc", func(_ riffkey.Match) { ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed) })
 	router.Handle("cj", func(m riffkey.Match) {
-		for range m.Count { ed.DeleteLine() }; ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed)
+		for range m.Count {
+			ed.DeleteLine()
+		}
+		ed.Change(ed.InnerBlock())
+		composeEnterInsertMode(app, ed)
 	})
 	router.Handle("ck", func(m riffkey.Match) {
-		for range m.Count { if ed.Cursor().Block > 0 { ed.BlockUp(1) }; ed.DeleteLine() }
-		ed.Change(ed.InnerBlock()); composeEnterInsertMode(app, ed)
+		for range m.Count {
+			if ed.Cursor().Block > 0 {
+				ed.BlockUp(1)
+			}
+			ed.DeleteLine()
+		}
+		ed.Change(ed.InnerBlock())
+		composeEnterInsertMode(app, ed)
 	})
 	router.Handle("C", func(_ riffkey.Match) {
 		ed.Change(compose.Range{Start: ed.Cursor(), End: compose.Pos{Block: ed.Cursor().Block, Col: ed.CurrentBlock().Length()}})
@@ -905,7 +1045,11 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 		cr := riffkey.NewRouter().Name("char").NoCounts()
 		cr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
 		cr.HandleUnmatched(func(k riffkey.Key) bool {
-			if k.Rune != 0 && k.Mod == 0 { action(k.Rune); app.Pop(); return true }
+			if k.Rune != 0 && k.Mod == 0 {
+				action(k.Rune)
+				app.Pop()
+				return true
+			}
 			return false
 		})
 		app.Push(cr)
@@ -922,7 +1066,11 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 		mr := riffkey.NewRouter().Name("mark").NoCounts()
 		mr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
 		mr.HandleUnmatched(func(k riffkey.Key) bool {
-			if k.Rune >= 'a' && k.Rune <= 'z' && k.Mod == 0 { action(k.Rune); app.Pop(); return true }
+			if k.Rune >= 'a' && k.Rune <= 'z' && k.Mod == 0 {
+				action(k.Rune)
+				app.Pop()
+				return true
+			}
 			return false
 		})
 		app.Push(mr)
@@ -933,7 +1081,11 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 
 	// search
 	composeStartSearch := func(forward bool) {
-		if forward { composeSearchPrompt = "/" } else { composeSearchPrompt = "?" }
+		if forward {
+			composeSearchPrompt = "/"
+		} else {
+			composeSearchPrompt = "?"
+		}
 		composeSearchQuery = ""
 		composeSearchFwd = forward
 		app.HideCursor()
@@ -949,7 +1101,9 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 			if b := ed.CurrentBlock(); b != nil {
 				runes := []rune(b.Text())
 				if word.Start.Col < len(runes) && word.End.Col <= len(runes) {
-					if p := string(runes[word.Start.Col:word.End.Col]); p != "" { ed.Search(p, true) }
+					if p := string(runes[word.Start.Col:word.End.Col]); p != "" {
+						ed.Search(p, true)
+					}
 				}
 			}
 		}
@@ -960,7 +1114,9 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 			if b := ed.CurrentBlock(); b != nil {
 				runes := []rune(b.Text())
 				if word.Start.Col < len(runes) && word.End.Col <= len(runes) {
-					if p := string(runes[word.Start.Col:word.End.Col]); p != "" { ed.Search(p, false) }
+					if p := string(runes[word.Start.Col:word.End.Col]); p != "" {
+						ed.Search(p, false)
+					}
 				}
 			}
 		}
@@ -979,8 +1135,16 @@ func setupComposeNormalMode(router *riffkey.Router, app *App, ed *compose.Editor
 	router.Handle(".", func(_ riffkey.Match) { ed.RepeatLastAction() })
 
 	// sentences
-	router.Handle(")", func(m riffkey.Match) { for range m.Count { ed.NextSentence() } })
-	router.Handle("(", func(m riffkey.Match) { for range m.Count { ed.PrevSentence() } })
+	router.Handle(")", func(m riffkey.Match) {
+		for range m.Count {
+			ed.NextSentence()
+		}
+	})
+	router.Handle("(", func(m riffkey.Match) {
+		for range m.Count {
+			ed.PrevSentence()
+		}
+	})
 	router.Handle("gs)", func(_ riffkey.Match) { ed.SwapSentenceNext() })
 	router.Handle("gs(", func(_ riffkey.Match) { ed.SwapSentencePrev() })
 
@@ -1059,7 +1223,7 @@ func composeEnterInsertMode(app *App, ed *compose.Editor) {
 		return false
 	})
 
-	r.AddOnAfter(func() { ed.Refresh(); updateComposeStatus() })
+	r.AddOnAfter(func() { ed.Refresh() })
 	app.Push(r)
 }
 
@@ -1068,13 +1232,28 @@ func composeSetupVisualRouter(app *App, ed *compose.Editor) {
 
 	r.Handle("<Esc>", func(_ riffkey.Match) { ed.ExitVisual(); app.Pop() })
 	r.Handle("v", func(_ riffkey.Match) {
-		if ed.CurrentVisualMode() == compose.VisualChar { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualChar) }
+		if ed.CurrentVisualMode() == compose.VisualChar {
+			ed.ExitVisual()
+			app.Pop()
+		} else {
+			ed.SetVisualMode(compose.VisualChar)
+		}
 	})
 	r.Handle("V", func(_ riffkey.Match) {
-		if ed.CurrentVisualMode() == compose.VisualLine { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualLine) }
+		if ed.CurrentVisualMode() == compose.VisualLine {
+			ed.ExitVisual()
+			app.Pop()
+		} else {
+			ed.SetVisualMode(compose.VisualLine)
+		}
 	})
 	r.Handle("<C-v>", func(_ riffkey.Match) {
-		if ed.CurrentVisualMode() == compose.VisualBlock { ed.ExitVisual(); app.Pop() } else { ed.SetVisualMode(compose.VisualBlock) }
+		if ed.CurrentVisualMode() == compose.VisualBlock {
+			ed.ExitVisual()
+			app.Pop()
+		} else {
+			ed.SetVisualMode(compose.VisualBlock)
+		}
 	})
 
 	r.Handle("h", func(_ riffkey.Match) { ed.Left(1) })
@@ -1106,4 +1285,3 @@ func composeSetupVisualRouter(app *App, ed *compose.Editor) {
 	r.AddOnAfter(func() { ed.Refresh() })
 	app.Push(r)
 }
-
