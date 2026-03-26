@@ -232,11 +232,6 @@ func main() {
 	})
 
 	// derive subject from editor content on every change
-	editor.OnChange = func() {
-		if s := editor.Subject(); s != "" {
-			composeSubject = s
-		}
-	}
 
 	// start spell check
 	editor.StartSpellResultWorker(app.RequestRender)
@@ -1209,21 +1204,39 @@ func composeEnterInsertMode(app *App, ed *compose.Editor) {
 		}
 	})
 
+	syncSubject := func() {
+		b := ed.CurrentBlock()
+		if b == nil {
+			return
+		}
+		switch b.Type {
+		case compose.BlockH1, compose.BlockH2, compose.BlockH3:
+			composeSubject = b.Text()
+			fieldSubject.Value = composeSubject
+			fieldSubject.Cursor = len(composeSubject)
+		}
+	}
+
 	r.HandleUnmatched(func(k riffkey.Key) bool {
 		if k.IsPaste() {
 			ed.InsertText(k.Paste)
 			ed.Refresh()
+			syncSubject()
 			return true
 		}
 		if k.Rune != 0 && k.Mod == 0 {
 			ed.InsertChar(k.Rune)
 			ed.Refresh()
+			syncSubject()
 			return true
 		}
 		return false
 	})
 
-	r.AddOnAfter(func() { ed.Refresh() })
+	r.AddOnAfter(func() {
+		ed.Refresh()
+		syncSubject()
+	})
 	app.Push(r)
 }
 
