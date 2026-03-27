@@ -5691,6 +5691,11 @@ func (e *Editor) TypewriterModeEnabled() bool {
 	return e.typewriterMode
 }
 
+// SetTypewriterMode sets typewriter mode without triggering cursor recalculation
+func (e *Editor) SetTypewriterMode(on bool) {
+	e.typewriterMode = on
+}
+
 // ToggleFocusMode toggles focus mode on/off
 func (e *Editor) ToggleFocusMode() {
 	e.focusMode = !e.focusMode

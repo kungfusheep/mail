@@ -1,18 +1,25 @@
 package preview
 
 import (
+	"fmt"
 	"os/exec"
 	"strings"
 )
 
 // RenderHTML converts html to plain text using w3m.
 // falls back to raw text body if w3m is unavailable.
-func RenderHTML(html, fallbackText string) string {
+// cols sets the wrap width (0 defaults to 72).
+func RenderHTML(html, fallbackText string, cols ...int) string {
 	if html == "" {
 		return fallbackText
 	}
 
-	cmd := exec.Command("w3m", "-dump", "-T", "text/html", "-cols", "80")
+	width := 72
+	if len(cols) > 0 && cols[0] > 0 {
+		width = cols[0]
+	}
+
+	cmd := exec.Command("w3m", "-dump", "-T", "text/html", "-cols", fmt.Sprintf("%d", width))
 	cmd.Stdin = strings.NewReader(html)
 
 	out, err := cmd.Output()

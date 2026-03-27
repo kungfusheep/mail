@@ -2,13 +2,17 @@ package main
 
 import (
 	"fmt"
-	. "github.com/kungfusheep/glyph"
-	"github.com/kungfusheep/mail/compose"
-	"github.com/kungfusheep/mail/provider"
-	"github.com/kungfusheep/riffkey"
 	"log"
 	"strings"
 	"time"
+
+	. "github.com/kungfusheep/glyph"
+	"github.com/kungfusheep/mail/compose"
+	imapprov "github.com/kungfusheep/mail/imap"
+	"github.com/kungfusheep/mail/preview"
+	"github.com/kungfusheep/mail/provider"
+	smtpprov "github.com/kungfusheep/mail/smtp"
+	"github.com/kungfusheep/riffkey"
 )
 
 // app state — single source of truth
@@ -19,6 +23,9 @@ var state struct {
 	activeThread  int
 	activeMessage int
 	previewLines  []string
+	imap          *imapprov.IMAP
+	smtp          *smtpprov.SMTP
+	app           *App
 }
 
 // ui state
@@ -77,8 +84,24 @@ type ThreadRow struct {
 
 func main() {
 	app := NewApp()
+	state.app = app
 
-	seedFakeData()
+	// connect to IMAP
+	cfg, err := imapprov.LoadConfig()
+	if err != nil {
+		log.Fatal(err)
+	}
+	state.imap = imapprov.New(cfg)
+	if err := state.imap.Authenticate(); err != nil {
+		log.Fatal(err)
+	}
+	state.smtp = smtpprov.New(smtpprov.Config{
+		Server:   cfg.SMTPServer,
+		Email:    cfg.Email,
+		Password: cfg.Password,
+	})
+
+	loadFolders()
 	syncFolderList()
 	syncThreadList()
 
@@ -369,6 +392,15 @@ func main() {
 
 // data sync — derives display slices from app state
 
+func loadFolders() {
+	folders, err := state.imap.ListFolders()
+	if err != nil {
+		statusText = fmt.Sprintf("error: %v", err)
+		return
+	}
+	state.folders = folders
+}
+
 func syncFolderList() {
 	folderNames = nil
 	for _, f := range state.folders {
@@ -382,12 +414,22 @@ func syncFolderList() {
 
 func syncThreadList() {
 	threadRows = nil
+	if len(state.folders) == 0 {
+		return
+	}
 	folder := state.folders[state.activeFolder]
+
+	result, err := state.imap.ListThreads(provider.ListOptions{
+		Folder:     folder.ID,
+		MaxResults: 25,
+	})
+	if err != nil {
+		statusText = fmt.Sprintf("error: %v", err)
+		return
+	}
+	state.threads = result.Threads
+
 	for i, t := range state.threads {
-		// filter by folder (in real app, provider does this)
-		if !threadInFolder(t, folder.ID) {
-			continue
-		}
 		threadRows = append(threadRows, ThreadRow{
 			ThreadIdx: i,
 			MsgIdx:    -1,
@@ -399,17 +441,6 @@ func syncThreadList() {
 	}
 }
 
-func threadInFolder(t provider.Thread, folderID string) bool {
-	if len(t.Messages) == 0 {
-		return false
-	}
-	for _, label := range t.Messages[0].Labels {
-		if label == folderID {
-			return true
-		}
-	}
-	return false
-}
 
 func handleThreadEnter() {
 	if threadSel < 0 || threadSel >= len(threadRows) {
@@ -420,7 +451,7 @@ func handleThreadEnter() {
 		// message row — show preview
 		t := state.threads[row.ThreadIdx]
 		if row.MsgIdx < len(t.Messages) {
-			loadPreview(t.Messages[row.MsgIdx])
+			loadPreview(state.app, t.Messages[row.MsgIdx])
 			pane = 2
 			updateBorders()
 		}
@@ -430,7 +461,7 @@ func handleThreadEnter() {
 	handleThreadToggle()
 	t := state.threads[row.ThreadIdx]
 	if len(t.Messages) > 0 {
-		loadPreview(t.Messages[len(t.Messages)-1])
+		loadPreview(state.app, t.Messages[len(t.Messages)-1])
 	}
 }
 
@@ -471,7 +502,26 @@ func handleThreadToggle() {
 	}
 }
 
-func loadPreview(msg provider.Message) {
+func loadPreview(app *App, msg provider.Message) {
+	// fetch full body if not already loaded
+	if msg.TextBody == "" && msg.HTMLBody == "" && state.imap != nil {
+		full, err := state.imap.GetMessage(msg.ID)
+		if err == nil {
+			msg = full
+		}
+	}
+
+	// estimate preview pane width from terminal size
+	// preview pane is Grow(3) out of total Grow(6) ≈ 50%, minus border/padding
+	cols := 72
+	s := app.Size()
+	if s.Width > 0 {
+		cols = s.Width/2 - 4
+		if cols < 40 {
+			cols = 40
+		}
+	}
+
 	state.previewLines = nil
 	state.previewLines = append(state.previewLines,
 		fmt.Sprintf("From: %s", msg.From.String()),
@@ -480,8 +530,14 @@ func loadPreview(msg provider.Message) {
 		fmt.Sprintf("Subject: %s", msg.Subject),
 		"",
 	)
-	// use text body for now — w3m preview comes later
-	for _, line := range strings.Split(msg.TextBody, "\n") {
+	// render body — use w3m for html, detect html in misidentified text/plain
+	body := msg.TextBody
+	if msg.HTMLBody != "" {
+		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, cols)
+	} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
+		body = preview.RenderHTML(body, "", cols)
+	}
+	for _, line := range strings.Split(body, "\n") {
 		state.previewLines = append(state.previewLines, line)
 	}
 }
@@ -549,6 +605,9 @@ func resetCompose() {
 
 func openCompose(app *App) {
 	resetCompose()
+	// set typewriter mode before view activates — ensureCursorVisible
+	// will centre correctly once the Layer gets its size on first render
+	editor.SetTypewriterMode(true)
 	app.Go("compose")
 	editor.Refresh()
 }
@@ -578,9 +637,18 @@ func sendMessage(app *App) {
 		msg.InReplyTo = replyMsg.MessageID
 		msg.References = append(replyMsg.References, replyMsg.MessageID)
 	}
-	_ = msg
-	statusText = fmt.Sprintf("sent to %s (no provider)", composeTo)
+
+	if state.smtp != nil {
+		if err := state.smtp.Send(msg); err != nil {
+			statusText = fmt.Sprintf("send failed: %v", err)
+			return
+		}
+		statusText = fmt.Sprintf("sent to %s", composeTo)
+	} else {
+		statusText = "send failed: no smtp configured"
+	}
 	resetCompose()
+	app.HideCursor()
 	app.Go("main")
 }
 
@@ -598,9 +666,9 @@ func parseRecipients(s string) []provider.Address {
 	return addrs
 }
 
-// fake data — realistic mailbox content
+// seedFakeData removed — using real IMAP data
 
-func seedFakeData() {
+func _seedFakeData() {
 	now := time.Now()
 
 	state.folders = []provider.Folder{
