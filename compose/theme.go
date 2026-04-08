@@ -52,6 +52,35 @@ type Theme struct {
 	Dimmed glyph.Style
 }
 
+// TerminalTheme returns a theme that inherits all colors from the terminal
+func TerminalTheme() Theme {
+	return Theme{
+		Name: "terminal",
+
+		Bold:          glyph.Style{Attr: glyph.AttrBold},
+		Italic:        glyph.Style{Attr: glyph.AttrItalic},
+		Underline:     glyph.Style{Attr: glyph.AttrUnderline},
+		Strikethrough: glyph.Style{Attr: glyph.AttrStrikethrough},
+
+		Heading1:   glyph.Style{Attr: glyph.AttrBold},
+		Heading2:   glyph.Style{Attr: glyph.AttrBold},
+		Heading3:   glyph.Style{Attr: glyph.AttrBold},
+		Heading4:   glyph.Style{Attr: glyph.AttrBold},
+		Heading5:   glyph.Style{Attr: glyph.AttrBold},
+		Heading6:   glyph.Style{Attr: glyph.AttrBold},
+
+		Blockquote: glyph.Style{Attr: glyph.AttrItalic},
+		Divider:    glyph.Style{Attr: glyph.AttrDim},
+
+		DialogueCharacter:     glyph.Style{Attr: glyph.AttrBold},
+		DialogueParenthetical: glyph.Style{Attr: glyph.AttrItalic},
+
+		FrontMatterKey: glyph.Style{Attr: glyph.AttrBold},
+
+		Dimmed: glyph.Style{Attr: glyph.AttrDim},
+	}
+}
+
 // DefaultTheme returns a clean document-focused theme
 func DefaultTheme() Theme {
 	bg := glyph.Hex(0xfaf8f5) // warm off-white

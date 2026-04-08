@@ -264,7 +264,7 @@ func NewEditor(doc *Document, filename string) *Editor {
 	ed := &Editor{
 		doc:              doc,
 		filename:         filename,
-		theme:            DefaultTheme(),
+		theme:            TerminalTheme(),
 		mode:             ModeNormal,
 		layer:            glyph.NewLayer(),
 		templates:        NewTemplateRegistry(),
@@ -5652,16 +5652,18 @@ func (e *Editor) PasteStyle(r Range) {
 // ToggleTheme cycles through available themes
 func (e *Editor) ToggleTheme() {
 	switch e.theme.Name {
+	case "terminal":
+		e.theme = DefaultTheme()
 	case "default":
 		e.theme = DarkTheme()
 	case "dark":
 		e.theme = MonographTheme()
 		e.ApplyBundle("monograph")
 	case "monograph":
-		e.theme = DefaultTheme()
-		e.ApplyBundle("minimal") // reset to clean defaults
+		e.theme = TerminalTheme()
+		e.ApplyBundle("minimal")
 	default:
-		e.theme = DefaultTheme()
+		e.theme = TerminalTheme()
 	}
 	e.InvalidateCache()
 }
@@ -6133,11 +6135,12 @@ func (e *Editor) GetFocusRangeInBlock(blockIdx int) (int, int, bool) {
 
 // dimStyle returns a style with dimmed colors but preserved attributes (bold, italic, etc.)
 func (e *Editor) dimStyle(original glyph.Style) glyph.Style {
-	return glyph.Style{
+	s := glyph.Style{
 		FG:   e.theme.Dimmed.FG,
 		BG:   e.theme.Dimmed.BG,
-		Attr: original.Attr, // preserve bold, italic, underline, etc.
+		Attr: original.Attr | e.theme.Dimmed.Attr,
 	}
+	return s
 }
 
 // applyFocusDimming dims spans that are outside the focus range

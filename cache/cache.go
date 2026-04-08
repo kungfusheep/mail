@@ -77,8 +77,139 @@ func (c *Cache) migrate() error {
 			key TEXT PRIMARY KEY,
 			value TEXT NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS commands (
+			id TEXT PRIMARY KEY,
+			action TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			params TEXT NOT NULL DEFAULT '{}',
+			status TEXT NOT NULL DEFAULT 'pending',
+			error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL,
+			synced_at INTEGER NOT NULL DEFAULT 0
+		);
+		CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);
+
+		CREATE TABLE IF NOT EXISTS contacts (
+			email TEXT PRIMARY KEY,
+			name TEXT NOT NULL DEFAULT '',
+			updated_at INTEGER NOT NULL
+		);
 	`)
 	return err
+}
+
+// commands
+
+type Command struct {
+	ID        string
+	Action    string
+	TargetID  string
+	Params    map[string]string
+	Status    string // pending, syncing, synced, failed
+	Error     string
+	CreatedAt time.Time
+}
+
+func (c *Cache) PutCommand(cmd Command) error {
+	params, err := json.Marshal(cmd.Params)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Exec(
+		"INSERT OR REPLACE INTO commands (id, action, target_id, params, status, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		cmd.ID, cmd.Action, cmd.TargetID, string(params), cmd.Status, cmd.Error, cmd.CreatedAt.Unix(),
+	)
+	return err
+}
+
+func (c *Cache) PendingCommands() ([]Command, error) {
+	rows, err := c.db.Query("SELECT id, action, target_id, params, status, error, created_at FROM commands WHERE status = 'pending' ORDER BY created_at")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanCommands(rows)
+}
+
+func (c *Cache) UpdateCommandStatus(id, status, errMsg string) error {
+	syncedAt := int64(0)
+	if status == "synced" {
+		syncedAt = time.Now().Unix()
+	}
+	_, err := c.db.Exec(
+		"UPDATE commands SET status = ?, error = ?, synced_at = ? WHERE id = ?",
+		status, errMsg, syncedAt, id,
+	)
+	return err
+}
+
+func (c *Cache) ClearSyncedCommands() error {
+	_, err := c.db.Exec("DELETE FROM commands WHERE status = 'synced'")
+	return err
+}
+
+func scanCommands(rows *sql.Rows) ([]Command, error) {
+	var cmds []Command
+	for rows.Next() {
+		var cmd Command
+		var params string
+		var createdAt int64
+		if err := rows.Scan(&cmd.ID, &cmd.Action, &cmd.TargetID, &params, &cmd.Status, &cmd.Error, &createdAt); err != nil {
+			return nil, err
+		}
+		cmd.CreatedAt = time.Unix(createdAt, 0)
+		cmd.Params = make(map[string]string)
+		json.Unmarshal([]byte(params), &cmd.Params)
+		cmds = append(cmds, cmd)
+	}
+	return cmds, rows.Err()
+}
+
+// contacts
+
+func (c *Cache) PutContacts(contacts []provider.Address) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	stmt, err := tx.Prepare("INSERT OR REPLACE INTO contacts (email, name, updated_at) VALUES (?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
+	for _, contact := range contacts {
+		if _, err := stmt.Exec(contact.Email, contact.Name, now); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (c *Cache) SearchContacts(query string) ([]provider.Address, error) {
+	pattern := "%" + query + "%"
+	rows, err := c.db.Query(
+		"SELECT name, email FROM contacts WHERE name LIKE ? OR email LIKE ? ORDER BY name LIMIT 10",
+		pattern, pattern,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var results []provider.Address
+	for rows.Next() {
+		var a provider.Address
+		if err := rows.Scan(&a.Name, &a.Email); err != nil {
+			return nil, err
+		}
+		results = append(results, a)
+	}
+	return results, rows.Err()
 }
 
 // sync state

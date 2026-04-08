@@ -79,9 +79,9 @@ func (im *IMAP) ListFolders() ([]provider.Folder, error) {
 	var folders []provider.Folder
 	for _, mb := range mailboxes {
 		name := mb.Mailbox
-		// gmail uses [Gmail]/Sent Mail etc. — simplify
-		if strings.HasPrefix(name, "[Gmail]/") {
-			name = strings.TrimPrefix(name, "[Gmail]/")
+		// gmail uses [Google Mail]/Sent Mail etc. — simplify
+		if strings.HasPrefix(name, "[Google Mail]/") {
+			name = strings.TrimPrefix(name, "[Google Mail]/")
 		}
 
 		f := provider.Folder{

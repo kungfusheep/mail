@@ -2609,11 +2609,16 @@ func TestRawModeStyleOperators(t *testing.T) {
 	}
 }
 
-// extractDimmedAndFocused takes a flat list of spans and the editor's dimmed FG color,
-// and returns the concatenated dimmed text and focused text.
+func isDimmedSpan(sp glyph.Span, dimmedFG glyph.Color) bool {
+	if dimmedFG.Mode != glyph.ColorDefault && sp.Style.FG == dimmedFG {
+		return true
+	}
+	return sp.Style.Attr.Has(glyph.AttrDim)
+}
+
 func extractDimmedAndFocused(spans []glyph.Span, dimmedFG glyph.Color) (dimmed, focused string) {
 	for _, sp := range spans {
-		if sp.Style.FG == dimmedFG {
+		if isDimmedSpan(sp, dimmedFG) {
 			dimmed += sp.Text
 		} else {
 			focused += sp.Text
@@ -2790,7 +2795,7 @@ func TestFocusDimmingAfterWrapping(t *testing.T) {
 	var totalDimmed, totalFocused string
 	for _, line := range ed.cachedLines {
 		for _, sp := range line {
-			if sp.Style.FG == dimmedFG {
+			if isDimmedSpan(sp, dimmedFG) {
 				totalDimmed += sp.Text
 			} else {
 				totalFocused += sp.Text
@@ -2807,7 +2812,7 @@ func TestFocusDimmingAfterWrapping(t *testing.T) {
 	// and "This" should be FOCUSED (start of sentence 3)
 	for lineIdx, line := range ed.cachedLines {
 		for _, sp := range line {
-			if sp.Style.FG != dimmedFG {
+			if !isDimmedSpan(sp, dimmedFG) {
 				// focused span should not contain text from sentence 1 or 2
 				if strings.Contains(sp.Text, "noticeable") {
 					t.Errorf("line %d: 'noticeable' should be dimmed but is focused in span %q", lineIdx, sp.Text)
@@ -2870,7 +2875,7 @@ func TestFocusDimmingAfterWrappingMultiRun(t *testing.T) {
 	var totalFocused string
 	for _, line := range ed.cachedLines {
 		for _, sp := range line {
-			if sp.Style.FG != dimmedFG {
+			if !isDimmedSpan(sp, dimmedFG) {
 				totalFocused += sp.Text
 			}
 		}
@@ -2939,7 +2944,7 @@ func TestFocusDimmingMultiBlock(t *testing.T) {
 	block0End := block0Start + ed.blockLines[0].lineCount
 	for lineIdx := block0Start; lineIdx < block0End; lineIdx++ {
 		for _, sp := range ed.cachedLines[lineIdx] {
-			if sp.Text != "" && sp.Style.FG != dimmedFG {
+			if sp.Text != "" && !isDimmedSpan(sp, dimmedFG) {
 				t.Errorf("block 0 line %d: expected all dimmed, got focused span %q", lineIdx, sp.Text)
 			}
 		}
@@ -2951,7 +2956,7 @@ func TestFocusDimmingMultiBlock(t *testing.T) {
 	var block1Focused string
 	for lineIdx := block1Start; lineIdx < block1End; lineIdx++ {
 		for _, sp := range ed.cachedLines[lineIdx] {
-			if sp.Style.FG != dimmedFG {
+			if !isDimmedSpan(sp, dimmedFG) {
 				block1Focused += sp.Text
 			}
 		}
@@ -2967,7 +2972,7 @@ func TestFocusDimmingMultiBlock(t *testing.T) {
 	block2End := block2Start + ed.blockLines[2].lineCount
 	for lineIdx := block2Start; lineIdx < block2End; lineIdx++ {
 		for _, sp := range ed.cachedLines[lineIdx] {
-			if sp.Text != "" && sp.Style.FG != dimmedFG {
+			if sp.Text != "" && !isDimmedSpan(sp, dimmedFG) {
 				t.Errorf("block 2 line %d: expected all dimmed, got focused span %q", lineIdx, sp.Text)
 			}
 		}
@@ -3037,7 +3042,7 @@ func TestFocusDimmingExactScreenshot(t *testing.T) {
 	for lineIdx := block1Start; lineIdx < block1End; lineIdx++ {
 		line := ed.cachedLines[lineIdx]
 		for _, sp := range line {
-			if sp.Style.FG == dimmedFG {
+			if isDimmedSpan(sp, dimmedFG) {
 				totalDimmed += sp.Text
 			} else {
 				totalFocused += sp.Text
@@ -3052,7 +3057,7 @@ func TestFocusDimmingExactScreenshot(t *testing.T) {
 			var lineDesc string
 			for _, sp := range line {
 				marker := "F" // focused
-				if sp.Style.FG == dimmedFG {
+				if isDimmedSpan(sp, dimmedFG) {
 					marker = "D" // dimmed
 				}
 				lineDesc += "[" + marker + ":" + sp.Text + "]"
@@ -3209,7 +3214,7 @@ func TestFocusDimmingBoldAtWrapBoundary(t *testing.T) {
 	t.Log("pre-wrap spans:")
 	for i, sp := range preWrapLines[0] {
 		marker := "FOCUSED"
-		if sp.Style.FG == dimmedFG {
+		if isDimmedSpan(sp, dimmedFG) {
 			marker = "DIMMED"
 		}
 		t.Logf("  span %d: [%s] %q (bold=%v)", i, marker, sp.Text, sp.Style.Attr&glyph.AttrBold != 0)
@@ -3217,7 +3222,7 @@ func TestFocusDimmingBoldAtWrapBoundary(t *testing.T) {
 
 	// verify pre-wrap: "noticeable" must be dimmed (it's in the previous sentence)
 	for _, sp := range preWrapLines[0] {
-		if strings.Contains(sp.Text, "noticeable") && sp.Style.FG != dimmedFG {
+		if strings.Contains(sp.Text, "noticeable") && !isDimmedSpan(sp, dimmedFG) {
 			t.Errorf("PRE-WRAP BUG: 'noticeable' should be dimmed but is focused: %q", sp.Text)
 		}
 	}
@@ -3231,7 +3236,7 @@ func TestFocusDimmingBoldAtWrapBoundary(t *testing.T) {
 		var lineDesc string
 		for _, sp := range line {
 			marker := "F"
-			if sp.Style.FG == dimmedFG {
+			if isDimmedSpan(sp, dimmedFG) {
 				marker = "D"
 			} else {
 				totalFocused += sp.Text
@@ -3316,7 +3321,7 @@ func TestFocusDimmingRawModeWithBoldAtWrap(t *testing.T) {
 	t.Log("pre-wrap spans (raw mode):")
 	for i, sp := range preWrapLines[0] {
 		marker := "FOCUSED"
-		if sp.Style.FG == dimmedFG {
+		if isDimmedSpan(sp, dimmedFG) {
 			marker = "DIMMED"
 		}
 		t.Logf("  span %d: [%s] %q", i, marker, sp.Text)
@@ -3324,7 +3329,7 @@ func TestFocusDimmingRawModeWithBoldAtWrap(t *testing.T) {
 
 	// verify "**noticeable**" is dimmed pre-wrap
 	for _, sp := range preWrapLines[0] {
-		if strings.Contains(sp.Text, "noticeable") && sp.Style.FG != dimmedFG {
+		if strings.Contains(sp.Text, "noticeable") && !isDimmedSpan(sp, dimmedFG) {
 			t.Errorf("PRE-WRAP BUG: span containing 'noticeable' should be dimmed: %q", sp.Text)
 		}
 	}
@@ -3338,7 +3343,7 @@ func TestFocusDimmingRawModeWithBoldAtWrap(t *testing.T) {
 		var lineDesc string
 		for _, sp := range line {
 			marker := "F"
-			if sp.Style.FG == dimmedFG {
+			if isDimmedSpan(sp, dimmedFG) {
 				marker = "D"
 			} else {
 				totalFocused += sp.Text
@@ -3355,7 +3360,7 @@ func TestFocusDimmingRawModeWithBoldAtWrap(t *testing.T) {
 	// verify no part of "noticeable" or "**" is focused
 	for lineIdx, line := range ed.cachedLines {
 		for _, sp := range line {
-			if sp.Style.FG != dimmedFG {
+			if !isDimmedSpan(sp, dimmedFG) {
 				if strings.Contains(sp.Text, "noticeable") || strings.Contains(sp.Text, "**") {
 					t.Errorf("line %d: should be dimmed but focused: %q", lineIdx, sp.Text)
 				}
@@ -3401,7 +3406,7 @@ func TestFocusDimmingAfterWrappingRawMode(t *testing.T) {
 	var totalFocused string
 	for _, line := range ed.cachedLines {
 		for _, sp := range line {
-			if sp.Style.FG != dimmedFG {
+			if !isDimmedSpan(sp, dimmedFG) {
 				totalFocused += sp.Text
 			}
 		}
