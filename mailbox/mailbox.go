@@ -2,6 +2,8 @@ package mailbox
 
 import (
 	"fmt"
+	"log"
+	"sort"
 	"strings"
 	"time"
 
@@ -18,13 +20,34 @@ type Mailbox struct {
 	folders []provider.Folder
 	active  int
 
-	FolderNames []string
-	CanonEnd    int
+	folderNames []string
+	canonEnd    int
 
-	Threads    []provider.Thread
-	ThreadRows []ThreadRow
+	threads    []provider.Thread
+	threadRows []ThreadRow
 
-	PreviewLines []string
+	previewLines []string
+}
+
+// read-only pointers for glyph view binding
+func (m *Mailbox) FolderNames() *[]string  { return &m.folderNames }
+func (m *Mailbox) ThreadRows() *[]ThreadRow { return &m.threadRows }
+func (m *Mailbox) PreviewLines() *[]string  { return &m.previewLines }
+func (m *Mailbox) CanonEnd() int            { return m.canonEnd }
+func (m *Mailbox) FolderLen() int           { return len(m.folderNames) }
+func (m *Mailbox) ThreadLen() int           { return len(m.threadRows) }
+
+func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
+	if sel >= 0 && sel < len(m.threadRows) {
+		return &m.threadRows[sel]
+	}
+	return nil
+}
+
+// SetSearchResults replaces threads with search results from cache
+func (m *Mailbox) SetSearchResults(results []provider.Thread) {
+	m.threads = results
+	m.BuildThreadDisplay()
 }
 
 func New(c *cache.Cache) *Mailbox {
@@ -55,6 +78,9 @@ func (m *Mailbox) SyncFolders() error {
 	if err != nil {
 		return err
 	}
+	for _, f := range folders {
+		log.Printf("folder: id=%q name=%q unread=%d total=%d", f.ID, f.Name, f.Unread, f.Total)
+	}
 	m.folders = folders
 	if m.cache != nil {
 		m.cache.PutFolders(folders)
@@ -62,54 +88,70 @@ func (m *Mailbox) SyncFolders() error {
 	return nil
 }
 
+// displayFolders is the ordered folder list used for index lookups from the view.
+// it's rebuilt each time BuildFolderDisplay is called, without mutating the source folders.
+var displayFolders []provider.Folder
+
 func (m *Mailbox) BuildFolderDisplay(labelsOpen bool) {
-	m.FolderNames = nil
+	m.folderNames = nil
+	displayFolders = nil
 
-	seen := make(map[string]bool)
-	var ordered []provider.Folder
-
-	for _, id := range canonicalOrder {
-		for _, f := range m.folders {
-			if f.ID == id && !seen[f.ID] {
-				seen[f.ID] = true
-				ordered = append(ordered, f)
-			}
-		}
+	// collect canonical folders, dedup by display name (prefer the one with more messages)
+	type ranked struct {
+		folder provider.Folder
+		rank   int
 	}
+	bestCanon := make(map[string]ranked) // display name → best folder
 	var custom []provider.Folder
+
 	for _, f := range m.folders {
-		if !seen[f.ID] {
-			if strings.HasPrefix(f.ID, "[Gmail]/") {
-				continue
+		rank := canonicalRank(f.ID)
+		if rank >= 0 {
+			display := canonicalDisplayName(f.ID)
+			existing, exists := bestCanon[display]
+			if !exists || f.Total > existing.folder.Total {
+				bestCanon[display] = ranked{folder: f, rank: rank}
 			}
-			seen[f.ID] = true
-			custom = append(custom, f)
+			continue
 		}
+		// skip empty system folders from other clients
+		if strings.HasPrefix(f.ID, "[Gmail]") ||
+			strings.HasPrefix(f.ID, "[Google Mail]") ||
+			strings.HasPrefix(f.ID, "[Airmail]") ||
+			strings.HasPrefix(f.ID, "[Mailbox]") {
+			continue
+		}
+		custom = append(custom, f)
 	}
 
-	m.folders = ordered
+	// sort canonical by rank
+	var ordered []ranked
+	for _, r := range bestCanon {
+		ordered = append(ordered, r)
+	}
+	sort.Slice(ordered, func(i, j int) bool {
+		return ordered[i].rank < ordered[j].rank
+	})
 
-	for _, f := range m.folders {
-		name := f.Name
-		if display, ok := canonicalFolderNames[f.ID]; ok {
-			name = display
+	for _, r := range ordered {
+		displayFolders = append(displayFolders, r.folder)
+		name := canonicalDisplayName(r.folder.ID)
+		if r.folder.Unread > 0 {
+			name = fmt.Sprintf("%s (%d)", name, r.folder.Unread)
 		}
-		if f.Unread > 0 {
-			name = fmt.Sprintf("%s (%d)", name, f.Unread)
-		}
-		m.FolderNames = append(m.FolderNames, name)
+		m.folderNames = append(m.folderNames, name)
 	}
 
-	m.CanonEnd = len(m.FolderNames)
+	m.canonEnd = len(m.folderNames)
 
 	if len(custom) > 0 {
 		if labelsOpen {
-			m.FolderNames = append(m.FolderNames, "▾ Labels")
+			m.folderNames = append(m.folderNames, "▾ Labels")
 		} else {
-			m.FolderNames = append(m.FolderNames, "▸ Labels")
+			m.folderNames = append(m.folderNames, "▸ Labels")
 		}
 		if labelsOpen {
-			m.folders = append(m.folders, custom...)
+			displayFolders = append(displayFolders, custom...)
 			for _, f := range custom {
 				name := f.Name
 				if f.Unread > 0 {
@@ -117,32 +159,39 @@ func (m *Mailbox) BuildFolderDisplay(labelsOpen bool) {
 				} else {
 					name = "  " + name
 				}
-				m.FolderNames = append(m.FolderNames, name)
+				m.folderNames = append(m.folderNames, name)
 			}
 		}
 	}
 }
 
+func (m *Mailbox) displayFolder(idx int) *provider.Folder {
+	if idx < len(displayFolders) {
+		return &displayFolders[idx]
+	}
+	return nil
+}
+
 func (m *Mailbox) SelectFolder(idx int) {
-	if idx < len(m.folders) {
+	if idx < len(displayFolders) {
 		m.active = idx
 	}
 }
 
 func (m *Mailbox) ActiveFolderID() string {
-	if m.active < len(m.folders) {
-		return m.folders[m.active].ID
+	if m.active < len(displayFolders) {
+		return displayFolders[m.active].ID
 	}
 	return ""
 }
 
 func (m *Mailbox) FolderCount() int {
-	return len(m.folders)
+	return len(displayFolders)
 }
 
 func (m *Mailbox) FolderName(idx int) string {
-	if idx < len(m.folders) {
-		return m.folders[idx].Name
+	if idx < len(displayFolders) {
+		return displayFolders[idx].Name
 	}
 	return ""
 }
@@ -155,7 +204,7 @@ func (m *Mailbox) LoadThreads() {
 	}
 	threads, err := m.cache.GetThreads(m.ActiveFolderID(), 25)
 	if err == nil {
-		m.Threads = threads
+		m.threads = threads
 	}
 }
 
@@ -175,18 +224,16 @@ func (m *Mailbox) SyncThreads() error {
 		return err
 	}
 	if m.cache != nil {
-		for _, t := range result.Threads {
-			m.cache.PutThread(id, t)
-		}
+		m.cache.ReplaceThreads(id, result.Threads)
 	}
 	m.LoadThreads()
 	return nil
 }
 
 func (m *Mailbox) BuildThreadDisplay() {
-	m.ThreadRows = nil
-	for i, t := range m.Threads {
-		m.ThreadRows = append(m.ThreadRows, ThreadRow{
+	m.threadRows = nil
+	for i, t := range m.threads {
+		m.threadRows = append(m.threadRows, ThreadRow{
 			ThreadIdx: i,
 			MsgIdx:    -1,
 			Label:     truncate(t.Subject, 35),
@@ -198,16 +245,16 @@ func (m *Mailbox) BuildThreadDisplay() {
 }
 
 func (m *Mailbox) ToggleThread(sel int) {
-	if sel < 0 || sel >= len(m.ThreadRows) {
+	if sel < 0 || sel >= len(m.threadRows) {
 		return
 	}
-	row := &m.ThreadRows[sel]
+	row := &m.threadRows[sel]
 	if row.MsgIdx >= 0 {
 		return
 	}
 
 	row.Expanded = !row.Expanded
-	t := m.Threads[row.ThreadIdx]
+	t := m.threads[row.ThreadIdx]
 
 	if row.Expanded {
 		var msgRows []ThreadRow
@@ -221,41 +268,41 @@ func (m *Mailbox) ToggleThread(sel int) {
 				Unread:    !msg.Read,
 			})
 		}
-		after := make([]ThreadRow, len(m.ThreadRows[sel+1:]))
-		copy(after, m.ThreadRows[sel+1:])
-		m.ThreadRows = append(m.ThreadRows[:sel+1], msgRows...)
-		m.ThreadRows = append(m.ThreadRows, after...)
+		after := make([]ThreadRow, len(m.threadRows[sel+1:]))
+		copy(after, m.threadRows[sel+1:])
+		m.threadRows = append(m.threadRows[:sel+1], msgRows...)
+		m.threadRows = append(m.threadRows, after...)
 	} else {
 		end := sel + 1
-		for end < len(m.ThreadRows) && m.ThreadRows[end].MsgIdx >= 0 {
+		for end < len(m.threadRows) && m.threadRows[end].MsgIdx >= 0 {
 			end++
 		}
-		m.ThreadRows = append(m.ThreadRows[:sel+1], m.ThreadRows[end:]...)
+		m.threadRows = append(m.threadRows[:sel+1], m.threadRows[end:]...)
 	}
 }
 
 func (m *Mailbox) SelectedMessage(sel int) *provider.Message {
-	if sel < 0 || sel >= len(m.ThreadRows) {
+	if sel < 0 || sel >= len(m.threadRows) {
 		return nil
 	}
-	row := m.ThreadRows[sel]
+	row := m.threadRows[sel]
 	if row.MsgIdx < 0 {
 		return nil
 	}
-	if row.ThreadIdx < len(m.Threads) && row.MsgIdx < len(m.Threads[row.ThreadIdx].Messages) {
-		msg := m.Threads[row.ThreadIdx].Messages[row.MsgIdx]
+	if row.ThreadIdx < len(m.threads) && row.MsgIdx < len(m.threads[row.ThreadIdx].Messages) {
+		msg := m.threads[row.ThreadIdx].Messages[row.MsgIdx]
 		return &msg
 	}
 	return nil
 }
 
 func (m *Mailbox) SelectedThread(sel int) *provider.Thread {
-	if sel < 0 || sel >= len(m.ThreadRows) {
+	if sel < 0 || sel >= len(m.threadRows) {
 		return nil
 	}
-	row := m.ThreadRows[sel]
-	if row.ThreadIdx < len(m.Threads) {
-		return &m.Threads[row.ThreadIdx]
+	row := m.threadRows[sel]
+	if row.ThreadIdx < len(m.threads) {
+		return &m.threads[row.ThreadIdx]
 	}
 	return nil
 }
@@ -287,8 +334,8 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 		}
 	}
 
-	m.PreviewLines = nil
-	m.PreviewLines = append(m.PreviewLines,
+	m.previewLines = nil
+	m.previewLines = append(m.previewLines,
 		fmt.Sprintf("From: %s", msg.From.String()),
 		fmt.Sprintf("To: %s", formatAddresses(msg.To)),
 		fmt.Sprintf("Date: %s", msg.Date.Format("2 Jan 2006 15:04")),
@@ -303,7 +350,178 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 		body = preview.RenderHTML(body, "", cols)
 	}
 	for _, line := range strings.Split(body, "\n") {
-		m.PreviewLines = append(m.PreviewLines, line)
+		m.previewLines = append(m.previewLines, line)
+	}
+}
+
+// actions — each returns an undo closure + description
+
+func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	thread, folder := *t, m.ActiveFolderID()
+	cmdID := m.queueCommand("archive", t.ID, nil)
+	m.cache.DeleteThread(t.ID)
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+
+	return func() {
+		m.cancelCommand(cmdID)
+		m.cache.PutThread(folder, thread)
+		m.LoadThreads()
+		m.BuildThreadDisplay()
+	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
+}
+
+func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	thread, folder := *t, m.ActiveFolderID()
+	cmdID := m.queueCommand("delete", t.ID, nil)
+	m.cache.DeleteThread(t.ID)
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+
+	return func() {
+		m.cancelCommand(cmdID)
+		m.cache.PutThread(folder, thread)
+		m.LoadThreads()
+		m.BuildThreadDisplay()
+	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
+}
+
+func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	before := make([]bool, len(t.Messages))
+	var cmdIDs []string
+	for i, msg := range t.Messages {
+		before[i] = msg.Starred
+		if msg.Starred {
+			cmdIDs = append(cmdIDs, m.queueCommand("unstar", msg.ID, nil))
+			t.Messages[i].Starred = false
+		} else {
+			cmdIDs = append(cmdIDs, m.queueCommand("star", msg.ID, nil))
+			t.Messages[i].Starred = true
+		}
+	}
+	folder := m.ActiveFolderID()
+	thread := *t
+	m.cache.PutThread(folder, *t)
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+
+	return func() {
+		for _, id := range cmdIDs {
+			m.cancelCommand(id)
+		}
+		for i := range thread.Messages {
+			thread.Messages[i].Starred = before[i]
+		}
+		m.cache.PutThread(folder, thread)
+		m.LoadThreads()
+		m.BuildThreadDisplay()
+	}, "toggled star"
+}
+
+func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	folder := m.ActiveFolderID()
+	beforeUnread := t.Unread
+	markRead := t.Unread > 0
+
+	var cmdIDs []string
+	for _, msg := range t.Messages {
+		if markRead && !msg.Read {
+			cmdIDs = append(cmdIDs, m.queueCommand("mark_read", msg.ID, nil))
+		} else if !markRead {
+			cmdIDs = append(cmdIDs, m.queueCommand("mark_unread", msg.ID, nil))
+		}
+	}
+	if markRead {
+		t.Unread = 0
+	} else {
+		t.Unread = len(t.Messages)
+	}
+	thread := *t
+	m.cache.PutThread(folder, *t)
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+
+	desc = "marked read"
+	if !markRead {
+		desc = "marked unread"
+	}
+	return func() {
+		for _, id := range cmdIDs {
+			m.cancelCommand(id)
+		}
+		thread.Unread = beforeUnread
+		m.cache.PutThread(folder, thread)
+		m.LoadThreads()
+		m.BuildThreadDisplay()
+	}, desc
+}
+
+func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil || t.Unread == 0 {
+		return nil, ""
+	}
+	folder := m.ActiveFolderID()
+	beforeUnread := t.Unread
+
+	var cmdIDs []string
+	for _, msg := range t.Messages {
+		if !msg.Read {
+			cmdIDs = append(cmdIDs, m.queueCommand("mark_read", msg.ID, nil))
+		}
+	}
+	t.Unread = 0
+	thread := *t
+	m.cache.PutThread(folder, *t)
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+
+	return func() {
+		for _, id := range cmdIDs {
+			m.cancelCommand(id)
+		}
+		thread.Unread = beforeUnread
+		m.cache.PutThread(folder, thread)
+		m.LoadThreads()
+		m.BuildThreadDisplay()
+	}, "marked read"
+}
+
+func (m *Mailbox) queueCommand(action, targetID string, params map[string]string) string {
+	id := fmt.Sprintf("%s-%s-%d", action, targetID, time.Now().UnixNano())
+	if m.cache == nil {
+		return id
+	}
+	m.cache.PutCommand(cache.Command{
+		ID:        id,
+		Action:    action,
+		TargetID:  targetID,
+		Params:    params,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	})
+	return id
+}
+
+func (m *Mailbox) cancelCommand(id string) {
+	if m.cache != nil {
+		m.cache.DeleteCommand(id)
 	}
 }
 
@@ -348,25 +566,54 @@ func (m *Mailbox) ProcessPendingCommands() {
 
 // canonical folder ordering
 
-var canonicalFolderNames = map[string]string{
-	"INBOX":             "Inbox",
-	"[Gmail]/Sent Mail": "Sent",
-	"[Gmail]/Drafts":    "Drafts",
-	"[Gmail]/Starred":   "Starred",
-	"[Gmail]/Trash":     "Trash",
-	"[Gmail]/Spam":      "Spam",
-	"[Gmail]/All Mail":  "Archive",
-	"Sent Messages":     "Sent",
-	"Deleted Messages":  "Trash",
-	"Drafts":            "Drafts",
+// canonicalSuffixes maps the folder suffix (after [Gmail]/ or [Google Mail]/)
+// to its display name. standalone folder names are also included.
+var canonicalSuffixes = map[string]string{
+	"Sent Mail": "Sent",
+	"Drafts":    "Drafts",
+	"Starred":   "Starred",
+	"Trash":     "Trash",
+	"Bin":       "Trash",
+	"Spam":      "Spam",
+	"All Mail":  "Archive",
 }
 
-var canonicalOrder = []string{
-	"INBOX",
-	"[Gmail]/Sent Mail", "Sent Messages",
-	"[Gmail]/Drafts", "Drafts",
-	"[Gmail]/Starred",
-	"[Gmail]/Trash", "Deleted Messages",
+var canonicalStandalone = map[string]string{
+	"INBOX":            "Inbox",
+	"Sent Messages":    "Sent",
+	"Deleted Messages": "Trash",
+	"Drafts":           "Drafts",
+}
+
+// canonicalDisplayName returns the display name for a folder, or empty if not canonical
+func canonicalDisplayName(id string) string {
+	if name, ok := canonicalStandalone[id]; ok {
+		return name
+	}
+	for _, prefix := range []string{"[Gmail]/", "[Google Mail]/"} {
+		if strings.HasPrefix(id, prefix) {
+			suffix := strings.TrimPrefix(id, prefix)
+			if name, ok := canonicalSuffixes[suffix]; ok {
+				return name
+			}
+		}
+	}
+	return ""
+}
+
+// canonicalRank returns a sort rank for canonical folders, or -1 if not canonical
+func canonicalRank(id string) int {
+	order := []string{"Inbox", "Sent", "Drafts", "Starred", "Trash", "Spam", "Archive"}
+	name := canonicalDisplayName(id)
+	if name == "" {
+		return -1
+	}
+	for i, o := range order {
+		if name == o {
+			return i
+		}
+	}
+	return -1
 }
 
 // helpers

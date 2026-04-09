@@ -57,16 +57,19 @@ func main() {
 
 	// inbox view state
 	var (
-		folderSel  int
-		threadSel  int
-		labelsOpen bool
-		pane       int
-		frame      int
-		statusText = "Inbox"
+		folderSel   int
+		threadSel   int
+		labelsOpen  bool
+		pane        int
+		frame       int
+		statusText  = "Inbox"
+		searchQuery string
 
 		folderBorder  = White
 		threadBorder  = BrightBlack
 		previewBorder = BrightBlack
+
+		undoStack []func()
 	)
 
 	updateBorders := func() {
@@ -127,13 +130,31 @@ func main() {
 	handleEnter := func() {
 		if msg := mb.SelectedMessage(threadSel); msg != nil {
 			mb.LoadPreview(*msg, app.Size().Width)
+			mb.MarkRead(threadSel)
 			pane = 2
 			updateBorders()
 			return
 		}
 		mb.ToggleThread(threadSel)
+		mb.MarkRead(threadSel)
 		if msg := mb.LastMessage(threadSel); msg != nil {
 			mb.LoadPreview(*msg, app.Size().Width)
+		}
+	}
+
+	pushUndo := func(undo func(), desc string) {
+		if undo != nil {
+			undoStack = append(undoStack, undo)
+			statusText = desc + " — u to undo"
+		}
+	}
+
+	clampThreadSel := func() {
+		if threadSel >= mb.ThreadLen() {
+			threadSel = mb.ThreadLen() - 1
+		}
+		if threadSel < 0 {
+			threadSel = 0
 		}
 	}
 
@@ -150,13 +171,13 @@ func main() {
 			),
 			HBox.Grow(1)(
 				VBox.Grow(1).Border(BorderRounded).BorderFG(&folderBorder).Title("Folders")(
-					List(&mb.FolderNames).
+					List(mb.FolderNames()).
 						Selection(&folderSel).
 						SelectedStyle(selectedStyle).
 						Marker("  "),
 				),
 				VBox.Grow(2).Border(BorderRounded).BorderFG(&threadBorder).Title("Threads")(
-					List(&mb.ThreadRows).
+					List(mb.ThreadRows()).
 						Selection(&threadSel).
 						SelectedStyle(selectedStyle).
 						Marker("  ").
@@ -173,23 +194,23 @@ func main() {
 						}),
 				),
 				VBox.Grow(3).Border(BorderRounded).BorderFG(&previewBorder).Title("Preview")(
-					ForEach(&mb.PreviewLines, func(line *string) any {
+					ForEach(mb.PreviewLines(), func(line *string) any {
 						return Text(line)
 					}),
 				),
 			),
-			Text("q quit  h/l pane  j/k nav  enter select/expand  o expand  c compose  r reply").Dim(),
+			Text("q quit  h/l pane  j/k nav  enter open  c compose  r reply  a archive  d delete  s star  / search").Dim(),
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
 		Handle("j", func() {
 			switch pane {
 			case 0:
-				if folderSel < len(mb.FolderNames)-1 {
+				if folderSel < mb.FolderLen()-1 {
 					folderSel++
 				}
 			case 1:
-				if threadSel < len(mb.ThreadRows)-1 {
+				if threadSel < mb.ThreadLen()-1 {
 					threadSel++
 				}
 			}
@@ -229,13 +250,13 @@ func main() {
 		Handle("<Enter>", func() {
 			switch pane {
 			case 0:
-				if folderSel == mb.CanonEnd {
+				if folderSel == mb.CanonEnd() {
 					labelsOpen = !labelsOpen
 					mb.BuildFolderDisplay(labelsOpen)
 					break
 				}
 				actualIdx := folderSel
-				if folderSel > mb.CanonEnd {
+				if folderSel > mb.CanonEnd() {
 					actualIdx = folderSel - 1
 				}
 				if actualIdx >= mb.FolderCount() {
@@ -245,6 +266,7 @@ func main() {
 				mb.LoadThreads()
 				mb.BuildThreadDisplay()
 				threadSel = 0
+				undoStack = nil
 				pane = 1
 				updateBorders()
 				statusText = mb.FolderName(folderSel)
@@ -269,12 +291,108 @@ func main() {
 		}).
 		Handle("r", func() {
 			if t := mb.SelectedThread(threadSel); t != nil {
-				if mb.ThreadRows[threadSel].MsgIdx < 0 {
+				if row := mb.ThreadRowAt(threadSel); row != nil && row.MsgIdx < 0 {
 					comp.Open()
 					comp.SetupReply(*t)
 				}
 			}
+		}).
+		Handle("a", func() {
+			if pane == 1 {
+				pushUndo(mb.Archive(threadSel))
+				clampThreadSel()
+				go mb.ProcessPendingCommands()
+			}
+		}).
+		Handle("d", func() {
+			if pane == 1 {
+				pushUndo(mb.Delete(threadSel))
+				clampThreadSel()
+				go mb.ProcessPendingCommands()
+			}
+		}).
+		Handle("s", func() {
+			if pane == 1 {
+				pushUndo(mb.ToggleStar(threadSel))
+				go mb.ProcessPendingCommands()
+			}
+		}).
+		Handle("e", func() {
+			if pane == 1 {
+				pushUndo(mb.ToggleRead(threadSel))
+				go mb.ProcessPendingCommands()
+			}
+		}).
+		Handle("u", func() {
+			if pane == 1 && len(undoStack) > 0 {
+				undoStack[len(undoStack)-1]()
+				undoStack = undoStack[:len(undoStack)-1]
+				clampThreadSel()
+				if len(undoStack) > 0 {
+					statusText = fmt.Sprintf("%d undoable — u to undo", len(undoStack))
+				} else {
+					statusText = "undone"
+				}
+				go mb.ProcessPendingCommands()
+			}
+		}).
+		Handle("/", func() {
+			searchQuery = ""
+			app.HideCursor()
+			app.PushView("search")
 		})
+
+	app.View("search",
+		VBox(
+			HBox(
+				Text("/").Bold(),
+				Text(&searchQuery),
+			),
+		),
+	).
+		Handle("<CR>", func() {
+			q := searchQuery
+			searchQuery = ""
+			app.ShowCursor()
+			app.PopView()
+			if q == "" {
+				return
+			}
+			results, err := db.Search(q, 50)
+			if err != nil {
+				statusText = fmt.Sprintf("search: %v", err)
+				return
+			}
+			mb.SetSearchResults(results)
+			mb.BuildThreadDisplay()
+			threadSel = 0
+			pane = 1
+			updateBorders()
+			statusText = fmt.Sprintf("search: %q (%d)", q, len(results))
+		}).
+		Handle("<Esc>", func() {
+			searchQuery = ""
+			app.ShowCursor()
+			app.PopView()
+		}).
+		Handle("<BS>", func() {
+			if len(searchQuery) > 0 {
+				runes := []rune(searchQuery)
+				searchQuery = string(runes[:len(runes)-1])
+			}
+		}).
+		NoCounts()
+
+	if searchRouter, ok := app.ViewRouter("search"); ok {
+		searchRouter.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune != 0 && k.Mod == 0 {
+				searchQuery += string(k.Rune)
+				app.RequestRender()
+				return true
+			}
+			return false
+		})
+	}
 
 	// spinner
 	go func() {
@@ -749,6 +867,24 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				s = "Re: " + s
 			}
 			subject = s
+
+			// build document with quoted original text
+			body := lastMsg.TextBody
+			if body == "" && lastMsg.HTMLBody != "" {
+				body = lastMsg.HTMLBody // will be plain enough for quoting
+			}
+			doc := compose.NewDocument()
+			doc.Blocks = []compose.Block{
+				{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
+				{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
+			}
+			for _, line := range strings.Split(body, "\n") {
+				doc.Blocks = append(doc.Blocks, compose.Block{
+					Type: compose.BlockQuote,
+					Runs: []compose.Run{{Text: line}},
+				})
+			}
+			ed.ResetDocument(doc)
 		},
 	}
 }

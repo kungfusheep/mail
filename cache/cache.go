@@ -39,6 +39,19 @@ func New() (*Cache, error) {
 	return c, nil
 }
 
+func NewMemory() (*Cache, error) {
+	db, err := sql.Open("sqlite3", ":memory:")
+	if err != nil {
+		return nil, err
+	}
+	c := &Cache{db: db}
+	if err := c.migrate(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("migration: %w", err)
+	}
+	return c, nil
+}
+
 func (c *Cache) Close() error {
 	return c.db.Close()
 }
@@ -141,6 +154,11 @@ func (c *Cache) UpdateCommandStatus(id, status, errMsg string) error {
 		"UPDATE commands SET status = ?, error = ?, synced_at = ? WHERE id = ?",
 		status, errMsg, syncedAt, id,
 	)
+	return err
+}
+
+func (c *Cache) DeleteCommand(id string) error {
+	_, err := c.db.Exec("DELETE FROM commands WHERE id = ?", id)
 	return err
 }
 
@@ -296,6 +314,40 @@ func (c *Cache) PutThread(folder string, t provider.Thread) error {
 		"INSERT OR REPLACE INTO threads (id, folder, data, date, unread) VALUES (?, ?, ?, ?, ?)",
 		t.ID, folder, string(data), t.Date.Unix(), t.Unread,
 	)
+	return err
+}
+
+func (c *Cache) ReplaceThreads(folder string, threads []provider.Thread) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("DELETE FROM threads WHERE folder = ?", folder); err != nil {
+		return err
+	}
+
+	stmt, err := tx.Prepare("INSERT INTO threads (id, folder, data, date, unread) VALUES (?, ?, ?, ?, ?)")
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, t := range threads {
+		data, err := json.Marshal(t)
+		if err != nil {
+			return err
+		}
+		if _, err := stmt.Exec(t.ID, folder, string(data), t.Date.Unix(), t.Unread); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func (c *Cache) DeleteThread(id string) error {
+	_, err := c.db.Exec("DELETE FROM threads WHERE id = ?", id)
 	return err
 }
 
