@@ -19,6 +19,42 @@ import (
 	"github.com/kungfusheep/riffkey"
 )
 
+type AppTheme struct {
+	BG      Color
+	Bright  Color // selected item, emphasis
+	FG      Color // active pane content
+	Subtle  Color // dates, senders, secondary info
+	Dim     Color // inactive pane content
+	Muted   Color // help bar, status
+	Accent  Color
+	SelBG   Color
+	GroupBG Color
+}
+
+var themeDark = AppTheme{
+	BG:      Hex(0x1a1a1a),
+	Bright:  Hex(0xeeeeee),
+	FG:      Hex(0xb0b0b0),
+	Subtle:  Hex(0x777777),
+	Dim:     Hex(0x565656),
+	Muted:   Hex(0x3a3a3a),
+	Accent:  Hex(0xe60012),
+	SelBG:   Hex(0x2e2e2e),
+	GroupBG: Hex(0x242424),
+}
+
+var themeLight = AppTheme{
+	BG:      Hex(0xf6f6f6),
+	Bright:  Hex(0x111111),
+	FG:      Hex(0x333333),
+	Subtle:  Hex(0x777777),
+	Dim:     Hex(0xaaaaaa),
+	Muted:   Hex(0xcccccc),
+	Accent:  Hex(0xe60012),
+	SelBG:   Hex(0xe8e8e8),
+	GroupBG: Hex(0xeeeeee),
+}
+
 func main() {
 	logFile, err := os.OpenFile(
 		filepath.Join(os.TempDir(), "mail.log"),
@@ -31,6 +67,7 @@ func main() {
 	log.Println("starting mail")
 
 	app := NewApp()
+	app.SetDefaultStyle(Style{FG: themeDark.FG, BG: themeDark.BG})
 
 	db, err := cache.New()
 	if err != nil {
@@ -54,33 +91,46 @@ func main() {
 	mb.BuildFolderDisplay(false)
 	mb.LoadThreads()
 	mb.BuildThreadDisplay()
+	mb.SetSelected(0)
+
+	t := themeDark
+	_ = themeLight
 
 	// inbox view state
 	var (
 		folderSel   int
 		threadSel   int
 		labelsOpen  bool
-		pane        int
 		frame       int
 		statusText  = "Inbox"
 		searchQuery string
 
-		folderBorder  = White
-		threadBorder  = BrightBlack
-		previewBorder = BrightBlack
+		// pane styles — active uses FG, inactive uses dim
+		folderStyle     = Style{FG: t.Dim}
+		threadStyle     = Style{FG: t.FG}
+		previewStyle    = Style{FG: t.Dim}
+		folderListStyle = Style{FG: t.Dim}
+		threadListStyle = Style{FG: t.FG}
+		pane            = 1
 
 		undoStack []func()
 	)
 
-	updateBorders := func() {
-		folderBorder, threadBorder, previewBorder = BrightBlack, BrightBlack, BrightBlack
+	updateFocus := func() {
+		folderStyle = Style{FG: t.Dim}
+		threadStyle = Style{FG: t.Dim}
+		folderListStyle = Style{FG: t.Dim}
+		threadListStyle = Style{FG: t.Dim}
+		previewStyle = Style{FG: t.Dim}
 		switch pane {
 		case 0:
-			folderBorder = White
+			folderStyle = Style{FG: t.FG}
+			folderListStyle = Style{FG: t.FG}
 		case 1:
-			threadBorder = White
+			threadStyle = Style{FG: t.FG}
+			threadListStyle = Style{FG: t.FG}
 		case 2:
-			previewBorder = White
+			previewStyle = Style{FG: t.FG}
 		}
 	}
 
@@ -113,6 +163,7 @@ func main() {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
 		mb.BuildThreadDisplay()
+		mb.SetSelected(threadSel)
 		app.RequestRender()
 
 		go mb.ProcessPendingCommands()
@@ -124,6 +175,7 @@ func main() {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
 		mb.BuildThreadDisplay()
+		mb.SetSelected(threadSel)
 		app.RequestRender()
 	}
 
@@ -132,7 +184,7 @@ func main() {
 			mb.LoadPreview(*msg, app.Size().Width)
 			mb.MarkRead(threadSel)
 			pane = 2
-			updateBorders()
+			updateFocus()
 			return
 		}
 		mb.ToggleThread(threadSel)
@@ -156,50 +208,72 @@ func main() {
 		if threadSel < 0 {
 			threadSel = 0
 		}
+		mb.SetSelected(threadSel)
 	}
 
-	selectedStyle := Style{Attr: AttrInverse}
+	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
-		VBox(
-			HBox.Gap(1)(
-				Text("mail").Bold(),
-				Space(),
-				Text(&statusText).Dim(),
-				Space(),
-				Spinner(&frame).Frames(SpinnerDots),
+		VBox.PaddingTRBL(1, 2, 0, 2)(
+			HBox(
+				Text("mail").FG(t.Bright).Bold(),
+				SpaceW(2),
+				Text(&statusText).FG(t.Subtle),
 			),
-			HBox.Grow(1)(
-				VBox.Grow(1).Border(BorderRounded).BorderFG(&folderBorder).Title("Folders")(
+			SpaceH(1),
+			HBox.Grow(1).Gap(4)(
+				VBox.Grow(1).CascadeStyle(&folderStyle)(
 					List(mb.FolderNames()).
 						Selection(&folderSel).
-						SelectedStyle(selectedStyle).
-						Marker("  "),
+						Style(Animate(&folderListStyle)).
+						SelectedStyle(Style{FG: t.Bright}).
+						Marker("● ").MarkerStyle(accentMarker),
 				),
-				VBox.Grow(2).Border(BorderRounded).BorderFG(&threadBorder).Title("Threads")(
+				VBox.Grow(3).CascadeStyle(&threadStyle)(
 					List(mb.ThreadRows()).
 						Selection(&threadSel).
-						SelectedStyle(selectedStyle).
+						Style(Animate(&threadListStyle)).
+						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) any {
-							unreadStyle := Style{Attr: AttrBold}
-							readStyle := Style{}
-							dimStyle := Style{Attr: AttrDim}
-							return HBox.Gap(1)(
-								Text(&row.Label).Style(If(&row.Unread).Then(unreadStyle).Else(readStyle)),
-								Space(),
-								Text(&row.Detail).Style(If(&row.Unread).Then(readStyle).Else(dimStyle)),
-								Text(&row.Date).Dim(),
+							itemBG := If(&row.Selected).Then(t.SelBG).Else(
+								If(&row.Grouped).Then(t.GroupBG).Else(Color{}),
+							)
+							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG)(
+								HBox(
+									If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
+									SpaceW(1),
+									HBox.Grow(1)(
+										Text(&row.Label).Style(Animate(
+											If(&row.Selected).Then(
+												If(&row.Unread).
+													Then(Style{FG: t.Bright, Attr: AttrBold}).
+													Else(Style{FG: t.Bright}),
+											).Else(
+												If(&row.Unread).
+													Then(Style{FG: t.FG}).
+													Else(Style{FG: t.Subtle}),
+											)),
+										),
+									),
+									SpaceW(2),
+									Text(&row.Date).FG(t.Subtle),
+								),
+								HBox(
+									SpaceW(2),
+									Text(&row.Sender).FG(t.Subtle),
+								),
 							)
 						}),
 				),
-				VBox.Grow(3).Border(BorderRounded).BorderFG(&previewBorder).Title("Preview")(
+				VBox.Grow(3).CascadeStyle(&previewStyle)(
 					ForEach(mb.PreviewLines(), func(line *string) any {
 						return Text(line)
 					}),
 				),
 			),
-			Text("q quit  h/l pane  j/k nav  enter open  c compose  r reply  a archive  d delete  s star  / search").Dim(),
+			SpaceH(1),
+			Text("q quit · j/k nav · h/l pane · enter open · c compose · r reply · a archive · d delete · u undo · / search").FG(t.Muted),
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
@@ -212,6 +286,7 @@ func main() {
 			case 1:
 				if threadSel < mb.ThreadLen()-1 {
 					threadSel++
+					mb.SetSelected(threadSel)
 				}
 			}
 		}).
@@ -224,28 +299,29 @@ func main() {
 			case 1:
 				if threadSel > 0 {
 					threadSel--
+					mb.SetSelected(threadSel)
 				}
 			}
 		}).
 		Handle("l", func() {
 			if pane < 2 {
 				pane++
-				updateBorders()
+				updateFocus()
 			}
 		}).
 		Handle("h", func() {
 			if pane > 0 {
 				pane--
-				updateBorders()
+				updateFocus()
 			}
 		}).
 		Handle("<Tab>", func() {
 			pane = (pane + 1) % 3
-			updateBorders()
+			updateFocus()
 		}).
 		Handle("<S-Tab>", func() {
 			pane = (pane + 2) % 3
-			updateBorders()
+			updateFocus()
 		}).
 		Handle("<Enter>", func() {
 			switch pane {
@@ -266,9 +342,10 @@ func main() {
 				mb.LoadThreads()
 				mb.BuildThreadDisplay()
 				threadSel = 0
+				mb.SetSelected(0)
 				undoStack = nil
 				pane = 1
-				updateBorders()
+				updateFocus()
 				statusText = mb.FolderName(folderSel)
 				go syncThreadsFromNetwork()
 			case 1:
@@ -278,7 +355,7 @@ func main() {
 		Handle("<Escape>", func() {
 			if pane > 0 {
 				pane--
-				updateBorders()
+				updateFocus()
 			}
 		}).
 		Handle("o", func() {
@@ -345,7 +422,7 @@ func main() {
 	app.View("search",
 		VBox(
 			HBox(
-				Text("/").Bold(),
+				Text("/").FG(t.Bright).Bold(),
 				Text(&searchQuery),
 			),
 		),
@@ -366,8 +443,9 @@ func main() {
 			mb.SetSearchResults(results)
 			mb.BuildThreadDisplay()
 			threadSel = 0
+			mb.SetSelected(0)
 			pane = 1
-			updateBorders()
+			updateFocus()
 			statusText = fmt.Sprintf("search: %q (%d)", q, len(results))
 		}).
 		Handle("<Esc>", func() {
@@ -780,7 +858,9 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			})
 			fr.Handle("<C-s>", func(_ riffkey.Match) {
 				exitFields()
-				if to != "" { send() }
+				if to != "" {
+					send()
+				}
 			})
 			fr.Handle("<CR>", func(_ riffkey.Match) {
 				if showContacts && contactSel >= 0 && contactSel < len(contactResults) {
@@ -813,13 +893,19 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		})
 
 		router.Handle("<C-s>", func(_ riffkey.Match) {
-			if to != "" { send() }
+			if to != "" {
+				send()
+			}
 		})
 		router.Handle(":send<CR>", func(_ riffkey.Match) {
-			if to != "" { send() }
+			if to != "" {
+				send()
+			}
 		})
 		router.Handle(":s<CR>", func(_ riffkey.Match) {
-			if to != "" { send() }
+			if to != "" {
+				send()
+			}
 		})
 
 		// search

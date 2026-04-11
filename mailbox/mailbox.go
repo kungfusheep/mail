@@ -233,11 +233,30 @@ func (m *Mailbox) SyncThreads() error {
 func (m *Mailbox) BuildThreadDisplay() {
 	m.threadRows = nil
 	for i, t := range m.threads {
+		sender := ""
+		if len(t.Participants) > 0 {
+			var names []string
+			for _, p := range t.Participants {
+				if p.Name != "" {
+					names = append(names, p.Name)
+				} else {
+					names = append(names, p.Email)
+				}
+			}
+			sender = strings.Join(names, " · ")
+		} else if len(t.Messages) > 0 {
+			from := t.Messages[0].From
+			if from.Name != "" {
+				sender = from.Name
+			} else {
+				sender = from.Email
+			}
+		}
 		m.threadRows = append(m.threadRows, ThreadRow{
 			ThreadIdx: i,
 			MsgIdx:    -1,
-			Label:     truncate(t.Subject, 35),
-			Detail:    fmt.Sprintf("[%d]", len(t.Messages)),
+			Label:     t.Subject,
+			Sender:    sender,
 			Date:      relativeTime(t.Date),
 			Unread:    t.Unread > 0,
 		})
@@ -252,20 +271,30 @@ func (m *Mailbox) ToggleThread(sel int) {
 	if row.MsgIdx >= 0 {
 		return
 	}
+	t := m.threads[row.ThreadIdx]
+	// TODO: re-enable when we have real threading
+	// if len(t.Messages) <= 1 {
+	// 	return
+	// }
 
 	row.Expanded = !row.Expanded
-	t := m.threads[row.ThreadIdx]
+	row.Grouped = row.Expanded
+	t = m.threads[row.ThreadIdx]
 
 	if row.Expanded {
 		var msgRows []ThreadRow
 		for j, msg := range t.Messages {
+			name := msg.From.Email
+			if msg.From.Name != "" {
+				name = msg.From.Name
+			}
 			msgRows = append(msgRows, ThreadRow{
 				ThreadIdx: row.ThreadIdx,
 				MsgIdx:    j,
-				Label:     truncate(msg.From.Email, 25),
-				Detail:    truncate(msg.Subject, 20),
+				Label:     name,
 				Date:      relativeTime(msg.Date),
 				Unread:    !msg.Read,
+				Grouped:   true,
 			})
 		}
 		after := make([]ThreadRow, len(m.threadRows[sel+1:]))
@@ -656,8 +685,16 @@ type ThreadRow struct {
 	ThreadIdx int
 	MsgIdx    int // -1 for thread header, >= 0 for message
 	Label     string
-	Detail    string
+	Sender    string
 	Date      string
 	Unread    bool
 	Expanded  bool
+	Selected  bool
+	Grouped   bool
+}
+
+func (m *Mailbox) SetSelected(sel int) {
+	for i := range m.threadRows {
+		m.threadRows[i].Selected = i == sel
+	}
 }
