@@ -109,7 +109,8 @@ func main() {
 		folderStyle     = Style{FG: t.Dim}
 		threadStyle     = Style{FG: t.FG}
 		previewStyle    = Style{FG: t.Dim}
-		folderListStyle = Style{FG: t.Dim}
+		folderListStyle  = Style{FG: t.Dim}
+		folderSelStyle   = Style{FG: t.Dim}
 		threadListStyle = Style{FG: t.FG}
 		pane            = 1
 
@@ -120,12 +121,14 @@ func main() {
 		folderStyle = Style{FG: t.Dim}
 		threadStyle = Style{FG: t.Dim}
 		folderListStyle = Style{FG: t.Dim}
+		folderSelStyle = Style{FG: t.Dim}
 		threadListStyle = Style{FG: t.Dim}
 		previewStyle = Style{FG: t.Dim}
 		switch pane {
 		case 0:
 			folderStyle = Style{FG: t.FG}
 			folderListStyle = Style{FG: t.FG}
+			folderSelStyle = Style{FG: t.Bright}
 		case 1:
 			threadStyle = Style{FG: t.FG}
 			threadListStyle = Style{FG: t.FG}
@@ -211,6 +214,28 @@ func main() {
 		mb.SetSelected(threadSel)
 	}
 
+	loadFolder := func() {
+		if folderSel == mb.CanonEnd() {
+			return
+		}
+		actualIdx := folderSel
+		if folderSel > mb.CanonEnd() {
+			actualIdx = folderSel - 1
+		}
+		if actualIdx >= mb.FolderCount() {
+			return
+		}
+		mb.SelectFolder(actualIdx)
+		mb.LoadThreads()
+		mb.BuildThreadDisplay()
+		threadSel = 0
+		mb.SetSelected(0)
+		undoStack = nil
+		statusText = mb.FolderName(folderSel)
+		go syncThreadsFromNetwork()
+	}
+
+	smooth := Animate.Duration(800 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
@@ -225,43 +250,38 @@ func main() {
 				VBox.Grow(1).CascadeStyle(&folderStyle)(
 					List(mb.FolderNames()).
 						Selection(&folderSel).
-						Style(Animate(&folderListStyle)).
-						SelectedStyle(Style{FG: t.Bright}).
+						Style(smooth(&folderListStyle)).
+						SelectedStyle(smooth(&folderSelStyle)).
 						Marker("● ").MarkerStyle(accentMarker),
 				),
 				VBox.Grow(3).CascadeStyle(&threadStyle)(
 					List(mb.ThreadRows()).
 						Selection(&threadSel).
-						Style(Animate(&threadListStyle)).
+						Style(smooth(&threadListStyle)).
 						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) any {
-							itemBG := If(&row.Selected).Then(t.SelBG).Else(
-								If(&row.Grouped).Then(t.GroupBG).Else(Color{}),
-							)
+							itemBG := smooth(If(&row.Selected).Then(t.SelBG).Else(
+								If(&row.Grouped).
+									Then(t.GroupBG).
+									Else(t.BG),
+							))
 							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG)(
 								HBox(
 									If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
 									SpaceW(1),
 									HBox.Grow(1)(
-										Text(&row.Label).Style(Animate(
-											If(&row.Selected).Then(
-												If(&row.Unread).
-													Then(Style{FG: t.Bright, Attr: AttrBold}).
-													Else(Style{FG: t.Bright}),
-											).Else(
-												If(&row.Unread).
-													Then(Style{FG: t.FG}).
-													Else(Style{FG: t.Subtle}),
-											)),
-										),
+										Text(&row.Label).Style(
+											If(&row.Unread).
+												Then(Style{Attr: AttrBold}).
+												Else(Style{})),
 									),
 									SpaceW(2),
-									Text(&row.Date).FG(t.Subtle),
+									Text(&row.Date).Dim(),
 								),
 								HBox(
 									SpaceW(2),
-									Text(&row.Sender).FG(t.Subtle),
+									Text(&row.Sender).Dim(),
 								),
 							)
 						}),
@@ -282,6 +302,7 @@ func main() {
 			case 0:
 				if folderSel < mb.FolderLen()-1 {
 					folderSel++
+					loadFolder()
 				}
 			case 1:
 				if threadSel < mb.ThreadLen()-1 {
@@ -295,6 +316,7 @@ func main() {
 			case 0:
 				if folderSel > 0 {
 					folderSel--
+					loadFolder()
 				}
 			case 1:
 				if threadSel > 0 {
@@ -331,23 +353,8 @@ func main() {
 					mb.BuildFolderDisplay(labelsOpen)
 					break
 				}
-				actualIdx := folderSel
-				if folderSel > mb.CanonEnd() {
-					actualIdx = folderSel - 1
-				}
-				if actualIdx >= mb.FolderCount() {
-					break
-				}
-				mb.SelectFolder(actualIdx)
-				mb.LoadThreads()
-				mb.BuildThreadDisplay()
-				threadSel = 0
-				mb.SetSelected(0)
-				undoStack = nil
 				pane = 1
 				updateFocus()
-				statusText = mb.FolderName(folderSel)
-				go syncThreadsFromNetwork()
 			case 1:
 				handleEnter()
 			}
