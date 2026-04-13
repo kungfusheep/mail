@@ -98,8 +98,8 @@ func main() {
 
 	// inbox view state
 	var (
-		folderSel   int
-		threadSel   int
+		folderSel  int
+		threadSel  int
 		labelsOpen  bool
 		frame       int
 		statusText  = "Inbox"
@@ -235,7 +235,8 @@ func main() {
 		go syncThreadsFromNetwork()
 	}
 
-	smooth := Animate.Duration(800 * time.Millisecond).Ease(EaseOutCubic)
+	previewTV := TextView(mb.PreviewText()).Grow(1)
+	smooth := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
@@ -248,6 +249,7 @@ func main() {
 			SpaceH(1),
 			HBox.Grow(1).Gap(4)(
 				VBox.Grow(1).CascadeStyle(&folderStyle)(
+					HRule(), SpaceH(1),
 					List(mb.FolderNames()).
 						Selection(&folderSel).
 						Style(smooth(&folderListStyle)).
@@ -255,6 +257,7 @@ func main() {
 						Marker("● ").MarkerStyle(accentMarker),
 				),
 				VBox.Grow(3).CascadeStyle(&threadStyle)(
+					HRule(), SpaceH(1),
 					List(mb.ThreadRows()).
 						Selection(&threadSel).
 						Style(smooth(&threadListStyle)).
@@ -287,9 +290,8 @@ func main() {
 						}),
 				),
 				VBox.Grow(3).CascadeStyle(&previewStyle)(
-					ForEach(mb.PreviewLines(), func(line *string) any {
-						return Text(line)
-					}),
+					HRule(), SpaceH(1),
+					previewTV,
 				),
 			),
 			SpaceH(1),
@@ -309,6 +311,8 @@ func main() {
 					threadSel++
 					mb.SetSelected(threadSel)
 				}
+			case 2:
+				previewTV.Layer().ScrollDown(1)
 			}
 		}).
 		Handle("k", func() {
@@ -323,6 +327,8 @@ func main() {
 					threadSel--
 					mb.SetSelected(threadSel)
 				}
+			case 2:
+				previewTV.Layer().ScrollUp(1)
 			}
 		}).
 		Handle("l", func() {

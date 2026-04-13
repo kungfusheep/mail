@@ -27,6 +27,7 @@ type Mailbox struct {
 	threadRows []ThreadRow
 
 	previewLines []string
+	previewText  string
 }
 
 // read-only pointers for glyph view binding
@@ -36,6 +37,7 @@ func (m *Mailbox) PreviewLines() *[]string  { return &m.previewLines }
 func (m *Mailbox) CanonEnd() int            { return m.canonEnd }
 func (m *Mailbox) FolderLen() int           { return len(m.folderNames) }
 func (m *Mailbox) ThreadLen() int           { return len(m.threadRows) }
+func (m *Mailbox) PreviewText() *string     { return &m.previewText }
 
 func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
 	if sel >= 0 && sel < len(m.threadRows) {
@@ -381,6 +383,7 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 	for _, line := range strings.Split(body, "\n") {
 		m.previewLines = append(m.previewLines, line)
 	}
+	m.previewText = strings.Join(m.previewLines, "\n")
 }
 
 // actions — each returns an undo closure + description
