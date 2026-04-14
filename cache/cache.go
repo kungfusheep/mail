@@ -103,6 +103,12 @@ func (c *Cache) migrate() error {
 		);
 		CREATE INDEX IF NOT EXISTS idx_commands_status ON commands(status);
 
+		CREATE TABLE IF NOT EXISTS sent_messages (
+			message_id TEXT PRIMARY KEY,
+			data TEXT NOT NULL,
+			date INTEGER NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS contacts (
 			email TEXT PRIMARY KEY,
 			name TEXT NOT NULL DEFAULT '',
@@ -228,6 +234,44 @@ func (c *Cache) SearchContacts(query string) ([]provider.Address, error) {
 		results = append(results, a)
 	}
 	return results, rows.Err()
+}
+
+// sent messages — stored locally for threading
+
+func (c *Cache) PutSentMessage(msg provider.Message) error {
+	data, err := json.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = c.db.Exec(
+		"INSERT OR REPLACE INTO sent_messages (message_id, data, date) VALUES (?, ?, ?)",
+		msg.MessageID, string(data), msg.Date.Unix(),
+	)
+	return err
+}
+
+func (c *Cache) GetSentMessages(limit int) ([]provider.Message, error) {
+	rows, err := c.db.Query(
+		"SELECT data FROM sent_messages ORDER BY date DESC LIMIT ?", limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var msgs []provider.Message
+	for rows.Next() {
+		var data string
+		if err := rows.Scan(&data); err != nil {
+			return nil, err
+		}
+		var msg provider.Message
+		if err := json.Unmarshal([]byte(data), &msg); err != nil {
+			return nil, err
+		}
+		msgs = append(msgs, msg)
+	}
+	return msgs, rows.Err()
 }
 
 // sync state

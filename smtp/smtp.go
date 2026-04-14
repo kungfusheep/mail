@@ -1,6 +1,7 @@
 package smtp
 
 import (
+	"crypto/rand"
 	"crypto/tls"
 	"fmt"
 	"net"
@@ -25,7 +26,11 @@ func New(cfg Config) *SMTP {
 	return &SMTP{config: cfg}
 }
 
-func (s *SMTP) Send(msg provider.Message) error {
+// Send sends a message via SMTP. It generates a Message-ID and sets it on msg
+// before sending, so the caller can use msg.MessageID to track the sent message.
+func (s *SMTP) Send(msg *provider.Message) error {
+	// generate Message-ID so we can track this message
+	msg.MessageID = generateMessageID(s.config.Email)
 	host, _, err := net.SplitHostPort(s.config.Server)
 	if err != nil {
 		return fmt.Errorf("parsing server address: %w", err)
@@ -49,7 +54,7 @@ func (s *SMTP) Send(msg provider.Message) error {
 		return fmt.Errorf("no recipients")
 	}
 
-	raw := buildMessage(s.config.Email, msg)
+	raw := buildMessage(s.config.Email, *msg)
 
 	// connect with STARTTLS
 	conn, err := net.DialTimeout("tcp", s.config.Server, 10*time.Second)
@@ -110,6 +115,9 @@ func buildMessage(from string, msg provider.Message) string {
 	}
 	b.WriteString("Subject: " + msg.Subject + "\r\n")
 	b.WriteString("Date: " + time.Now().Format(time.RFC1123Z) + "\r\n")
+	if msg.MessageID != "" {
+		b.WriteString("Message-ID: <" + msg.MessageID + ">\r\n")
+	}
 
 	if msg.InReplyTo != "" {
 		b.WriteString("In-Reply-To: " + msg.InReplyTo + "\r\n")
@@ -148,4 +156,14 @@ func formatAddresses(addrs []provider.Address) string {
 		parts = append(parts, a.String())
 	}
 	return strings.Join(parts, ", ")
+}
+
+func generateMessageID(email string) string {
+	b := make([]byte, 16)
+	rand.Read(b)
+	domain := email
+	if at := strings.LastIndex(email, "@"); at >= 0 {
+		domain = email[at+1:]
+	}
+	return fmt.Sprintf("%x.%x@%s", b[:8], b[8:], domain)
 }

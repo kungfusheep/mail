@@ -16,6 +16,7 @@ import (
 type Mailbox struct {
 	cache *cache.Cache
 	imap  *imapprov.IMAP
+	email string
 
 	folders []provider.Folder
 	active  int
@@ -52,8 +53,8 @@ func (m *Mailbox) SetSearchResults(results []provider.Thread) {
 	m.BuildThreadDisplay()
 }
 
-func New(c *cache.Cache) *Mailbox {
-	return &Mailbox{cache: c}
+func New(c *cache.Cache, email string) *Mailbox {
+	return &Mailbox{cache: c, email: email}
 }
 
 func (m *Mailbox) SetIMAP(imap *imapprov.IMAP) {
@@ -210,6 +211,35 @@ func (m *Mailbox) LoadThreads() {
 	}
 }
 
+func (m *Mailbox) SyncSent() {
+	if m.imap == nil || m.cache == nil {
+		return
+	}
+	sentFolders := []string{"[Google Mail]/Sent Mail", "[Gmail]/Sent Mail", "Sent Messages"}
+	for _, sf := range sentFolders {
+		result, err := m.imap.ListThreads(provider.ListOptions{Folder: sf, MaxResults: 25})
+		if err != nil {
+			continue
+		}
+		// fetch full body for each sent message (we're still in the Sent folder)
+		for _, t := range result.Threads {
+			for _, msg := range t.Messages {
+				if msg.TextBody == "" && msg.HTMLBody == "" {
+					full, err := m.imap.GetMessage(msg.ID)
+					if err == nil {
+						msg = full
+					}
+				}
+				msg.Read = true
+				m.cache.PutSentMessage(msg)
+			}
+		}
+		// re-select original folder
+		m.imap.ListThreads(provider.ListOptions{Folder: m.ActiveFolderID(), MaxResults: 1})
+		return
+	}
+}
+
 func (m *Mailbox) SyncThreads() error {
 	if m.imap == nil {
 		return fmt.Errorf("not connected")
@@ -225,11 +255,87 @@ func (m *Mailbox) SyncThreads() error {
 	if err != nil {
 		return err
 	}
+
+	// merge cached sent messages into threads for complete conversations
 	if m.cache != nil {
+		result.Threads = m.mergeWithSentMessages(result.Threads)
 		m.cache.ReplaceThreads(id, result.Threads)
 	}
 	m.LoadThreads()
 	return nil
+}
+
+func (m *Mailbox) mergeWithSentMessages(threads []provider.Thread) []provider.Thread {
+	sent, err := m.cache.GetSentMessages(50)
+	if err != nil || len(sent) == 0 {
+		return threads
+	}
+
+	// build set of known MessageIDs across all threads
+	known := make(map[string]bool)
+	for _, t := range threads {
+		for _, msg := range t.Messages {
+			if msg.MessageID != "" {
+				known[msg.MessageID] = true
+			}
+		}
+	}
+
+	// match sent messages to threads by InReplyTo OR normalized subject
+	for i := range threads {
+		threadSubj := normalizeSubject(threads[i].Subject)
+		for j := range sent {
+			if known[sent[j].MessageID] {
+				continue
+			}
+			sentSubj := normalizeSubject(sent[j].Subject)
+
+			matched := false
+			// check InReplyTo links
+			for _, msg := range threads[i].Messages {
+				if msg.InReplyTo == sent[j].MessageID || sent[j].InReplyTo == msg.MessageID {
+					matched = true
+					break
+				}
+			}
+			// fallback: subject match within 7 days of thread date
+			if !matched && sentSubj != "" && sentSubj == threadSubj {
+				diff := threads[i].Date.Sub(sent[j].Date)
+				if diff < 0 {
+					diff = -diff
+				}
+				if diff < 7*24*time.Hour {
+					matched = true
+				}
+			}
+			if matched {
+				threads[i].Messages = append(threads[i].Messages, sent[j])
+				known[sent[j].MessageID] = true
+			}
+		}
+	}
+
+	merged := 0
+	for _, t := range threads {
+		if len(t.Messages) > 1 {
+			merged++
+			log.Printf("merge: thread %q now has %d messages", t.Subject, len(t.Messages))
+		}
+	}
+	log.Printf("merge: %d sent messages checked, %d threads enriched", len(sent), merged)
+
+	// sort messages within each thread chronologically
+	for i := range threads {
+		sort.Slice(threads[i].Messages, func(a, b int) bool {
+			return threads[i].Messages[a].Date.Before(threads[i].Messages[b].Date)
+		})
+		// update thread metadata
+		if len(threads[i].Messages) > 0 {
+			threads[i].Date = threads[i].Messages[len(threads[i].Messages)-1].Date
+		}
+	}
+
+	return threads
 }
 
 func (m *Mailbox) BuildThreadDisplay() {
@@ -285,7 +391,8 @@ func (m *Mailbox) ToggleThread(sel int) {
 
 	if row.Expanded {
 		var msgRows []ThreadRow
-		for j, msg := range t.Messages {
+		for j := len(t.Messages) - 1; j >= 0; j-- {
+			msg := t.Messages[j]
 			name := msg.From.Email
 			if msg.From.Name != "" {
 				name = msg.From.Name
@@ -349,11 +456,112 @@ func (m *Mailbox) LastMessage(sel int) *provider.Message {
 
 // preview
 
+func (m *Mailbox) LoadConversation(sel int, width int) {
+	t := m.SelectedThread(sel)
+	if t == nil || len(t.Messages) == 0 {
+		return
+	}
+
+	cols := 72
+	if width > 0 {
+		cols = width/2 - 4
+		if cols < 40 {
+			cols = 40
+		}
+	}
+
+	myEmail := m.email
+
+	var lines []string
+	for i, msg := range t.Messages {
+		msg = m.resolveBody(msg, cols)
+
+		// sender — "You" for sent messages, name for received
+		from := msg.From.Email
+		if msg.From.Name != "" {
+			from = msg.From.Name
+		}
+		if myEmail != "" && strings.EqualFold(msg.From.Email, myEmail) {
+			from = "You"
+		}
+
+		// header with date
+		lines = append(lines, "")
+		lines = append(lines, fmt.Sprintf("%s · %s", from, msg.Date.Format("2 Jan 15:04")))
+		lines = append(lines, "")
+
+		// body — strip quoted text since we show each message separately
+		body := msg.TextBody
+		if msg.HTMLBody != "" {
+			body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, cols)
+		} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
+			body = preview.RenderHTML(body, "", cols)
+		}
+		body = preview.StripQuoted(body)
+		body = strings.TrimSpace(body)
+		if body != "" {
+			for _, line := range strings.Split(body, "\n") {
+				lines = append(lines, "  "+line)
+			}
+		}
+
+		// separator between messages
+		if i < len(t.Messages)-1 {
+			lines = append(lines, "")
+			lines = append(lines, strings.Repeat("·", min(cols/2, 20)))
+		}
+	}
+	lines = append(lines, "")
+
+	m.previewLines = lines
+	m.previewText = strings.Join(lines, "\n")
+}
+
+func (m *Mailbox) resolveBody(msg provider.Message, cols int) provider.Message {
+	if msg.TextBody == "" && msg.HTMLBody == "" {
+		if m.cache != nil && msg.MessageID != "" {
+			sent, err := m.cache.GetSentMessages(100)
+			if err == nil {
+				for _, s := range sent {
+					if s.MessageID == msg.MessageID && (s.TextBody != "" || s.HTMLBody != "") {
+						msg.TextBody = s.TextBody
+						msg.HTMLBody = s.HTMLBody
+						break
+					}
+				}
+			}
+		}
+		if msg.TextBody == "" && msg.HTMLBody == "" && m.imap != nil {
+			full, err := m.imap.GetMessage(msg.ID)
+			if err == nil {
+				msg = full
+			}
+		}
+	}
+	return msg
+}
+
 func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
-	if msg.TextBody == "" && msg.HTMLBody == "" && m.imap != nil {
-		full, err := m.imap.GetMessage(msg.ID)
-		if err == nil {
-			msg = full
+	if msg.TextBody == "" && msg.HTMLBody == "" {
+		// check cache for sent message body first
+		if m.cache != nil && msg.MessageID != "" {
+			sent, err := m.cache.GetSentMessages(100)
+			if err == nil {
+				for _, s := range sent {
+					if s.MessageID == msg.MessageID && (s.TextBody != "" || s.HTMLBody != "") {
+						msg.TextBody = s.TextBody
+						msg.HTMLBody = s.HTMLBody
+						break
+					}
+				}
+			}
+		}
+		// fall back to IMAP fetch
+		if msg.TextBody == "" && msg.HTMLBody == "" && m.imap != nil {
+			full, err := m.imap.GetMessage(msg.ID)
+			if err == nil {
+				msg = full
+			}
 		}
 	}
 
@@ -393,8 +601,13 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	if t == nil {
 		return nil, ""
 	}
+	dest := m.folderIDByDisplayName("Archive")
+	if dest == "" {
+		log.Println("archive: no archive folder found")
+		return nil, ""
+	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdID := m.queueCommand("archive", t.ID, nil)
+	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
 	m.cache.DeleteThread(t.ID)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
@@ -412,8 +625,13 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 	if t == nil {
 		return nil, ""
 	}
+	dest := m.folderIDByDisplayName("Trash")
+	if dest == "" {
+		log.Println("delete: no trash folder found")
+		return nil, ""
+	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdID := m.queueCommand("delete", t.ID, nil)
+	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
 	m.cache.DeleteThread(t.ID)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
@@ -578,10 +796,6 @@ func (m *Mailbox) ProcessPendingCommands() {
 			cmdErr = m.imap.Star([]string{cmd.TargetID}, true)
 		case "unstar":
 			cmdErr = m.imap.Star([]string{cmd.TargetID}, false)
-		case "delete":
-			cmdErr = m.imap.Delete([]string{cmd.TargetID})
-		case "archive":
-			cmdErr = m.imap.Archive([]string{cmd.TargetID})
 		case "move":
 			if folder, ok := cmd.Params["folder"]; ok {
 				cmdErr = m.imap.Move([]string{cmd.TargetID}, folder)
@@ -648,7 +862,35 @@ func canonicalRank(id string) int {
 	return -1
 }
 
+// folderIDByDisplayName returns the raw IMAP folder ID for a canonical display name
+// (e.g. "Trash" → "[Google Mail]/Bin", "Archive" → "[Google Mail]/All Mail")
+func (m *Mailbox) folderIDByDisplayName(display string) string {
+	for _, f := range m.folders {
+		if canonicalDisplayName(f.ID) == display {
+			return f.ID
+		}
+	}
+	return ""
+}
+
 // helpers
+
+func normalizeSubject(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		lower := strings.ToLower(s)
+		if strings.HasPrefix(lower, "re:") {
+			s = strings.TrimSpace(s[3:])
+		} else if strings.HasPrefix(lower, "fwd:") {
+			s = strings.TrimSpace(s[4:])
+		} else if strings.HasPrefix(lower, "fw:") {
+			s = strings.TrimSpace(s[3:])
+		} else {
+			break
+		}
+	}
+	return strings.ToLower(s)
+}
 
 func truncate(s string, max int) string {
 	if len(s) <= max {

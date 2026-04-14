@@ -18,6 +18,12 @@ func testCache(t *testing.T) *cache.Cache {
 	return c
 }
 
+var testFolders = []provider.Folder{
+	{ID: "INBOX", Name: "INBOX"},
+	{ID: "[Google Mail]/Bin", Name: "Bin"},
+	{ID: "[Google Mail]/All Mail", Name: "All Mail"},
+}
+
 func testMailbox(t *testing.T, folders []provider.Folder, threads []provider.Thread) *Mailbox {
 	t.Helper()
 	c := testCache(t)
@@ -25,7 +31,7 @@ func testMailbox(t *testing.T, folders []provider.Folder, threads []provider.Thr
 	if len(threads) > 0 && len(folders) > 0 {
 		c.ReplaceThreads(folders[0].ID, threads)
 	}
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	if len(folders) > 0 {
@@ -106,7 +112,7 @@ func TestBuildFolderDisplay_FiltersSystemFolders(t *testing.T) {
 		{ID: "[Google Mail]", Name: "[Google Mail]"},
 		{ID: "MyLabel", Name: "MyLabel"},
 	})
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(true)
 
@@ -129,7 +135,7 @@ func TestBuildFolderDisplay_LabelsToggle(t *testing.T) {
 		{ID: "MyLabel", Name: "MyLabel"},
 		{ID: "Work", Name: "Work"},
 	})
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 
 	mb.BuildFolderDisplay(false)
@@ -152,7 +158,7 @@ func TestBuildFolderDisplay_RepeatedCallsPreserveLabels(t *testing.T) {
 		{ID: "INBOX", Name: "INBOX"},
 		{ID: "MyLabel", Name: "MyLabel"},
 	})
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 
 	mb.BuildFolderDisplay(true)
@@ -271,9 +277,10 @@ func TestSelectedMessage_AfterExpand(t *testing.T) {
 	}
 
 	mb.ToggleThread(0)
-	msg := mb.SelectedMessage(2)
+	// newest first: row 1 = m2, row 2 = m1
+	msg := mb.SelectedMessage(1)
 	if msg == nil {
-		t.Fatal("expected message at row 2")
+		t.Fatal("expected message at row 1")
 	}
 	if msg.ID != "m2" {
 		t.Errorf("message ID = %q, want m2", msg.ID)
@@ -285,14 +292,14 @@ func TestSelectedMessage_AfterExpand(t *testing.T) {
 func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
-	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
 		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
 		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
 	})
 
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -306,8 +313,11 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	}
 
 	cmds, _ := c.PendingCommands()
-	if len(cmds) != 1 || cmds[0].Action != "archive" || cmds[0].TargetID != "t2" {
-		t.Errorf("pending commands = %v, want archive t2", cmds)
+	if len(cmds) != 1 || cmds[0].Action != "move" || cmds[0].TargetID != "t2" {
+		t.Errorf("pending commands = %v, want move t2", cmds)
+	}
+	if cmds[0].Params["folder"] != "[Google Mail]/All Mail" {
+		t.Errorf("move folder = %q, want [Google Mail]/All Mail", cmds[0].Params["folder"])
 	}
 
 	// undo should restore the thread
@@ -324,7 +334,7 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 func TestToggleRead_UpdatesDisplay(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
-	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "unread", Date: now, Unread: 2, Messages: []provider.Message{
 			{ID: "m1", Read: false},
@@ -332,7 +342,7 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 		}},
 	})
 
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -367,7 +377,7 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 func TestDelete_WithExpandedThread(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
-	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "has messages", Date: now, Messages: []provider.Message{
 			{ID: "m1", From: provider.Address{Email: "a@x.com"}, Date: now},
@@ -376,7 +386,7 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 		{ID: "t2", Subject: "other", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m3"}}},
 	})
 
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -396,14 +406,14 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 func TestUndo_MultipleDeletes(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
-	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
 		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
 		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
 	})
 
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -436,13 +446,13 @@ func TestUndo_MultipleDeletes(t *testing.T) {
 func TestDelete_PersistsThroughReload(t *testing.T) {
 	c := testCache(t)
 	now := time.Now()
-	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "keep", Date: now},
 		{ID: "t2", Subject: "delete me", Date: now.Add(-time.Hour)},
 	})
 
-	mb := New(c)
+	mb := New(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -452,7 +462,7 @@ func TestDelete_PersistsThroughReload(t *testing.T) {
 	mb.Delete(1) // undo not used — committed
 
 	// simulate restart
-	mb2 := New(c)
+	mb2 := New(c, "test@example.com")
 	mb2.LoadFolders()
 	mb2.BuildFolderDisplay(false)
 	mb2.SelectFolder(0)

@@ -74,12 +74,12 @@ func main() {
 		log.Fatal(err)
 	}
 
-	mb := mailbox.New(db)
-
 	cfg, err := imapprov.LoadConfig()
 	if err != nil {
 		log.Fatal(err)
 	}
+
+	mb := mailbox.New(db, cfg.Email)
 	smtp := smtpprov.New(smtpprov.Config{
 		Server:   cfg.SMTPServer,
 		Email:    cfg.Email,
@@ -162,6 +162,9 @@ func main() {
 		mb.BuildFolderDisplay(labelsOpen)
 		app.RequestRender()
 
+		mb.SyncSent()
+		mb.ProcessPendingCommands()
+
 		if err := mb.SyncThreads(); err != nil {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
@@ -169,17 +172,21 @@ func main() {
 		mb.SetSelected(threadSel)
 		app.RequestRender()
 
-		go mb.ProcessPendingCommands()
 		go cacheContacts(db)
 	}()
 
 	syncThreadsFromNetwork := func() {
+		mb.ProcessPendingCommands()
 		if err := mb.SyncThreads(); err != nil {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
 		app.RequestRender()
+	}
+
+	loadPreview := func() {
+		mb.LoadConversation(threadSel, app.Size().Width)
 	}
 
 	handleEnter := func() {
@@ -192,9 +199,7 @@ func main() {
 		}
 		mb.ToggleThread(threadSel)
 		mb.MarkRead(threadSel)
-		if msg := mb.LastMessage(threadSel); msg != nil {
-			mb.LoadPreview(*msg, app.Size().Width)
-		}
+		loadPreview()
 	}
 
 	pushUndo := func(undo func(), desc string) {
@@ -236,7 +241,7 @@ func main() {
 	}
 
 	previewTV := TextView(mb.PreviewText()).Grow(1)
-	smooth := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
+	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
@@ -252,19 +257,19 @@ func main() {
 					HRule(), SpaceH(1),
 					List(mb.FolderNames()).
 						Selection(&folderSel).
-						Style(smooth(&folderListStyle)).
-						SelectedStyle(smooth(&folderSelStyle)).
+						Style(fade(&folderListStyle)).
+						SelectedStyle(fade(&folderSelStyle)).
 						Marker("● ").MarkerStyle(accentMarker),
 				),
 				VBox.Grow(3).CascadeStyle(&threadStyle)(
 					HRule(), SpaceH(1),
 					List(mb.ThreadRows()).
 						Selection(&threadSel).
-						Style(smooth(&threadListStyle)).
+						Style(fade(&threadListStyle)).
 						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) any {
-							itemBG := smooth(If(&row.Selected).Then(t.SelBG).Else(
+							itemBG := fade(If(&row.Selected).Then(t.SelBG).Else(
 								If(&row.Grouped).
 									Then(t.GroupBG).
 									Else(t.BG),
@@ -310,6 +315,7 @@ func main() {
 				if threadSel < mb.ThreadLen()-1 {
 					threadSel++
 					mb.SetSelected(threadSel)
+					loadPreview()
 				}
 			case 2:
 				previewTV.Layer().ScrollDown(1)
@@ -326,6 +332,7 @@ func main() {
 				if threadSel > 0 {
 					threadSel--
 					mb.SetSelected(threadSel)
+					loadPreview()
 				}
 			case 2:
 				previewTV.Layer().ScrollUp(1)
@@ -558,7 +565,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 		go func() {
 			log.Println("sendMessage: sending via smtp...")
-			err := smtp.Send(msg)
+			err := smtp.Send(&msg)
 			showSending = false
 			if err != nil {
 				log.Printf("sendMessage: failed: %v", err)
@@ -566,7 +573,13 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				app.RequestRender()
 				return
 			}
-			log.Printf("sendMessage: sent to %s", to)
+			// save sent message metadata to cache for threading
+			msg.Date = time.Now()
+			msg.Read = true
+			if db != nil {
+				db.PutSentMessage(msg)
+			}
+			log.Printf("sendMessage: sent to %s (msgid=%s)", to, msg.MessageID)
 			*statusText = fmt.Sprintf("sent to %s", to)
 			reset()
 			app.HideCursor()
