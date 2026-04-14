@@ -246,6 +246,7 @@ func main() {
 
 	app.View("main",
 		VBox.PaddingTRBL(1, 2, 0, 2)(
+			SpaceH(1),
 			HBox(
 				Text("mail").FG(t.Bright).Bold(),
 				SpaceW(2),

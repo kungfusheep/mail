@@ -32,7 +32,7 @@ type Mailbox struct {
 }
 
 // read-only pointers for glyph view binding
-func (m *Mailbox) FolderNames() *[]string  { return &m.folderNames }
+func (m *Mailbox) FolderNames() *[]string   { return &m.folderNames }
 func (m *Mailbox) ThreadRows() *[]ThreadRow { return &m.threadRows }
 func (m *Mailbox) PreviewLines() *[]string  { return &m.previewLines }
 func (m *Mailbox) CanonEnd() int            { return m.canonEnd }
@@ -497,6 +497,7 @@ func (m *Mailbox) LoadConversation(sel int, width int) {
 		} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
 			body = preview.RenderHTML(body, "", cols)
 		}
+		body = preview.Sanitize(body)
 		body = preview.StripQuoted(body)
 		body = strings.TrimSpace(body)
 		if body != "" {
@@ -508,7 +509,7 @@ func (m *Mailbox) LoadConversation(sel int, width int) {
 		// separator between messages
 		if i < len(t.Messages)-1 {
 			lines = append(lines, "")
-			lines = append(lines, strings.Repeat("·", min(cols/2, 20)))
+			// lines = append(lines, strings.Repeat("·", min(cols/2, 20)))
 		}
 	}
 	lines = append(lines, "")
@@ -588,6 +589,7 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 	} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
 		body = preview.RenderHTML(body, "", cols)
 	}
+	body = preview.Sanitize(body)
 	for _, line := range strings.Split(body, "\n") {
 		m.previewLines = append(m.previewLines, line)
 	}
