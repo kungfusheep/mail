@@ -15,6 +15,9 @@ import (
 	"github.com/emersion/go-imap/v2/imapclient"
 	"github.com/emersion/go-message/mail"
 
+	// register charset decoders (iso-8859-1 etc.) for go-message
+	_ "github.com/emersion/go-message/charset"
+
 	"github.com/kungfusheep/mail/provider"
 )
 
@@ -138,6 +141,14 @@ func (im *IMAP) ListFolders() ([]provider.Folder, error) {
 		}
 		return folders, nil
 	})
+}
+
+func (im *IMAP) SelectFolder(folder string) error {
+	_, err := withRetry(im, func() (struct{}, error) {
+		_, err := im.client.Select(folder, nil).Wait()
+		return struct{}{}, err
+	})
+	return err
 }
 
 func (im *IMAP) ListThreads(opts provider.ListOptions) (provider.ListResult, error) {

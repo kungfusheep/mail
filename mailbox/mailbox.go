@@ -29,6 +29,8 @@ type Mailbox struct {
 
 	previewLines []string
 	previewText  string
+
+	conversation []ConversationMessage
 }
 
 // read-only pointers for glyph view binding
@@ -38,7 +40,8 @@ func (m *Mailbox) PreviewLines() *[]string  { return &m.previewLines }
 func (m *Mailbox) CanonEnd() int            { return m.canonEnd }
 func (m *Mailbox) FolderLen() int           { return len(m.folderNames) }
 func (m *Mailbox) ThreadLen() int           { return len(m.threadRows) }
-func (m *Mailbox) PreviewText() *string     { return &m.previewText }
+func (m *Mailbox) PreviewText() *string                    { return &m.previewText }
+func (m *Mailbox) ConversationMessages() *[]ConversationMessage { return &m.conversation }
 
 func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
 	if sel >= 0 && sel < len(m.threadRows) {
@@ -84,10 +87,10 @@ func (m *Mailbox) SyncFolders() error {
 	for _, f := range folders {
 		log.Printf("folder: id=%q name=%q unread=%d total=%d", f.ID, f.Name, f.Unread, f.Total)
 	}
-	m.folders = folders
 	if m.cache != nil {
 		m.cache.PutFolders(folders)
 	}
+	m.LoadFolders()
 	return nil
 }
 
@@ -235,7 +238,7 @@ func (m *Mailbox) SyncSent() {
 			}
 		}
 		// re-select original folder
-		m.imap.ListThreads(provider.ListOptions{Folder: m.ActiveFolderID(), MaxResults: 1})
+		m.imap.SelectFolder(m.ActiveFolderID())
 		return
 	}
 }
@@ -259,10 +262,43 @@ func (m *Mailbox) SyncThreads() error {
 	// merge cached sent messages into threads for complete conversations
 	if m.cache != nil {
 		result.Threads = m.mergeWithSentMessages(result.Threads)
+		m.preserveCachedBodies(id, result.Threads)
 		m.cache.ReplaceThreads(id, result.Threads)
 	}
 	m.LoadThreads()
 	return nil
+}
+
+// preserveCachedBodies copies previously-fetched message bodies from the
+// cache onto fresh threads so they aren't lost on re-sync.
+func (m *Mailbox) preserveCachedBodies(folder string, threads []provider.Thread) {
+	old, err := m.cache.GetThreads(folder, 100)
+	if err != nil || len(old) == 0 {
+		return
+	}
+
+	// build lookup: message ID → cached body
+	type body struct{ text, html string }
+	bodies := make(map[string]body)
+	for _, t := range old {
+		for _, msg := range t.Messages {
+			if msg.MessageID != "" && (msg.TextBody != "" || msg.HTMLBody != "") {
+				bodies[msg.MessageID] = body{msg.TextBody, msg.HTMLBody}
+			}
+		}
+	}
+
+	for i := range threads {
+		for j := range threads[i].Messages {
+			msg := &threads[i].Messages[j]
+			if msg.TextBody == "" && msg.HTMLBody == "" && msg.MessageID != "" {
+				if b, ok := bodies[msg.MessageID]; ok {
+					msg.TextBody = b.text
+					msg.HTMLBody = b.html
+				}
+			}
+		}
+	}
 }
 
 func (m *Mailbox) mergeWithSentMessages(threads []provider.Thread) []provider.Thread {
@@ -456,90 +492,132 @@ func (m *Mailbox) LastMessage(sel int) *provider.Message {
 
 // preview
 
-func (m *Mailbox) LoadConversation(sel int, width int) {
+// LoadConversation populates the conversation slice from the selected thread.
+// Bodies available in cache are included immediately. Missing bodies are
+// fetched from IMAP in the background; onUpdate is called when they arrive.
+func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 	t := m.SelectedThread(sel)
 	if t == nil || len(t.Messages) == 0 {
+		m.conversation = m.conversation[:0]
 		return
 	}
 
-	cols := 72
-	if width > 0 {
-		cols = width/2 - 4
-		if cols < 40 {
-			cols = 40
+	m.conversation = m.conversation[:0]
+	var needFetch []int // indices of messages with no body
+
+	for i := range t.Messages {
+		msg := t.Messages[i]
+		// check sent cache (sync, fast)
+		if msg.TextBody == "" && msg.HTMLBody == "" {
+			msg = m.resolveCachedBody(msg)
+			if msg.TextBody != t.Messages[i].TextBody || msg.HTMLBody != t.Messages[i].HTMLBody {
+				t.Messages[i].TextBody = msg.TextBody
+				t.Messages[i].HTMLBody = msg.HTMLBody
+			}
 		}
-	}
 
-	myEmail := m.email
-
-	var lines []string
-	for i, msg := range t.Messages {
-		msg = m.resolveBody(msg, cols)
-
-		// sender — "You" for sent messages, name for received
 		from := msg.From.Email
 		if msg.From.Name != "" {
 			from = msg.From.Name
 		}
-		if myEmail != "" && strings.EqualFold(msg.From.Email, myEmail) {
+		isMe := m.email != "" && strings.EqualFold(msg.From.Email, m.email)
+		if isMe {
 			from = "You"
 		}
 
-		// header with date
-		lines = append(lines, "")
-		lines = append(lines, fmt.Sprintf("%s · %s", from, msg.Date.Format("2 Jan 15:04")))
-		lines = append(lines, "")
+		body := m.renderBody(msg)
 
-		// body — strip quoted text since we show each message separately
-		body := msg.TextBody
-		if msg.HTMLBody != "" {
-			body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, cols)
-		} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
-			body = preview.RenderHTML(body, "", cols)
-		}
-		body = preview.Sanitize(body)
-		body = preview.StripQuoted(body)
-		body = strings.TrimSpace(body)
-		if body != "" {
-			for _, line := range strings.Split(body, "\n") {
-				lines = append(lines, "  "+line)
-			}
-		}
+		m.conversation = append(m.conversation, ConversationMessage{
+			Sender: from,
+			Date:   msg.Date.Format("2 Jan 15:04"),
+			Body:   body,
+			IsMe:   isMe,
+		})
 
-		// separator between messages
-		if i < len(t.Messages)-1 {
-			lines = append(lines, "")
-			// lines = append(lines, strings.Repeat("·", min(cols/2, 20)))
+		if msg.TextBody == "" && msg.HTMLBody == "" {
+			needFetch = append(needFetch, i)
 		}
 	}
-	lines = append(lines, "")
 
-	m.previewLines = lines
-	m.previewText = strings.Join(lines, "\n")
+	// async fetch missing bodies from IMAP
+	if len(needFetch) > 0 && m.imap != nil && onUpdate != nil {
+		thread := t
+		folder := m.ActiveFolderID()
+		go func() {
+			// select the right folder so UIDs are valid
+			if err := m.imap.SelectFolder(folder); err != nil {
+				log.Printf("conversation: failed to select %s: %v", folder, err)
+				return
+			}
+			changed := false
+			for _, i := range needFetch {
+				full, err := m.imap.GetMessage(thread.Messages[i].ID)
+				if err != nil {
+					continue
+				}
+				// cache first, then update memory
+				thread.Messages[i].TextBody = full.TextBody
+				thread.Messages[i].HTMLBody = full.HTMLBody
+				changed = true
+			}
+			if changed {
+				if m.cache != nil {
+					m.cache.PutThread(folder, *thread)
+				}
+				// update conversation display from cached data
+				for _, i := range needFetch {
+					m.conversation[i].Body = m.renderBody(thread.Messages[i])
+				}
+				onUpdate()
+			}
+		}()
+	}
 }
 
-func (m *Mailbox) resolveBody(msg provider.Message, cols int) provider.Message {
-	if msg.TextBody == "" && msg.HTMLBody == "" {
-		if m.cache != nil && msg.MessageID != "" {
-			sent, err := m.cache.GetSentMessages(100)
-			if err == nil {
-				for _, s := range sent {
-					if s.MessageID == msg.MessageID && (s.TextBody != "" || s.HTMLBody != "") {
-						msg.TextBody = s.TextBody
-						msg.HTMLBody = s.HTMLBody
-						break
-					}
-				}
-			}
-		}
-		if msg.TextBody == "" && msg.HTMLBody == "" && m.imap != nil {
-			full, err := m.imap.GetMessage(msg.ID)
-			if err == nil {
-				msg = full
-			}
+func (m *Mailbox) resolveCachedBody(msg provider.Message) provider.Message {
+	if m.cache == nil || msg.MessageID == "" {
+		return msg
+	}
+	sent, err := m.cache.GetSentMessages(100)
+	if err != nil {
+		return msg
+	}
+	for _, s := range sent {
+		if s.MessageID == msg.MessageID && (s.TextBody != "" || s.HTMLBody != "") {
+			msg.TextBody = s.TextBody
+			msg.HTMLBody = s.HTMLBody
+			return msg
 		}
 	}
 	return msg
+}
+
+// cacheMessageBody writes a fetched body back to the thread in memory and cache.
+func (m *Mailbox) cacheMessageBody(msg provider.Message) {
+	for i := range m.threads {
+		for j := range m.threads[i].Messages {
+			if m.threads[i].Messages[j].ID == msg.ID {
+				m.threads[i].Messages[j].TextBody = msg.TextBody
+				m.threads[i].Messages[j].HTMLBody = msg.HTMLBody
+				if m.cache != nil {
+					m.cache.PutThread(m.ActiveFolderID(), m.threads[i])
+				}
+				return
+			}
+		}
+	}
+}
+
+func (m *Mailbox) renderBody(msg provider.Message) string {
+	body := msg.TextBody
+	if msg.HTMLBody != "" {
+		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, 72)
+	} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
+		body = preview.RenderHTML(body, "", 72)
+	}
+	body = preview.Sanitize(body)
+	body = preview.StripQuoted(body)
+	return strings.TrimSpace(body)
 }
 
 func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
@@ -557,11 +635,12 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 				}
 			}
 		}
-		// fall back to IMAP fetch
+		// fall back to IMAP fetch, cache the result
 		if msg.TextBody == "" && msg.HTMLBody == "" && m.imap != nil {
 			full, err := m.imap.GetMessage(msg.ID)
 			if err == nil {
 				msg = full
+				m.cacheMessageBody(msg)
 			}
 		}
 	}
@@ -928,6 +1007,13 @@ func formatAddresses(addrs []provider.Address) string {
 }
 
 // ThreadRow is a display row — either a thread header or an expanded message
+type ConversationMessage struct {
+	Sender string
+	Date   string
+	Body   string
+	IsMe   bool
+}
+
 type ThreadRow struct {
 	ThreadIdx int
 	MsgIdx    int // -1 for thread header, >= 0 for message

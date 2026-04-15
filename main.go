@@ -92,6 +92,7 @@ func main() {
 	mb.LoadThreads()
 	mb.BuildThreadDisplay()
 	mb.SetSelected(0)
+	mb.LoadConversation(0, nil)
 
 	t := themeDark
 	_ = themeLight
@@ -143,6 +144,9 @@ func main() {
 	editor.StartSpellResultWorker(app.RequestRender)
 	comp := setupComposeView(app, editor, mb, smtp, db, &statusText, &frame)
 
+	var convView *ScrollViewC
+	var loadPreview func()
+
 	// connect and sync in background
 	go func() {
 		imap := imapprov.New(cfg)
@@ -170,6 +174,7 @@ func main() {
 		}
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
+		loadPreview()
 		app.RequestRender()
 
 		go cacheContacts(db)
@@ -185,8 +190,16 @@ func main() {
 		app.RequestRender()
 	}
 
-	loadPreview := func() {
-		mb.LoadConversation(threadSel, app.Size().Width)
+	loadPreview = func() {
+		mb.LoadConversation(threadSel, func() {
+			if convView != nil {
+				convView.Refresh()
+			}
+			app.RequestRender()
+		})
+		if convView != nil {
+			convView.Refresh()
+		}
 	}
 
 	handleEnter := func() {
@@ -225,7 +238,7 @@ func main() {
 		}
 		actualIdx := folderSel
 		if folderSel > mb.CanonEnd() {
-			actualIdx = folderSel - 1
+			actualIdx = folderSel - 2
 		}
 		if actualIdx >= mb.FolderCount() {
 			return
@@ -235,18 +248,17 @@ func main() {
 		mb.BuildThreadDisplay()
 		threadSel = 0
 		mb.SetSelected(0)
+		loadPreview()
 		undoStack = nil
 		statusText = mb.FolderName(folderSel)
 		go syncThreadsFromNetwork()
 	}
 
-	previewTV := TextView(mb.PreviewText()).Grow(1)
 	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
 		VBox.PaddingTRBL(1, 2, 0, 2)(
-			SpaceH(1),
 			HBox(
 				Text("mail").FG(t.Bright).Bold(),
 				SpaceW(2),
@@ -297,7 +309,24 @@ func main() {
 				),
 				VBox.Grow(3).CascadeStyle(&previewStyle)(
 					HRule(), SpaceH(1),
-					previewTV,
+					ScrollView.Grow(1)(
+						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) any {
+							return VBox(
+								HBox(
+									Text(&msg.Sender).Style(
+										If(&msg.IsMe).
+											Then(Style{Attr: AttrBold, FG: t.Accent}).
+											Else(Style{Attr: AttrBold}),
+									),
+									SpaceW(1),
+									Text(&msg.Date).Dim(),
+								),
+								SpaceH(1),
+								TextBlock(&msg.Body),
+								SpaceH(1),
+							)
+						}),
+					).Ref(func(sv *ScrollViewC) { convView = sv }),
 				),
 			),
 			SpaceH(1),
@@ -319,7 +348,7 @@ func main() {
 					loadPreview()
 				}
 			case 2:
-				previewTV.Layer().ScrollDown(1)
+				convView.Layer().ScrollDown(1)
 			}
 		}).
 		Handle("k", func() {
@@ -336,7 +365,7 @@ func main() {
 					loadPreview()
 				}
 			case 2:
-				previewTV.Layer().ScrollUp(1)
+				convView.Layer().ScrollUp(1)
 			}
 		}).
 		Handle("l", func() {
