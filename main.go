@@ -99,8 +99,8 @@ func main() {
 
 	// inbox view state
 	var (
-		folderSel  int
-		threadSel  int
+		folderSel   int
+		threadSel   int
 		labelsOpen  bool
 		frame       int
 		statusText  = "Inbox"
@@ -110,8 +110,8 @@ func main() {
 		folderStyle     = Style{FG: t.Dim}
 		threadStyle     = Style{FG: t.FG}
 		previewStyle    = Style{FG: t.Dim}
-		folderListStyle  = Style{FG: t.Dim}
-		folderSelStyle   = Style{FG: t.Dim}
+		folderListStyle = Style{FG: t.Dim}
+		folderSelStyle  = Style{FG: t.Dim}
 		threadListStyle = Style{FG: t.FG}
 		pane            = 1
 
@@ -254,11 +254,12 @@ func main() {
 		go syncThreadsFromNetwork()
 	}
 
-	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
+	fade := Animate.Duration(800 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
 
 	app.View("main",
 		VBox.PaddingTRBL(1, 2, 0, 2)(
+			SpaceH(1),
 			HBox(
 				Text("mail").FG(t.Bright).Bold(),
 				SpaceW(2),
@@ -266,6 +267,7 @@ func main() {
 			),
 			SpaceH(1),
 			HBox.Grow(1).Gap(4)(
+
 				VBox.Grow(1).CascadeStyle(&folderStyle)(
 					HRule(), SpaceH(1),
 					List(mb.FolderNames()).
@@ -274,6 +276,7 @@ func main() {
 						SelectedStyle(fade(&folderSelStyle)).
 						Marker("● ").MarkerStyle(accentMarker),
 				),
+
 				VBox.Grow(3).CascadeStyle(&threadStyle)(
 					HRule(), SpaceH(1),
 					List(mb.ThreadRows()).
@@ -282,11 +285,11 @@ func main() {
 						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) any {
-							itemBG := fade(If(&row.Selected).Then(t.SelBG).Else(
+							itemBG := If(&row.Selected).Then(t.SelBG).Else(
 								If(&row.Grouped).
 									Then(t.GroupBG).
-									Else(t.BG),
-							))
+									Else(fade(t.BG)),
+							)
 							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG)(
 								HBox(
 									If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
@@ -307,9 +310,10 @@ func main() {
 							)
 						}),
 				),
+
 				VBox.Grow(3).CascadeStyle(&previewStyle)(
 					HRule(), SpaceH(1),
-					ScrollView.Grow(1)(
+					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) { convView = sv })(
 						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) any {
 							return VBox(
 								HBox(
@@ -326,7 +330,7 @@ func main() {
 								SpaceH(1),
 							)
 						}),
-					).Ref(func(sv *ScrollViewC) { convView = sv }),
+					),
 				),
 			),
 			SpaceH(1),
