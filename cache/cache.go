@@ -114,6 +114,18 @@ func (c *Cache) migrate() error {
 			name TEXT NOT NULL DEFAULT '',
 			updated_at INTEGER NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS journal (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			action TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			folder_from TEXT NOT NULL DEFAULT '',
+			folder_to TEXT NOT NULL DEFAULT '',
+			params TEXT NOT NULL DEFAULT '{}',
+			result TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			created_at INTEGER NOT NULL
+		);
 	`)
 	return err
 }
@@ -171,6 +183,15 @@ func (c *Cache) DeleteCommand(id string) error {
 func (c *Cache) ClearSyncedCommands() error {
 	_, err := c.db.Exec("DELETE FROM commands WHERE status = 'synced'")
 	return err
+}
+
+// journal
+
+func (c *Cache) LogWrite(action, targetID, folderFrom, folderTo, result, errMsg string) {
+	c.db.Exec(
+		"INSERT INTO journal (action, target_id, folder_from, folder_to, result, error, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+		action, targetID, folderFrom, folderTo, result, errMsg, time.Now().Unix(),
+	)
 }
 
 func scanCommands(rows *sql.Rows) ([]Command, error) {

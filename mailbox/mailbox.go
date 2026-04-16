@@ -866,8 +866,10 @@ func (m *Mailbox) ProcessPendingCommands() {
 	if err != nil || len(cmds) == 0 {
 		return
 	}
+	folder := m.ActiveFolderID()
 	for _, cmd := range cmds {
 		var cmdErr error
+		dest := ""
 		switch cmd.Action {
 		case "mark_read":
 			cmdErr = m.imap.MarkRead([]string{cmd.TargetID}, true)
@@ -878,15 +880,21 @@ func (m *Mailbox) ProcessPendingCommands() {
 		case "unstar":
 			cmdErr = m.imap.Star([]string{cmd.TargetID}, false)
 		case "move":
-			if folder, ok := cmd.Params["folder"]; ok {
-				cmdErr = m.imap.Move([]string{cmd.TargetID}, folder)
+			if f, ok := cmd.Params["folder"]; ok {
+				dest = f
+				cmdErr = m.imap.Move([]string{cmd.TargetID}, f)
 			}
 		}
+		result := "ok"
+		errMsg := ""
 		if cmdErr != nil {
-			m.cache.UpdateCommandStatus(cmd.ID, "failed", cmdErr.Error())
+			result = "failed"
+			errMsg = cmdErr.Error()
+			m.cache.UpdateCommandStatus(cmd.ID, "failed", errMsg)
 		} else {
 			m.cache.UpdateCommandStatus(cmd.ID, "synced", "")
 		}
+		m.cache.LogWrite(cmd.Action, cmd.TargetID, folder, dest, result, errMsg)
 	}
 	m.cache.ClearSyncedCommands()
 }

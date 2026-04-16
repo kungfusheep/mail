@@ -459,12 +459,12 @@ func main() {
 				undoStack[len(undoStack)-1]()
 				undoStack = undoStack[:len(undoStack)-1]
 				clampThreadSel()
+				loadPreview()
 				if len(undoStack) > 0 {
 					statusText = fmt.Sprintf("%d undoable — u to undo", len(undoStack))
 				} else {
 					statusText = "undone"
 				}
-				go mb.ProcessPendingCommands()
 			}
 		}).
 		Handle("/", func() {
