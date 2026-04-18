@@ -95,6 +95,12 @@ func isConnectionError(err error) bool {
 }
 
 func withRetry[T any](im *IMAP, fn func() (T, error)) (T, error) {
+	if im.client == nil {
+		var zero T
+		if err := im.reconnect(); err != nil {
+			return zero, fmt.Errorf("not connected: %v", err)
+		}
+	}
 	v, err := fn()
 	if err == nil || !isConnectionError(err) {
 		return v, err

@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 
 	. "github.com/kungfusheep/glyph"
@@ -62,6 +63,8 @@ func main() {
 	)
 	if err == nil {
 		log.SetOutput(logFile)
+		// redirect stderr to the log so panics/runtime errors don't corrupt the TUI
+		syscall.Dup2(int(logFile.Fd()), int(os.Stderr.Fd()))
 		defer logFile.Close()
 	}
 	log.Println("starting mail")
@@ -138,11 +141,107 @@ func main() {
 		}
 	}
 
-	// compose view
+	// shimmer catalogue — navigate with , and . (prev/next). Label shows
+	// in the status bar. Only the active variant is included in the view
+	// tree (via If), so inactive ones pay no per-frame cost.
+	var (
+		// wormholeSpeed float64 = 6.0
+		shimmerIdx   int = 0
+		shimmerLabel     = ""
+
+		// wormhole family toggles
+		// onWormhole, onWStreaks, onWPulse, onWDepth, onWLayered, onWShear, onWLab, onSilEcho bool
+	)
+	// focused on wormhole family while we iterate; other effects are preserved
+	// in effects.go but removed from the view template below.
+	variantNames := []string{
+		"wormhole (base)",
+		"wormhole warp",
+		"wormhole drag",
+		"wormhole surge",
+		"wormhole core",
+		"wormhole turbulence (baseline)",
+		"wormhole lab (iterating)",
+		"silhouette echo",
+	}
+
+	// applyVariant := func() {
+	// 	onWormhole, onWStreaks, onWPulse, onWDepth, onWLayered, onWShear, onWLab, onSilEcho = false, false, false, false, false, false, false, false
+	// 	shimmerLabel = variantNames[shimmerIdx]
+	// 	wormholeSpeed = 6.0
+	// 	switch shimmerIdx {
+	// 	case 0:
+	// 		onWormhole = true
+	// 	case 1:
+	// 		onWStreaks = true
+	// 	case 2:
+	// 		onWPulse = true
+	// 	case 3:
+	// 		onWDepth = true
+	// 	case 4:
+	// 		onWLayered = true
+	// 	case 5:
+	// 		onWShear = true
+	// 	case 6:
+	// 		onWLab = true
+	// 	case 7:
+	// 		onSilEcho = true
+	// 	}
+	// }
+	// applyVariant()
+
+	// continuous frame requests for time-based animation
+	go func() {
+		ticker := time.NewTicker(50 * time.Millisecond)
+		defer ticker.Stop()
+		for range ticker.C {
+			app.RequestRender()
+		}
+	}()
+
+	// transition: mailbox → compose ("settle and rise")
+	// slowed down for inspection — bump back to ~500ms once tuned
+	composeTransition := NewViewTransition(2500*time.Millisecond, t.BG, Hex(0x3a3a3a))
+
+	// compose view — editor theme uses mail palette for FG only; leaves BG
+	// unset so the editor inherits the app's default BG (theme.BG). Setting an
+	// explicit Background on the editor theme caused a layout bug where one row
+	// was lost from the top of the mailbox after returning — probably because
+	// the editor paints its BG across its whole buffer and that affects the
+	// terminal's final state.
+	composeTheme := compose.Theme{
+		Name:                  "mail",
+		Text:                  t.FG,
+		Bold:                  Style{Attr: AttrBold},
+		Italic:                Style{Attr: AttrItalic},
+		Underline:             Style{Attr: AttrUnderline},
+		Strikethrough:         Style{Attr: AttrStrikethrough},
+		Code:                  Style{FG: t.FG},
+		Accent:                Style{FG: t.Accent},
+		Heading1:              Style{FG: t.Bright, Attr: AttrBold},
+		Heading2:              Style{FG: t.Bright, Attr: AttrBold},
+		Heading3:              Style{FG: t.Bright, Attr: AttrBold},
+		Heading4:              Style{FG: t.FG, Attr: AttrBold},
+		Heading5:              Style{FG: t.FG, Attr: AttrBold},
+		Heading6:              Style{FG: t.FG, Attr: AttrBold},
+		Blockquote:            Style{FG: t.Subtle, Attr: AttrItalic},
+		CodeBlock:             Style{FG: t.FG},
+		ListBullet:            Style{FG: t.Subtle},
+		Callout:               Style{FG: t.Accent},
+		Divider:               Style{FG: t.Muted, Attr: AttrDim},
+		DialogueCharacter:     Style{FG: t.Bright, Attr: AttrBold},
+		DialogueText:          Style{FG: t.FG},
+		DialogueParenthetical: Style{FG: t.Subtle, Attr: AttrItalic},
+		FrontMatterKey:        Style{FG: t.Subtle, Attr: AttrBold},
+		FrontMatterValue:      Style{FG: t.FG},
+		Dimmed:                Style{FG: t.Dim, Attr: AttrDim},
+	}
+
 	editor := compose.NewEditor(compose.NewDocument(), "")
+	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := setupComposeView(app, editor, mb, smtp, db, &statusText, &frame)
+	comp := setupComposeView(app, editor, mb, smtp, db, &statusText, &frame, composeTransition, t)
 
 	var convView *ScrollViewC
 	var loadPreview func()
@@ -254,16 +353,44 @@ func main() {
 		go syncThreadsFromNetwork()
 	}
 
-	fade := Animate.Duration(800 * time.Millisecond).Ease(EaseOutCubic)
+	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
+
+	// peakColor := Hex(0x242424)
 
 	app.View("main",
 		VBox.PaddingTRBL(1, 2, 0, 2)(
+			// --- wormhole family (active focus) ---
+			// If(&onWormhole).Then(ScreenEffect(ShimmerWormhole(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWStreaks).Then(ScreenEffect(ShimmerWormholeWarp(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWPulse).Then(ScreenEffect(ShimmerWormholeDrag(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWDepth).Then(ScreenEffect(ShimmerWormholeSurge(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWLayered).Then(ScreenEffect(ShimmerWormholeCore(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWShear).Then(ScreenEffect(ShimmerWormholeTurbulence(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onWLab).Then(ScreenEffect(ShimmerWormholeLab(t.BG, peakColor).Speed(&wormholeSpeed))),
+			// If(&onSilEcho).Then(ScreenEffect(ShimmerSilhouetteEcho(t.BG, peakColor))),
+			// record mailbox silhouette for transitions
+			ScreenEffect(composeTransition.SourceEffect()),
+			// --- other effects (paused during wormhole iteration) ---
+			// If(&onDrifting).Then(ScreenEffect(ShimmerDrifting(t.BG, peakColor))),
+			// If(&onTunnel).Then(ScreenEffect(ShimmerTunnel(t.BG, peakColor).Speed(&tunnelSpeed))),
+			// If(&onSweep).Then(ScreenEffect(ShimmerSweep(t.BG, peakColor))),
+			// If(&onPulse).Then(ScreenEffect(ShimmerPulse(t.BG, peakColor).Trigger(&pulseTrigger))),
+			// If(&onNoise).Then(ScreenEffect(ShimmerNoise(t.BG, peakColor))),
+			// If(&onRain).Then(ScreenEffect(ShimmerRain(t.BG, peakColor))),
+			// If(&onBreath).Then(ScreenEffect(ShimmerBreath(t.BG, peakColor))),
+			// If(&onSpiral).Then(ScreenEffect(ShimmerSpiral(t.BG, peakColor))),
+			// If(&onVignette).Then(ScreenEffect(ShimmerVignette(t.BG, peakColor))),
+			// If(&onScatter).Then(ScreenEffect(ShimmerScatter(t.BG, peakColor))),
 			SpaceH(1),
 			HBox(
 				Text("mail").FG(t.Bright).Bold(),
 				SpaceW(2),
 				Text(&statusText).FG(t.Subtle),
+				SpaceW(2),
+				Text("·").FG(t.Muted),
+				SpaceW(2),
+				Text(&shimmerLabel).FG(t.Accent).Italic(),
 			),
 			SpaceH(1),
 			HBox.Grow(1).Gap(4)(
@@ -338,6 +465,27 @@ func main() {
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
+		Handle(",", func() {
+			shimmerIdx = (shimmerIdx - 1 + len(variantNames)) % len(variantNames)
+			// applyVariant()
+			statusText = "shimmer: " + shimmerLabel
+		}).
+		Handle(".", func() {
+			shimmerIdx = (shimmerIdx + 1) % len(variantNames)
+
+			statusText = "shimmer: " + shimmerLabel
+		}).
+		// number keys set wormhole speed — 0 = stopped, 9 = hyperspeed
+		// Handle("0", func() { wormholeSpeed = 0; statusText = "speed: 0" }).
+		// Handle("1", func() { wormholeSpeed = 2; statusText = "speed: 2" }).
+		// Handle("2", func() { wormholeSpeed = 4; statusText = "speed: 4" }).
+		// Handle("3", func() { wormholeSpeed = 6; statusText = "speed: 6" }).
+		// Handle("4", func() { wormholeSpeed = 8; statusText = "speed: 8" }).
+		// Handle("5", func() { wormholeSpeed = 10; statusText = "speed: 10" }).
+		// Handle("6", func() { wormholeSpeed = 12; statusText = "speed: 12" }).
+		// Handle("7", func() { wormholeSpeed = 15; statusText = "speed: 15" }).
+		// Handle("8", func() { wormholeSpeed = 18; statusText = "speed: 18" }).
+		// Handle("9", func() { wormholeSpeed = 22; statusText = "speed: 22 (hyper)" }).
 		Handle("j", func() {
 			switch pane {
 			case 0:
@@ -418,6 +566,7 @@ func main() {
 			}
 		}).
 		Handle("c", func() {
+			composeTransition.Start()
 			comp.Open()
 		}).
 		Handle("r", func() {
@@ -544,7 +693,7 @@ type composeControls struct {
 	SetupReply func(provider.Thread)
 }
 
-func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int) composeControls {
+func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int, transition *viewTransition, theme AppTheme) composeControls {
 	// compose data
 	var to, cc, subject string
 	var replyMsg *provider.Message
@@ -553,13 +702,19 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	var fieldTo, fieldCC, fieldSubject InputState
 	var fieldFocus FocusGroup
 	var focused bool
-	labelTo, labelCC, labelSub := BrightBlack, BrightBlack, BrightBlack
+	labelTo, labelCC, labelSub := theme.Muted, theme.Muted, theme.Muted
 	var toFieldRef, ccFieldRef NodeRef
 	var contactResults []string
 	var contactSel int
 	var showContacts bool
 	var showDiscard, showSending bool
 	var sendingStatus string
+	// tracks whether compose is the active view. the compose router's
+	// AddOnAfter hook refreshes the editor after every keypress, which calls
+	// updateCursor → app.ShowCursor. when a handler exits compose (e.g. <Esc>
+	// → exitCompose), the afterHook still fires and re-enables the terminal
+	// cursor on top of the mailbox view. guarding on this bool prevents that.
+	var composeActive bool
 
 	// compose search state
 	var searchQuery, searchPrompt string
@@ -615,6 +770,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			}
 			log.Printf("sendMessage: sent to %s (msgid=%s)", to, msg.MessageID)
 			*statusText = fmt.Sprintf("sent to %s", to)
+			composeActive = false
 			reset()
 			app.HideCursor()
 			app.Go("main")
@@ -658,6 +814,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	// compose view layout
 	app.View("compose",
 		VBox(
+			ScreenEffect(transition.TargetEffect()),
 			LayerView(ed.Layer()).Grow(1),
 
 			VBox(
@@ -684,7 +841,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 			If(&showContacts).Then(
 				Overlay.Above(&toFieldRef)(
-					VBox.Border(BorderRounded).BorderFG(BrightBlack)(
+					VBox.Border(BorderRounded).BorderFG(theme.Muted)(
 						List(&contactResults).
 							Selection(&contactSel).
 							SelectedStyle(Style{Attr: AttrInverse}).
@@ -694,8 +851,8 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			),
 
 			If(&showDiscard).Then(
-				Overlay.Centered().Backdrop().BackdropFG(BrightBlack)(
-					VBox.Border(BorderRounded).BorderFG(BrightBlack).Width(40)(
+				Overlay.Centered().Backdrop().BackdropFG(theme.BG)(
+					VBox.Border(BorderRounded).BorderFG(theme.Muted).Width(40)(
 						SpaceH(1),
 						Text("discard changes?").Bold().Style(Style{Align: AlignCenter}).Width(38),
 						SpaceH(1),
@@ -711,12 +868,12 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				),
 			),
 			If(&showSending).Then(
-				Overlay.Centered().Backdrop().BackdropFG(BrightBlack)(
-					VBox.Border(BorderRounded).BorderFG(BrightBlack).Width(40)(
+				Overlay.Centered().Backdrop().BackdropFG(theme.BG)(
+					VBox.Border(BorderRounded).BorderFG(theme.Muted).Width(40)(
 						SpaceH(1),
 						HBox(
 							Space(),
-							Spinner(frame).Frames(SpinnerDots).FG(BrightBlack),
+							Spinner(frame).Frames(SpinnerDots).FG(theme.Subtle),
 							SpaceW(1),
 							Text(&sendingStatus).Style(Style{Align: AlignCenter}),
 							Space(),
@@ -786,7 +943,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 	// keybindings
 	if router, ok := app.ViewRouter("compose"); ok {
-		exitCompose := func() { reset(); app.HideCursor(); app.Go("main") }
+		exitCompose := func() { composeActive = false; reset(); app.HideCursor(); app.Go("main") }
 
 		router.Handle("<C-q>", func(_ riffkey.Match) { exitCompose() })
 
@@ -816,9 +973,9 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		syncLabels := func() {
 			for i, l := range labels {
 				if focused && fieldFocus.Current == i {
-					*l = White
+					*l = theme.Bright
 				} else {
-					*l = BrightBlack
+					*l = theme.Muted
 				}
 			}
 		}
@@ -990,6 +1147,9 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		)
 
 		router.AddOnAfter(func() {
+			if !composeActive {
+				return
+			}
 			ed.Refresh()
 			if focused {
 				app.HideCursor()
@@ -1001,8 +1161,14 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		Open: func() {
 			reset()
 			ed.SetTypewriterMode(true)
+			composeActive = true
 			app.Go("compose")
-			ed.Refresh()
+			// no ed.Refresh() here — screen dimensions aren't set yet, so
+			// updateCursor would emit SetCursor(0,0)+ShowCursor before the
+			// first render, leaking a terminal cursor on the mailbox side
+			// of the transition. Layer.prepare() triggers UpdateDisplay on
+			// the first compose render, and key handlers call updateCursor
+			// themselves when they move the cursor.
 		},
 		SetupReply: func(thread provider.Thread) {
 			lastMsg := thread.Messages[len(thread.Messages)-1]

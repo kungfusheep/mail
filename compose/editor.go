@@ -5649,6 +5649,16 @@ func (e *Editor) PasteStyle(r Range) {
 // File Operations
 // =============================================================================
 
+// SetTheme replaces the editor's theme.
+func (e *Editor) SetTheme(t Theme) {
+	e.theme = t
+}
+
+// Theme returns the editor's current theme.
+func (e *Editor) Theme() Theme {
+	return e.theme
+}
+
 // ToggleTheme cycles through available themes
 func (e *Editor) ToggleTheme() {
 	switch e.theme.Name {
