@@ -562,7 +562,7 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 			}
 			if changed {
 				if m.cache != nil {
-					m.cache.PutThread(folder, *thread)
+					m.cache.PutThread(*thread)
 				}
 				// update conversation display from cached data
 				for _, i := range needFetch {
@@ -600,7 +600,7 @@ func (m *Mailbox) cacheMessageBody(msg provider.Message) {
 				m.threads[i].Messages[j].TextBody = msg.TextBody
 				m.threads[i].Messages[j].HTMLBody = msg.HTMLBody
 				if m.cache != nil {
-					m.cache.PutThread(m.ActiveFolderID(), m.threads[i])
+					m.cache.PutThread(m.threads[i])
 				}
 				return
 			}
@@ -689,13 +689,14 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	}
 	thread, folder := *t, m.ActiveFolderID()
 	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
-	m.cache.DeleteThread(t.ID)
+	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
 		m.cancelCommand(cmdID)
-		m.cache.PutThread(folder, thread)
+		m.cache.PutThread(thread)
+		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
@@ -713,13 +714,14 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 	}
 	thread, folder := *t, m.ActiveFolderID()
 	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
-	m.cache.DeleteThread(t.ID)
+	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
 		m.cancelCommand(cmdID)
-		m.cache.PutThread(folder, thread)
+		m.cache.PutThread(thread)
+		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
@@ -742,9 +744,8 @@ func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
 			t.Messages[i].Starred = true
 		}
 	}
-	folder := m.ActiveFolderID()
 	thread := *t
-	m.cache.PutThread(folder, *t)
+	m.cache.PutThread(*t)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
@@ -755,7 +756,7 @@ func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
 		for i := range thread.Messages {
 			thread.Messages[i].Starred = before[i]
 		}
-		m.cache.PutThread(folder, thread)
+		m.cache.PutThread(thread)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, "toggled star"
@@ -766,7 +767,6 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 	if t == nil {
 		return nil, ""
 	}
-	folder := m.ActiveFolderID()
 	beforeUnread := t.Unread
 	markRead := t.Unread > 0
 
@@ -784,7 +784,7 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 		t.Unread = len(t.Messages)
 	}
 	thread := *t
-	m.cache.PutThread(folder, *t)
+	m.cache.PutThread(*t)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
@@ -797,7 +797,7 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
-		m.cache.PutThread(folder, thread)
+		m.cache.PutThread(thread)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, desc
@@ -808,7 +808,6 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 	if t == nil || t.Unread == 0 {
 		return nil, ""
 	}
-	folder := m.ActiveFolderID()
 	beforeUnread := t.Unread
 
 	var cmdIDs []string
@@ -819,7 +818,7 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 	}
 	t.Unread = 0
 	thread := *t
-	m.cache.PutThread(folder, *t)
+	m.cache.PutThread(*t)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
@@ -828,7 +827,7 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
-		m.cache.PutThread(folder, thread)
+		m.cache.PutThread(thread)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, "marked read"
@@ -882,7 +881,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 		case "move":
 			if f, ok := cmd.Params["folder"]; ok {
 				dest = f
-				cmdErr = m.imap.Move([]string{cmd.TargetID}, f)
+				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{folder})
 			}
 		}
 		result := "ok"

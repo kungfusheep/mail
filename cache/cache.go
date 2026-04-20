@@ -61,25 +61,35 @@ func (c *Cache) migrate() error {
 		CREATE TABLE IF NOT EXISTS messages (
 			id TEXT PRIMARY KEY,
 			thread_id TEXT NOT NULL,
-			folder TEXT NOT NULL DEFAULT '',
 			data TEXT NOT NULL,
 			date INTEGER NOT NULL,
 			read INTEGER NOT NULL DEFAULT 0,
 			starred INTEGER NOT NULL DEFAULT 0
 		);
 		CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id);
-		CREATE INDEX IF NOT EXISTS idx_messages_folder ON messages(folder);
 		CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date);
 
 		CREATE TABLE IF NOT EXISTS threads (
 			id TEXT PRIMARY KEY,
-			folder TEXT NOT NULL DEFAULT '',
 			data TEXT NOT NULL,
 			date INTEGER NOT NULL,
 			unread INTEGER NOT NULL DEFAULT 0
 		);
-		CREATE INDEX IF NOT EXISTS idx_threads_folder ON threads(folder);
 		CREATE INDEX IF NOT EXISTS idx_threads_date ON threads(date);
+
+		CREATE TABLE IF NOT EXISTS thread_labels (
+			thread_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			PRIMARY KEY (thread_id, label)
+		);
+		CREATE INDEX IF NOT EXISTS idx_thread_labels_label ON thread_labels(label);
+
+		CREATE TABLE IF NOT EXISTS message_labels (
+			message_id TEXT NOT NULL,
+			label TEXT NOT NULL,
+			PRIMARY KEY (message_id, label)
+		);
+		CREATE INDEX IF NOT EXISTS idx_message_labels_label ON message_labels(label);
 
 		CREATE TABLE IF NOT EXISTS folders (
 			id TEXT PRIMARY KEY,
@@ -127,7 +137,16 @@ func (c *Cache) migrate() error {
 			created_at INTEGER NOT NULL
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// one-shot migration: existing installs have a `folder` column on threads
+	// and messages — lift those values into the new label join tables. errors
+	// here mean the column doesn't exist (fresh install), so we swallow them.
+	c.db.Exec(`INSERT OR IGNORE INTO thread_labels (thread_id, label) SELECT id, folder FROM threads WHERE folder != ''`)
+	c.db.Exec(`INSERT OR IGNORE INTO message_labels (message_id, label) SELECT id, folder FROM messages WHERE folder != ''`)
+	return nil
 }
 
 // commands
@@ -370,56 +389,103 @@ func (c *Cache) GetFolders() ([]provider.Folder, error) {
 
 // threads
 
-func (c *Cache) PutThread(folder string, t provider.Thread) error {
+// PutThread upserts the thread row. It does not touch label associations —
+// use AddThreadToLabel/RemoveThreadFromLabel or ReplaceThreads for those.
+func (c *Cache) PutThread(t provider.Thread) error {
 	data, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
 	_, err = c.db.Exec(
-		"INSERT OR REPLACE INTO threads (id, folder, data, date, unread) VALUES (?, ?, ?, ?, ?)",
-		t.ID, folder, string(data), t.Date.Unix(), t.Unread,
+		"INSERT OR REPLACE INTO threads (id, data, date, unread) VALUES (?, ?, ?, ?)",
+		t.ID, string(data), t.Date.Unix(), t.Unread,
 	)
 	return err
 }
 
-func (c *Cache) ReplaceThreads(folder string, threads []provider.Thread) error {
+// ReplaceThreads replaces the set of threads associated with a label. Any
+// thread that was previously associated with `label` and isn't in the new
+// list loses the association (thread row stays, to keep any other labels).
+func (c *Cache) ReplaceThreads(label string, threads []provider.Thread) error {
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if _, err := tx.Exec("DELETE FROM threads WHERE folder = ?", folder); err != nil {
+	if _, err := tx.Exec("DELETE FROM thread_labels WHERE label = ?", label); err != nil {
 		return err
 	}
 
-	stmt, err := tx.Prepare("INSERT INTO threads (id, folder, data, date, unread) VALUES (?, ?, ?, ?, ?)")
+	threadStmt, err := tx.Prepare("INSERT OR REPLACE INTO threads (id, data, date, unread) VALUES (?, ?, ?, ?)")
 	if err != nil {
 		return err
 	}
-	defer stmt.Close()
+	defer threadStmt.Close()
+
+	labelStmt, err := tx.Prepare("INSERT OR IGNORE INTO thread_labels (thread_id, label) VALUES (?, ?)")
+	if err != nil {
+		return err
+	}
+	defer labelStmt.Close()
 
 	for _, t := range threads {
 		data, err := json.Marshal(t)
 		if err != nil {
 			return err
 		}
-		if _, err := stmt.Exec(t.ID, folder, string(data), t.Date.Unix(), t.Unread); err != nil {
+		if _, err := threadStmt.Exec(t.ID, string(data), t.Date.Unix(), t.Unread); err != nil {
+			return err
+		}
+		if _, err := labelStmt.Exec(t.ID, label); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
 }
 
+// DeleteThread removes the thread row and all its label associations.
 func (c *Cache) DeleteThread(id string) error {
-	_, err := c.db.Exec("DELETE FROM threads WHERE id = ?", id)
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM thread_labels WHERE thread_id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM threads WHERE id = ?", id); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// AddThreadToLabel associates a thread with a label.
+func (c *Cache) AddThreadToLabel(threadID, label string) error {
+	_, err := c.db.Exec(
+		"INSERT OR IGNORE INTO thread_labels (thread_id, label) VALUES (?, ?)",
+		threadID, label,
+	)
 	return err
 }
 
-func (c *Cache) GetThreads(folder string, limit int) ([]provider.Thread, error) {
+// RemoveThreadFromLabel removes the thread→label association. The thread row
+// stays in place in case it's still associated with other labels.
+func (c *Cache) RemoveThreadFromLabel(threadID, label string) error {
+	_, err := c.db.Exec(
+		"DELETE FROM thread_labels WHERE thread_id = ? AND label = ?",
+		threadID, label,
+	)
+	return err
+}
+
+func (c *Cache) GetThreads(label string, limit int) ([]provider.Thread, error) {
 	rows, err := c.db.Query(
-		"SELECT data FROM threads WHERE folder = ? ORDER BY date DESC LIMIT ?",
-		folder, limit,
+		`SELECT t.data FROM threads t
+		 JOIN thread_labels tl ON tl.thread_id = t.id
+		 WHERE tl.label = ?
+		 ORDER BY t.date DESC LIMIT ?`,
+		label, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -461,10 +527,6 @@ func (c *Cache) PutMessage(msg provider.Message) error {
 	if err != nil {
 		return err
 	}
-	folder := ""
-	if len(msg.Labels) > 0 {
-		folder = msg.Labels[0]
-	}
 	read := 0
 	if msg.Read {
 		read = 1
@@ -473,11 +535,33 @@ func (c *Cache) PutMessage(msg provider.Message) error {
 	if msg.Starred {
 		starred = 1
 	}
-	_, err = c.db.Exec(
-		"INSERT OR REPLACE INTO messages (id, thread_id, folder, data, date, read, starred) VALUES (?, ?, ?, ?, ?, ?, ?)",
-		msg.ID, msg.ThreadID, folder, string(data), msg.Date.Unix(), read, starred,
-	)
-	return err
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		"INSERT OR REPLACE INTO messages (id, thread_id, data, date, read, starred) VALUES (?, ?, ?, ?, ?, ?)",
+		msg.ID, msg.ThreadID, string(data), msg.Date.Unix(), read, starred,
+	); err != nil {
+		return err
+	}
+	// replace label associations from msg.Labels
+	if _, err := tx.Exec("DELETE FROM message_labels WHERE message_id = ?", msg.ID); err != nil {
+		return err
+	}
+	for _, label := range msg.Labels {
+		if label == "" {
+			continue
+		}
+		if _, err := tx.Exec(
+			"INSERT OR IGNORE INTO message_labels (message_id, label) VALUES (?, ?)",
+			msg.ID, label,
+		); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 func (c *Cache) GetMessage(id string) (provider.Message, error) {

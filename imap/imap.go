@@ -274,13 +274,27 @@ func (im *IMAP) Reply(threadID string, msg provider.Message) error {
 	return im.Send(msg)
 }
 
-func (im *IMAP) Move(messageIDs []string, folderID string) error {
+// ApplyLabels adjusts label membership. IMAP has single-label semantics —
+// messages live in exactly one folder — so we collapse (add, remove) into
+// a MOVE operation. Callers should pass at most one add and one remove; if
+// both are present, we MOVE to add[0] (remove[0] is implied by the source
+// folder). If only add is present, we MOVE to add[0]. If only remove is
+// present, we can't do anything useful without a destination — callers that
+// want archive semantics should pass add=["[Google Mail]/All Mail"] too.
+func (im *IMAP) ApplyLabels(messageIDs []string, add []string, remove []string) error {
+	if len(add) == 0 {
+		if len(remove) == 0 {
+			return nil
+		}
+		return fmt.Errorf("imap: ApplyLabels with only removals needs a destination (pass add)")
+	}
+	dest := add[0]
 	_, err := withRetry(im, func() (struct{}, error) {
 		for _, id := range messageIDs {
 			var uid imaplib.UID
 			fmt.Sscanf(id, "%d", &uid)
 			uidSet := imaplib.UIDSetNum(uid)
-			if _, err := im.client.Move(uidSet, folderID).Wait(); err != nil {
+			if _, err := im.client.Move(uidSet, dest).Wait(); err != nil {
 				return struct{}{}, err
 			}
 		}

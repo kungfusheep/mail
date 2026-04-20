@@ -482,8 +482,8 @@ func TestDelete_PersistsThroughReload(t *testing.T) {
 
 func TestCacheReplaceThreads_RemovesStale(t *testing.T) {
 	c := testCache(t)
-	c.PutThread("INBOX", provider.Thread{
-		ID: "old", Subject: "stale thread", Date: time.Now().Add(-24 * time.Hour),
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "old", Subject: "stale thread", Date: time.Now().Add(-24 * time.Hour)},
 	})
 
 	fresh := []provider.Thread{
@@ -510,8 +510,12 @@ func TestCacheReplaceThreads_RemovesStale(t *testing.T) {
 
 func TestCacheReplaceThreads_DoesNotAffectOtherFolders(t *testing.T) {
 	c := testCache(t)
-	c.PutThread("INBOX", provider.Thread{ID: "inbox1", Subject: "inbox", Date: time.Now()})
-	c.PutThread("SENT", provider.Thread{ID: "sent1", Subject: "sent", Date: time.Now()})
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "inbox1", Subject: "inbox", Date: time.Now()},
+	})
+	c.ReplaceThreads("SENT", []provider.Thread{
+		{ID: "sent1", Subject: "sent", Date: time.Now()},
+	})
 
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "inbox2", Subject: "new inbox", Date: time.Now()},

@@ -87,7 +87,14 @@ type Provider interface {
 	// actions
 	Send(msg Message) error
 	Reply(threadID string, msg Message) error
-	Move(messageIDs []string, folderID string) error
+	// ApplyLabels adjusts label membership for the given messages. Providers
+	// with single-label semantics (IMAP) treat (add, remove) pairs as a MOVE;
+	// providers with multi-label semantics (Gmail API) apply each side
+	// independently. Callers pass one of:
+	//   add=[X], remove=[Y]  → move from Y to X
+	//   add=[X]              → tag with X (no removal)
+	//   remove=[Y]           → archive out of Y
+	ApplyLabels(messageIDs []string, add []string, remove []string) error
 	Archive(messageIDs []string) error
 	Delete(messageIDs []string) error
 	MarkRead(messageIDs []string, read bool) error
