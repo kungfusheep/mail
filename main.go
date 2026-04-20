@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"os"
@@ -105,6 +106,8 @@ func main() {
 		folderSel   int
 		threadSel   int
 		labelsOpen  bool
+		helpOpen    bool
+		helpRef     NodeRef
 		frame       int
 		statusText  = "Inbox"
 		searchQuery string
@@ -200,18 +203,16 @@ func main() {
 	}()
 
 	// transition: mailbox → compose ("settle and rise")
-	// slowed down for inspection — bump back to ~500ms once tuned
-	composeTransition := NewViewTransition(2500*time.Millisecond, t.BG, Hex(0x3a3a3a))
+	composeTransition := NewViewTransition(940*time.Millisecond, t.BG, Hex(0x3a3a3a))
 
-	// compose view — editor theme uses mail palette for FG only; leaves BG
-	// unset so the editor inherits the app's default BG (theme.BG). Setting an
-	// explicit Background on the editor theme caused a layout bug where one row
-	// was lost from the top of the mailbox after returning — probably because
-	// the editor paints its BG across its whole buffer and that affects the
-	// terminal's final state.
+	// compose view — editor theme matches mail palette so the compose view and
+	// mailbox share the same dark background. Earlier we left Background unset
+	// because it seemed to trigger a top-row-loss bug; that turned out to be
+	// the emoji/wide-rune width issue (fixed in glyph).
 	composeTheme := compose.Theme{
 		Name:                  "mail",
 		Text:                  t.FG,
+		Background:            t.BG,
 		Bold:                  Style{Attr: AttrBold},
 		Italic:                Style{Attr: AttrItalic},
 		Underline:             Style{Attr: AttrUnderline},
@@ -246,9 +247,61 @@ func main() {
 	var convView *ScrollViewC
 	var loadPreview func()
 
+	// imap connection (nil until Authenticate succeeds in the goroutine below)
+	var imap *imapprov.IMAP
+
+	// idle + cache subscription, per active label. watchLabel cancels any
+	// prior watcher and starts a new pair:
+	//   - a goroutine listening to cache.Subscribe(label); fires a UI refresh
+	//     whenever the network (or anything else) writes to that label.
+	//   - IDLE on a second IMAP connection; on change it triggers SyncThreads,
+	//     which writes to cache, which in turn fires the subscriber above.
+	var (
+		idleCancel context.CancelFunc
+		labelUnsub func()
+	)
+
+	watchLabel := func(label string) {
+		if idleCancel != nil {
+			idleCancel()
+			idleCancel = nil
+		}
+		if labelUnsub != nil {
+			labelUnsub()
+			labelUnsub = nil
+		}
+		if label == "" || imap == nil {
+			return
+		}
+
+		ch, unsub := db.Subscribe(label)
+		labelUnsub = unsub
+		go func() {
+			for range ch {
+				mb.LoadThreads()
+				mb.BuildThreadDisplay()
+				mb.SetSelected(threadSel)
+				app.RequestRender()
+			}
+		}()
+
+		ctx, cancel := context.WithCancel(context.Background())
+		idleCancel = cancel
+		go func() {
+			if err := imap.Idle(ctx, label, func() {
+				log.Printf("idle: change on %s, syncing", label)
+				if err := mb.SyncThreads(); err != nil {
+					log.Printf("idle sync: %v", err)
+				}
+			}); err != nil && ctx.Err() == nil {
+				log.Printf("idle %s: %v", label, err)
+			}
+		}()
+	}
+
 	// connect and sync in background
 	go func() {
-		imap := imapprov.New(cfg)
+		imap = imapprov.New(cfg)
 		if err := imap.Authenticate(); err != nil {
 			statusText = fmt.Sprintf("imap: %v", err)
 			app.RequestRender()
@@ -277,6 +330,9 @@ func main() {
 		app.RequestRender()
 
 		go cacheContacts(db)
+
+		// start live updates on the active label
+		watchLabel(mb.ActiveFolderID())
 	}()
 
 	syncThreadsFromNetwork := func() {
@@ -351,6 +407,7 @@ func main() {
 		undoStack = nil
 		statusText = mb.FolderName(folderSel)
 		go syncThreadsFromNetwork()
+		watchLabel(mb.ActiveFolderID())
 	}
 
 	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
@@ -369,8 +426,10 @@ func main() {
 			// If(&onWShear).Then(ScreenEffect(ShimmerWormholeTurbulence(t.BG, peakColor).Speed(&wormholeSpeed))),
 			// If(&onWLab).Then(ScreenEffect(ShimmerWormholeLab(t.BG, peakColor).Speed(&wormholeSpeed))),
 			// If(&onSilEcho).Then(ScreenEffect(ShimmerSilhouetteEcho(t.BG, peakColor))),
-			// record mailbox silhouette for transitions
+			// transition: capture mailbox silhouette when idle (source) and
+			// fade the captured compose silhouette on return (target).
 			ScreenEffect(composeTransition.SourceEffect()),
+			ScreenEffect(composeTransition.TargetEffect()),
 			// --- other effects (paused during wormhole iteration) ---
 			// If(&onDrifting).Then(ScreenEffect(ShimmerDrifting(t.BG, peakColor))),
 			// If(&onTunnel).Then(ScreenEffect(ShimmerTunnel(t.BG, peakColor).Speed(&tunnelSpeed))),
@@ -426,6 +485,8 @@ func main() {
 											If(&row.Unread).
 												Then(Style{Attr: AttrBold}).
 												Else(Style{})),
+										SpaceW(1),
+										If(&row.Starred).Then(Text("★").FG(t.Accent)),
 									),
 									SpaceW(2),
 									Text(&row.Date).Dim(),
@@ -461,10 +522,55 @@ func main() {
 				),
 			),
 			SpaceH(1),
-			Text("q quit · j/k nav · h/l pane · enter open · c compose · r reply · a archive · d delete · u undo · / search").FG(t.Muted),
+
+			// help modal — ? toggles. Vignette subtly darkens the rest of
+			// the screen; the modal itself is dodged so it stays crisp.
+			If(&helpOpen).Then(OverlayNode{
+				Centered: true,
+				Child: VBox.Gap(1).Width(56).Fill(t.BG).Border(BorderSoft).BorderFG(t.Subtle).NodeRef(&helpRef)(
+					SpaceH(1),
+					Text("  keyboard").FG(t.Bright).Bold(),
+					SpaceH(1),
+					HBox.Gap(4)(
+						SpaceW(2),
+						VBox.Grow(1)(
+							Text("navigate").FG(t.Subtle),
+							HBox(Text("  j / k").FG(t.FG), SpaceW(2), Text("up / down").Dim()),
+							HBox(Text("  h / l").FG(t.FG), SpaceW(2), Text("pane left / right").Dim()),
+							HBox(Text("  tab").FG(t.FG), SpaceW(2), Text("next pane").Dim()),
+							HBox(Text("  enter").FG(t.FG), SpaceW(2), Text("open").Dim()),
+							HBox(Text("  o").FG(t.FG), SpaceW(2), Text("expand thread").Dim()),
+							SpaceH(1),
+							Text("search").FG(t.Subtle),
+							HBox(Text("  /").FG(t.FG), SpaceW(2), Text("search").Dim()),
+						),
+						VBox.Grow(1)(
+							Text("actions").FG(t.Subtle),
+							HBox(Text("  c").FG(t.FG), SpaceW(2), Text("compose").Dim()),
+							HBox(Text("  r").FG(t.FG), SpaceW(2), Text("reply").Dim()),
+							HBox(Text("  a").FG(t.FG), SpaceW(2), Text("archive").Dim()),
+							HBox(Text("  d").FG(t.FG), SpaceW(2), Text("delete").Dim()),
+							HBox(Text("  s").FG(t.FG), SpaceW(2), Text("star").Dim()),
+							HBox(Text("  e").FG(t.FG), SpaceW(2), Text("toggle read").Dim()),
+							HBox(Text("  u").FG(t.FG), SpaceW(2), Text("undo").Dim()),
+						),
+					),
+					SpaceH(1),
+					HBox(SpaceW(2), Text("? or esc to close").FG(t.Muted).Italic()),
+					SpaceH(1),
+					ScreenEffect(
+						SEVignette().Strength(Animate.From(0)(0.55)).Dodge(&helpRef).Smooth(),
+					),
+				),
+			}).Else(
+				ScreenEffect(
+					SEVignette().Strength(Animate.From(0.55)(0)).Dodge(&helpRef).Smooth(),
+				),
+			),
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
+		Handle("?", func() { helpOpen = !helpOpen }).
 		Handle(",", func() {
 			shimmerIdx = (shimmerIdx - 1 + len(variantNames)) % len(variantNames)
 			// applyVariant()
@@ -555,6 +661,10 @@ func main() {
 			}
 		}).
 		Handle("<Escape>", func() {
+			if helpOpen {
+				helpOpen = false
+				return
+			}
 			if pane > 0 {
 				pane--
 				updateFocus()
@@ -814,6 +924,9 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	// compose view layout
 	app.View("compose",
 		VBox(
+			// symmetric: source captures compose silhouette when idle so the
+			// return transition (compose → mailbox) has something to fade out.
+			ScreenEffect(transition.SourceEffect()),
 			ScreenEffect(transition.TargetEffect()),
 			LayerView(ed.Layer()).Grow(1),
 
@@ -943,7 +1056,13 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 	// keybindings
 	if router, ok := app.ViewRouter("compose"); ok {
-		exitCompose := func() { composeActive = false; reset(); app.HideCursor(); app.Go("main") }
+		exitCompose := func() {
+			composeActive = false
+			reset()
+			app.HideCursor()
+			transition.Start()
+			app.Go("main")
+		}
 
 		router.Handle("<C-q>", func(_ riffkey.Match) { exitCompose() })
 

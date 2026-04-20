@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 
 	imaplib "github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
@@ -30,6 +31,12 @@ type Config struct {
 
 type IMAP struct {
 	config Config
+
+	// mu serialises access to the primary imap client. With IDLE running on
+	// a separate connection, multiple goroutines may try to issue foreground
+	// ops (UI actions vs. idle-triggered syncs); the mutex collapses them
+	// into a safe serial stream.
+	mu     sync.Mutex
 	client *imapclient.Client
 }
 
@@ -95,6 +102,8 @@ func isConnectionError(err error) bool {
 }
 
 func withRetry[T any](im *IMAP, fn func() (T, error)) (T, error) {
+	im.mu.Lock()
+	defer im.mu.Unlock()
 	if im.client == nil {
 		var zero T
 		if err := im.reconnect(); err != nil {

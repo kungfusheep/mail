@@ -396,6 +396,13 @@ func (m *Mailbox) BuildThreadDisplay() {
 				sender = from.Email
 			}
 		}
+		starred := false
+		for _, msg := range t.Messages {
+			if msg.Starred {
+				starred = true
+				break
+			}
+		}
 		m.threadRows = append(m.threadRows, ThreadRow{
 			ThreadIdx: i,
 			MsgIdx:    -1,
@@ -403,6 +410,7 @@ func (m *Mailbox) BuildThreadDisplay() {
 			Sender:    sender,
 			Date:      relativeTime(t.Date),
 			Unread:    t.Unread > 0,
+			Starred:   starred,
 		})
 	}
 }
@@ -439,6 +447,7 @@ func (m *Mailbox) ToggleThread(sel int) {
 				Label:     name,
 				Date:      relativeTime(msg.Date),
 				Unread:    !msg.Read,
+				Starred:   msg.Starred,
 				Grouped:   true,
 			})
 		}
@@ -1028,6 +1037,7 @@ type ThreadRow struct {
 	Sender    string
 	Date      string
 	Unread    bool
+	Starred   bool
 	Expanded  bool
 	Selected  bool
 	Grouped   bool

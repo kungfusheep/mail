@@ -13,7 +13,8 @@ import (
 )
 
 type Cache struct {
-	db *sql.DB
+	db   *sql.DB
+	subs pubsub
 }
 
 func New() (*Cache, error) {
@@ -391,16 +392,23 @@ func (c *Cache) GetFolders() ([]provider.Folder, error) {
 
 // PutThread upserts the thread row. It does not touch label associations —
 // use AddThreadToLabel/RemoveThreadFromLabel or ReplaceThreads for those.
+// Publishes to every label the thread currently belongs to so subscribers
+// of any affected view get notified.
 func (c *Cache) PutThread(t provider.Thread) error {
 	data, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
-	_, err = c.db.Exec(
+	if _, err = c.db.Exec(
 		"INSERT OR REPLACE INTO threads (id, data, date, unread) VALUES (?, ?, ?, ?)",
 		t.ID, string(data), t.Date.Unix(), t.Unread,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	for _, label := range c.labelsForThread(t.ID) {
+		c.subs.publish(label)
+	}
+	return nil
 }
 
 // ReplaceThreads replaces the set of threads associated with a label. Any
@@ -441,11 +449,17 @@ func (c *Cache) ReplaceThreads(label string, threads []provider.Thread) error {
 			return err
 		}
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	c.subs.publish(label)
+	return nil
 }
 
 // DeleteThread removes the thread row and all its label associations.
 func (c *Cache) DeleteThread(id string) error {
+	// capture labels before deleting so we can notify their subscribers
+	affected := c.labelsForThread(id)
 	tx, err := c.db.Begin()
 	if err != nil {
 		return err
@@ -457,26 +471,38 @@ func (c *Cache) DeleteThread(id string) error {
 	if _, err := tx.Exec("DELETE FROM threads WHERE id = ?", id); err != nil {
 		return err
 	}
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	for _, label := range affected {
+		c.subs.publish(label)
+	}
+	return nil
 }
 
 // AddThreadToLabel associates a thread with a label.
 func (c *Cache) AddThreadToLabel(threadID, label string) error {
-	_, err := c.db.Exec(
+	if _, err := c.db.Exec(
 		"INSERT OR IGNORE INTO thread_labels (thread_id, label) VALUES (?, ?)",
 		threadID, label,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	c.subs.publish(label)
+	return nil
 }
 
 // RemoveThreadFromLabel removes the thread→label association. The thread row
 // stays in place in case it's still associated with other labels.
 func (c *Cache) RemoveThreadFromLabel(threadID, label string) error {
-	_, err := c.db.Exec(
+	if _, err := c.db.Exec(
 		"DELETE FROM thread_labels WHERE thread_id = ? AND label = ?",
 		threadID, label,
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	c.subs.publish(label)
+	return nil
 }
 
 func (c *Cache) GetThreads(label string, limit int) ([]provider.Thread, error) {
