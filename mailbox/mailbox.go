@@ -5,6 +5,7 @@ import (
 	"log"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/kungfusheep/mail/cache"
@@ -24,6 +25,11 @@ type Mailbox struct {
 	folderNames []string
 	canonEnd    int
 
+	// displayMu serialises mutations to threads / threadRows. Actions run on
+	// the UI goroutine; the cache-publish subscriber runs separately. Without
+	// this both paths race through LoadThreads + BuildThreadDisplay and can
+	// leave the display in an inconsistent (out-of-date-order) state.
+	displayMu  sync.Mutex
 	threads    []provider.Thread
 	threadRows []ThreadRow
 
@@ -191,6 +197,14 @@ func (m *Mailbox) ActiveFolderID() string {
 	return ""
 }
 
+// ActiveFolderCanonical returns the canonical display name of the active
+// folder (e.g. "Inbox", "Drafts", "Trash") or "" if the folder isn't one
+// of the well-known system folders. Callers use this to special-case
+// behaviour by folder kind, without coupling to raw IMAP folder IDs.
+func (m *Mailbox) ActiveFolderCanonical() string {
+	return canonicalDisplayName(m.ActiveFolderID())
+}
+
 func (m *Mailbox) FolderCount() int {
 	return len(displayFolders)
 }
@@ -209,9 +223,12 @@ func (m *Mailbox) LoadThreads() {
 		return
 	}
 	threads, err := m.cache.GetThreads(m.ActiveFolderID(), 25)
-	if err == nil {
-		m.threads = threads
+	if err != nil {
+		return
 	}
+	m.displayMu.Lock()
+	m.threads = threads
+	m.displayMu.Unlock()
 }
 
 func (m *Mailbox) SyncSent() {
@@ -251,13 +268,16 @@ func (m *Mailbox) SyncThreads() error {
 	if id == "" {
 		return nil
 	}
+	log.Printf("SyncThreads: fetching folder=%q", id)
 	result, err := m.imap.ListThreads(provider.ListOptions{
 		Folder:     id,
 		MaxResults: 25,
 	})
 	if err != nil {
+		log.Printf("SyncThreads: %q failed: %v", id, err)
 		return err
 	}
+	log.Printf("SyncThreads: %q returned %d threads", id, len(result.Threads))
 
 	// merge cached sent messages into threads for complete conversations
 	if m.cache != nil {
@@ -375,6 +395,8 @@ func (m *Mailbox) mergeWithSentMessages(threads []provider.Thread) []provider.Th
 }
 
 func (m *Mailbox) BuildThreadDisplay() {
+	m.displayMu.Lock()
+	defer m.displayMu.Unlock()
 	m.threadRows = nil
 	for i, t := range m.threads {
 		sender := ""
@@ -403,6 +425,10 @@ func (m *Mailbox) BuildThreadDisplay() {
 				break
 			}
 		}
+		hasDraft := false
+		if m.cache != nil {
+			hasDraft = m.cache.HasDraft(t.ID)
+		}
 		m.threadRows = append(m.threadRows, ThreadRow{
 			ThreadIdx: i,
 			MsgIdx:    -1,
@@ -411,6 +437,7 @@ func (m *Mailbox) BuildThreadDisplay() {
 			Date:      relativeTime(t.Date),
 			Unread:    t.Unread > 0,
 			Starred:   starred,
+			HasDraft:  hasDraft,
 		})
 	}
 }
@@ -684,7 +711,7 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 	m.previewText = strings.Join(m.previewLines, "\n")
 }
 
-// actions — each returns an undo closure + description
+// actions — each returns an undo closure + description.
 
 func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
@@ -866,6 +893,41 @@ func (m *Mailbox) cancelCommand(id string) {
 
 // commands
 
+// draftToMessage builds a provider.Message from a cache.Draft for the IMAP
+// SaveDraft path. Recipients are parsed from the comma-separated fields the
+// compose UI stores; threading headers come from the thread the draft is
+// attached to (if any), resolved at send time via replyMsg rather than here.
+func draftToMessage(d cache.Draft) provider.Message {
+	return provider.Message{
+		To:       parseAddresses(d.To),
+		CC:       parseAddresses(d.Cc),
+		BCC:      parseAddresses(d.Bcc),
+		Subject:  d.Subject,
+		TextBody: d.Body,
+	}
+}
+
+func parseAddresses(s string) []provider.Address {
+	if s == "" {
+		return nil
+	}
+	var out []provider.Address
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if idx := strings.LastIndex(part, "<"); idx >= 0 {
+			name := strings.TrimSpace(part[:idx])
+			email := strings.TrimSpace(strings.TrimRight(part[idx+1:], ">"))
+			out = append(out, provider.Address{Name: name, Email: email})
+		} else {
+			out = append(out, provider.Address{Email: part})
+		}
+	}
+	return out
+}
+
 func (m *Mailbox) ProcessPendingCommands() {
 	if m.cache == nil || m.imap == nil {
 		return
@@ -875,7 +937,27 @@ func (m *Mailbox) ProcessPendingCommands() {
 		return
 	}
 	folder := m.ActiveFolderID()
+	// restore primary connection to the user's active folder after the loop.
+	// sync_draft / delete_draft internally SELECT [Gmail]/Drafts, and we must
+	// not leave the connection pointing there — subsequent UID-based ops
+	// (MarkRead, Star, preview fetches) would otherwise target the wrong
+	// folder and corrupt state.
+	defer func() {
+		if folder != "" {
+			_ = m.imap.SelectFolder(folder)
+		}
+	}()
 	for _, cmd := range cmds {
+		// before each UID-dependent op, ensure we're SELECTed on the folder
+		// the UID is valid in. For user actions (mark_read etc.) that means
+		// the active folder the command was queued against. sync_draft and
+		// delete_draft manage their own SELECT.
+		switch cmd.Action {
+		case "mark_read", "mark_unread", "star", "unstar", "move":
+			if folder != "" {
+				_ = m.imap.SelectFolder(folder)
+			}
+		}
 		var cmdErr error
 		dest := ""
 		switch cmd.Action {
@@ -891,6 +973,43 @@ func (m *Mailbox) ProcessPendingCommands() {
 			if f, ok := cmd.Params["folder"]; ok {
 				dest = f
 				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{folder})
+			}
+		case "sync_draft":
+			draftsFolder := m.folderIDByDisplayName("Drafts")
+			if draftsFolder == "" {
+				cmdErr = fmt.Errorf("no drafts folder")
+				log.Printf("sync_draft: no Drafts folder resolved (folders loaded: %d)", len(m.folders))
+				break
+			}
+			d, found, gerr := m.cache.GetDraft(cmd.TargetID)
+			if gerr != nil {
+				cmdErr = gerr
+				break
+			}
+			if !found {
+				log.Printf("sync_draft: draft %q vanished before processing", cmd.TargetID)
+				break
+			}
+			msg := draftToMessage(d)
+			log.Printf("sync_draft: pushing thread=%q prevUID=%q subject=%q", d.ThreadID, d.RemoteUID, d.Subject)
+			newUID, serr := m.imap.SaveDraft(draftsFolder, msg, d.RemoteUID)
+			if serr != nil {
+				cmdErr = serr
+				log.Printf("sync_draft: failed: %v", serr)
+				break
+			}
+			log.Printf("sync_draft: ok thread=%q newUID=%s", d.ThreadID, newUID)
+			cmdErr = m.cache.UpdateDraftRemoteUID(d.ThreadID, newUID)
+		case "delete_draft":
+			draftsFolder := m.folderIDByDisplayName("Drafts")
+			if draftsFolder == "" {
+				cmdErr = fmt.Errorf("no drafts folder")
+				break
+			}
+			log.Printf("delete_draft: expunging UID=%s", cmd.TargetID)
+			cmdErr = m.imap.DeleteDraft(draftsFolder, cmd.TargetID)
+			if cmdErr != nil {
+				log.Printf("delete_draft: failed: %v", cmdErr)
 			}
 		}
 		result := "ok"
@@ -959,15 +1078,25 @@ func canonicalRank(id string) int {
 	return -1
 }
 
-// folderIDByDisplayName returns the raw IMAP folder ID for a canonical display name
-// (e.g. "Trash" → "[Google Mail]/Bin", "Archive" → "[Google Mail]/All Mail")
+// folderIDByDisplayName returns the raw IMAP folder ID for a canonical display
+// name (e.g. "Trash" → "[Google Mail]/Bin", "Archive" → "[Google Mail]/All
+// Mail"). Some accounts expose duplicate canonical folders — notably Gmail
+// accounts have both "[Gmail]/Drafts" and "[Google Mail]/Drafts" — so we
+// pick the one with the most messages, matching BuildFolderDisplay's
+// dedup rule. Ties fall to the first one encountered.
 func (m *Mailbox) folderIDByDisplayName(display string) string {
+	var bestID string
+	bestTotal := -1
 	for _, f := range m.folders {
-		if canonicalDisplayName(f.ID) == display {
-			return f.ID
+		if canonicalDisplayName(f.ID) != display {
+			continue
+		}
+		if f.Total > bestTotal {
+			bestTotal = f.Total
+			bestID = f.ID
 		}
 	}
-	return ""
+	return bestID
 }
 
 // helpers
@@ -1038,6 +1167,7 @@ type ThreadRow struct {
 	Date      string
 	Unread    bool
 	Starred   bool
+	HasDraft  bool
 	Expanded  bool
 	Selected  bool
 	Grouped   bool

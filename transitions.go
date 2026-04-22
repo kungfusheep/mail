@@ -81,6 +81,16 @@ func (t *viewTransition) TargetEffect() Effect {
 	return targetTransitionEffect{tr: t}
 }
 
+// isEmoji returns true for runes that Ghostty (and most modern terminals)
+// render as wide glyphs through a separate rasterisation path. Redrawing
+// these cells per-frame — which the colour lerp below naturally does — causes
+// visible flicker while the transition is in progress. Substituting them
+// with a space for the duration of the transition sidesteps the problem
+// without touching the app's own buffer state.
+func isEmoji(r rune) bool {
+	return r >= 0x1F000 || (r >= 0x2600 && r <= 0x27BF) || (r >= 0x2300 && r <= 0x23FF) || (r >= 0x2B00 && r <= 0x2BFF)
+}
+
 type sourceTransitionEffect struct{ tr *viewTransition }
 
 func (s sourceTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
@@ -144,6 +154,9 @@ func (s targetTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 		for y := 0; y < h; y++ {
 			for x := 0; x < w; x++ {
 				cell := s.tr.oldCells[y*w+x]
+				if isEmoji(cell.Rune) {
+					cell.Rune = ' '
+				}
 				cell.Style.FG = lerp(cell.Style.FG, s.tr.bg, fadeAmt)
 				cell.Style.BG = lerp(cell.Style.BG, s.tr.bg, fadeAmt)
 				buf.Set(x, y, cell)
@@ -159,6 +172,9 @@ func (s targetTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			cell := buf.Get(x, y)
+			if isEmoji(cell.Rune) {
+				cell.Rune = ' '
+			}
 			cell.Style.FG = lerp(s.tr.bg, cell.Style.FG, eased)
 			cell.Style.BG = lerp(s.tr.bg, cell.Style.BG, eased)
 			buf.Set(x, y, cell)

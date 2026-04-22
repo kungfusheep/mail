@@ -54,3 +54,28 @@ func TestSanitize_BritishGasPattern(t *testing.T) {
 		t.Errorf("got %q (len %d), want %q (len %d)", got, len(got), want, len(want))
 	}
 }
+
+// RFC 822 messages use CRLF line endings. If a stray \r survives into a
+// rendered cell, the terminal interprets it as "move cursor to column 0"
+// and every subsequent cell on that row lands at the wrong position —
+// overwriting content on the same visual row (e.g. sidebar labels when
+// a preview pane row contains \r). Always strip.
+func TestSanitize_StripsCarriageReturns(t *testing.T) {
+	input := "line one\r\nline two\r\nline three"
+	got := Sanitize(input)
+	want := "line one\nline two\nline three"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}
+
+// Isolated \r with no \n should also be stripped; not all content uses
+// well-formed CRLF.
+func TestSanitize_StripsBareCarriageReturn(t *testing.T) {
+	input := "before\rafter"
+	got := Sanitize(input)
+	want := "beforeafter"
+	if got != want {
+		t.Errorf("got %q, want %q", got, want)
+	}
+}

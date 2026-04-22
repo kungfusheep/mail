@@ -6,8 +6,12 @@ import (
 )
 
 // Sanitize strips zero-width and invisible Unicode characters that cause
-// terminal rendering issues (cursor drift, ghost characters). Call once
-// on text converted from HTML before display.
+// terminal rendering issues (cursor drift, ghost characters). Also strips
+// carriage returns — RFC 822 messages use CRLF line endings, and a stray
+// \r written as a cell rune causes the terminal to jump to column 0,
+// wreaking havoc on any text on the same row. \n is preserved as the
+// sole line-break character. Call once on text converted from HTML
+// before display.
 func Sanitize(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -21,6 +25,12 @@ func Sanitize(s string) string {
 }
 
 func isInvisible(r rune) bool {
+	// carriage return is a control character that, if rendered as a cell
+	// rune, sends the terminal cursor to column 0 of the current row —
+	// overwriting anything already drawn there. Always strip.
+	if r == '\r' {
+		return true
+	}
 	// keep normal whitespace and printable characters
 	if r <= 0x7F {
 		return false

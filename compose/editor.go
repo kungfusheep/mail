@@ -314,13 +314,24 @@ func (e *Editor) ResetDocument(doc *Document) {
 	e.characterHistory = nil
 	e.InvalidateCache()
 	e.rebuildCharacterHistory()
+	// if dimensions are already known (second+ load in the same session),
+	// SetSize won't re-run ensureCursorVisible because nothing changed — so
+	// do it here explicitly so typewriter mode recentres for the fresh doc.
+	e.ensureCursorVisible()
 }
 
-// SetSize sets the screen dimensions and invalidates the cache
+// SetSize sets the screen dimensions and invalidates the cache. On first
+// sizing (from zero) or on resize we reposition the viewport so typewriter
+// mode actually centres on load — without this, a freshly-loaded draft
+// shows at topLine=0 until the user moves the cursor.
 func (e *Editor) SetSize(w, h int) {
+	if w == e.screenWidth && h == e.screenHeight {
+		return
+	}
 	e.screenWidth = w
 	e.screenHeight = h
 	e.InvalidateCache()
+	e.ensureCursorVisible()
 }
 
 // ScreenWidth returns the current screen width

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/kungfusheep/mail/provider"
@@ -136,6 +137,18 @@ func (c *Cache) migrate() error {
 			result TEXT NOT NULL DEFAULT '',
 			error TEXT NOT NULL DEFAULT '',
 			created_at INTEGER NOT NULL
+		);
+
+		CREATE TABLE IF NOT EXISTS drafts (
+			thread_id TEXT PRIMARY KEY,
+			to_addrs TEXT NOT NULL DEFAULT '',
+			cc_addrs TEXT NOT NULL DEFAULT '',
+			bcc_addrs TEXT NOT NULL DEFAULT '',
+			subject TEXT NOT NULL DEFAULT '',
+			body TEXT NOT NULL DEFAULT '',
+			remote_uid TEXT NOT NULL DEFAULT '',
+			synced_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL
 		);
 	`)
 	if err != nil {
@@ -275,6 +288,170 @@ func (c *Cache) SearchContacts(query string) ([]provider.Address, error) {
 		results = append(results, a)
 	}
 	return results, rows.Err()
+}
+
+// drafts — auto-saved compose state keyed by thread id (empty = new compose).
+// A draft is considered empty if subject+body are whitespace-only, in which
+// case PutDraft silently deletes rather than stores. Recipients alone don't
+// count — a draft addressed to nobody with no content is still empty.
+
+type Draft struct {
+	ThreadID  string
+	To        string
+	Cc        string
+	Bcc       string
+	Subject   string
+	Body      string
+	RemoteUID string // UID in the server-side Drafts folder; "" until first sync
+	UpdatedAt time.Time
+}
+
+func (d Draft) IsEmpty() bool {
+	return strings.TrimSpace(d.Subject) == "" && strings.TrimSpace(d.Body) == ""
+}
+
+// PutDraft upserts the draft for its ThreadID. If the draft is empty (nothing
+// meaningful to save) it silently deletes instead — no point keeping whitespace.
+// A non-empty save also queues a sync_draft command so a subsequent
+// ProcessPendingCommands flushes it to the server-side Drafts folder.
+// Command IDs are stable per-thread so rapid re-saves coalesce to one.
+//
+// Uses ON CONFLICT so remote_uid and synced_at are preserved across edits —
+// we only want to clobber those after a successful server sync.
+func (c *Cache) PutDraft(d Draft) error {
+	if d.IsEmpty() {
+		return c.DeleteDraft(d.ThreadID)
+	}
+	if _, err := c.db.Exec(
+		`INSERT INTO drafts
+		 (thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(thread_id) DO UPDATE SET
+		   to_addrs = excluded.to_addrs,
+		   cc_addrs = excluded.cc_addrs,
+		   bcc_addrs = excluded.bcc_addrs,
+		   subject = excluded.subject,
+		   body = excluded.body,
+		   updated_at = excluded.updated_at`,
+		d.ThreadID, d.To, d.Cc, d.Bcc, d.Subject, d.Body, time.Now().Unix(),
+	); err != nil {
+		return err
+	}
+	return c.PutCommand(Command{
+		ID:        "sync_draft-" + d.ThreadID,
+		Action:    "sync_draft",
+		TargetID:  d.ThreadID,
+		Status:    "pending",
+		CreatedAt: time.Now(),
+	})
+}
+
+// SeedDraft creates a cache draft row mirroring a server-side draft we just
+// pulled in (e.g. when the user clicks a thread in the Drafts folder). The
+// row is inserted only if no local row exists — if the user already has
+// unsynced local edits for this thread id, those take precedence. Does NOT
+// queue a sync command because the local state matches the server.
+func (c *Cache) SeedDraft(d Draft) error {
+	_, err := c.db.Exec(
+		`INSERT OR IGNORE INTO drafts
+		 (thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, remote_uid, synced_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		d.ThreadID, d.To, d.Cc, d.Bcc, d.Subject, d.Body,
+		d.RemoteUID, time.Now().Unix(), time.Now().Unix(),
+	)
+	return err
+}
+
+func (c *Cache) GetDraft(threadID string) (Draft, bool, error) {
+	var d Draft
+	var updatedAt int64
+	err := c.db.QueryRow(
+		`SELECT thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, remote_uid, updated_at
+		 FROM drafts WHERE thread_id = ?`, threadID,
+	).Scan(&d.ThreadID, &d.To, &d.Cc, &d.Bcc, &d.Subject, &d.Body, &d.RemoteUID, &updatedAt)
+	if err == sql.ErrNoRows {
+		return Draft{}, false, nil
+	}
+	if err != nil {
+		return Draft{}, false, err
+	}
+	d.UpdatedAt = time.Unix(updatedAt, 0)
+	return d, true, nil
+}
+
+// DeleteDraft removes the draft row. If the row had a remote_uid, queues a
+// delete_draft command so ProcessPendingCommands can expunge the server-side
+// copy too.
+func (c *Cache) DeleteDraft(threadID string) error {
+	// capture remote_uid before we delete so we can schedule the server
+	// expunge — errors (e.g. row doesn't exist) are fine, we just don't
+	// queue a command.
+	var remoteUID string
+	_ = c.db.QueryRow("SELECT remote_uid FROM drafts WHERE thread_id = ?", threadID).Scan(&remoteUID)
+
+	if _, err := c.db.Exec("DELETE FROM drafts WHERE thread_id = ?", threadID); err != nil {
+		return err
+	}
+	// drop any pending sync for this thread — it's moot now
+	_ = c.DeleteCommand("sync_draft-" + threadID)
+
+	if remoteUID != "" {
+		return c.PutCommand(Command{
+			ID:        "delete_draft-" + remoteUID,
+			Action:    "delete_draft",
+			TargetID:  remoteUID,
+			Status:    "pending",
+			CreatedAt: time.Now(),
+		})
+	}
+	return nil
+}
+
+// UpdateDraftRemoteUID records the server UID assigned to a synced draft.
+// Also bumps synced_at so subsequent sync cycles can skip this row until it
+// changes again.
+func (c *Cache) UpdateDraftRemoteUID(threadID, remoteUID string) error {
+	_, err := c.db.Exec(
+		"UPDATE drafts SET remote_uid = ?, synced_at = ? WHERE thread_id = ?",
+		remoteUID, time.Now().Unix(), threadID,
+	)
+	return err
+}
+
+// HasDraft returns true if a draft exists for this thread. Cheaper than
+// GetDraft when the caller only needs the boolean (e.g. thread-list indicator).
+func (c *Cache) HasDraft(threadID string) bool {
+	var one int
+	err := c.db.QueryRow("SELECT 1 FROM drafts WHERE thread_id = ? LIMIT 1", threadID).Scan(&one)
+	return err == nil
+}
+
+// GCEmptyDrafts deletes any draft rows whose subject and body are blank after
+// trimming. Safety net for leftover rows from older writes.
+func (c *Cache) GCEmptyDrafts() error {
+	_, err := c.db.Exec(
+		"DELETE FROM drafts WHERE TRIM(subject) = '' AND TRIM(body) = ''",
+	)
+	return err
+}
+
+// GetLastDraft returns the most recently updated draft across all threads.
+// Used by the "resume last draft" action — works for new-compose and replies.
+func (c *Cache) GetLastDraft() (Draft, bool, error) {
+	var d Draft
+	var updatedAt int64
+	err := c.db.QueryRow(
+		`SELECT thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, updated_at
+		 FROM drafts ORDER BY updated_at DESC LIMIT 1`,
+	).Scan(&d.ThreadID, &d.To, &d.Cc, &d.Bcc, &d.Subject, &d.Body, &updatedAt)
+	if err == sql.ErrNoRows {
+		return Draft{}, false, nil
+	}
+	if err != nil {
+		return Draft{}, false, err
+	}
+	d.UpdatedAt = time.Unix(updatedAt, 0)
+	return d, true, nil
 }
 
 // sent messages — stored locally for threading

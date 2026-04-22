@@ -77,6 +77,8 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	// sweep any leftover empty-body drafts from earlier writes
+	_ = db.GCEmptyDrafts()
 
 	cfg, err := imapprov.LoadConfig()
 	if err != nil {
@@ -358,6 +360,15 @@ func main() {
 	}
 
 	handleEnter := func() {
+		// Drafts folder: Enter resumes the draft in the composer rather than
+		// opening a preview — the thread is a draft-in-progress, not a
+		// conversation to read.
+		if mb.ActiveFolderCanonical() == "Drafts" {
+			if t := mb.SelectedThread(threadSel); t != nil && len(t.Messages) > 0 {
+				comp.ResumeFromMessage(t.Messages[len(t.Messages)-1])
+			}
+			return
+		}
 		if msg := mb.SelectedMessage(threadSel); msg != nil {
 			mb.LoadPreview(*msg, app.Size().Width)
 			mb.MarkRead(threadSel)
@@ -412,6 +423,10 @@ func main() {
 
 	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
 	accentMarker := Style{FG: t.Accent}
+
+	// kv backs the help modal's key→description rows; IIFEs in the template
+	// spread this into a ForEach for rendering.
+	type kv struct{ key, desc string }
 
 	// peakColor := Hex(0x242424)
 
@@ -494,6 +509,8 @@ func main() {
 								HBox(
 									SpaceW(2),
 									Text(&row.Sender).Dim(),
+									SpaceW(2),
+									If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
 								),
 							)
 						}),
@@ -527,44 +544,57 @@ func main() {
 			// the screen; the modal itself is dodged so it stays crisp.
 			If(&helpOpen).Then(OverlayNode{
 				Centered: true,
-				Child: VBox.Gap(1).Width(56).Fill(t.BG).Border(BorderSoft).BorderFG(t.Subtle).NodeRef(&helpRef)(
-					SpaceH(1),
-					Text("  keyboard").FG(t.Bright).Bold(),
-					SpaceH(1),
-					HBox.Gap(4)(
-						SpaceW(2),
-						VBox.Grow(1)(
-							Text("navigate").FG(t.Subtle),
-							HBox(Text("  j / k").FG(t.FG), SpaceW(2), Text("up / down").Dim()),
-							HBox(Text("  h / l").FG(t.FG), SpaceW(2), Text("pane left / right").Dim()),
-							HBox(Text("  tab").FG(t.FG), SpaceW(2), Text("next pane").Dim()),
-							HBox(Text("  enter").FG(t.FG), SpaceW(2), Text("open").Dim()),
-							HBox(Text("  o").FG(t.FG), SpaceW(2), Text("expand thread").Dim()),
-							SpaceH(1),
-							Text("search").FG(t.Subtle),
-							HBox(Text("  /").FG(t.FG), SpaceW(2), Text("search").Dim()),
-						),
-						VBox.Grow(1)(
-							Text("actions").FG(t.Subtle),
-							HBox(Text("  c").FG(t.FG), SpaceW(2), Text("compose").Dim()),
-							HBox(Text("  r").FG(t.FG), SpaceW(2), Text("reply").Dim()),
-							HBox(Text("  a").FG(t.FG), SpaceW(2), Text("archive").Dim()),
-							HBox(Text("  d").FG(t.FG), SpaceW(2), Text("delete").Dim()),
-							HBox(Text("  s").FG(t.FG), SpaceW(2), Text("star").Dim()),
-							HBox(Text("  e").FG(t.FG), SpaceW(2), Text("toggle read").Dim()),
-							HBox(Text("  u").FG(t.FG), SpaceW(2), Text("undo").Dim()),
-						),
+				Child: VBox.Width(56).Fill(t.BG).Border(BorderSoft).BorderFG(t.BG).NodeRef(&helpRef).Gap(1)(
+					Text("keyboard").FG(t.Bright).Bold(),
+					HBox(
+						func() any {
+							rows := []kv{
+								{"j / k", "up / down"},
+								{"h / l", "pane left / right"},
+								{"tab", "next pane"},
+								{"enter", "open"},
+								{"o", "expand thread"},
+								{"/", "search"},
+							}
+							return VBox.Grow(3)(
+								Text("navigate").FG(t.Subtle),
+								ForEach(&rows, func(r *kv) any {
+									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(8), Text(&r.desc).FG(t.Subtle))
+								}),
+							)
+						}(),
+						func() any {
+							rows := []kv{
+								{"c", "compose"},
+								{"C", "resume draft"},
+								{"r", "reply"},
+								{"a", "archive"},
+								{"d", "delete"},
+								{"s", "star"},
+								{"e", "toggle read"},
+								{"u", "undo"},
+							}
+							return VBox.Grow(2)(
+								Text("actions").FG(t.Subtle),
+								ForEach(&rows, func(r *kv) any {
+									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(3), Text(&r.desc).FG(t.Subtle))
+								}),
+							)
+						}(),
 					),
-					SpaceH(1),
-					HBox(SpaceW(2), Text("? or esc to close").FG(t.Muted).Italic()),
-					SpaceH(1),
 					ScreenEffect(
-						SEVignette().Strength(Animate.From(0)(0.55)).Dodge(&helpRef).Smooth(),
+						SEVignette().Strength(Animate.From(0).Duration(1*time.Second).Ease(EaseOutQuint)(0.55)).Dodge(&helpRef).Smooth(),
+						SEDropShadow().Focus(&helpRef),
 					),
 				),
 			}).Else(
 				ScreenEffect(
-					SEVignette().Strength(Animate.From(0.55)(0)).Dodge(&helpRef).Smooth(),
+					// FIX: this is wrong - we don't
+					// currently have a way to reverse
+					// animations/screen effects when
+					// removing them - maybe needs a
+					// .ReverseOnExit() or an OnExit callback
+					SEVignette().Strength(Animate.Duration(1*time.Second).Ease(EaseOutQuint).From(0.55)(0)).Smooth(),
 				),
 			),
 		),
@@ -675,13 +705,18 @@ func main() {
 				mb.ToggleThread(threadSel)
 			}
 		}).
-		Handle("c", func() {
-			composeTransition.Start()
-			comp.Open()
-		}).
+		Handle("c", func() { comp.Open() }).
+		Handle("C", func() { comp.ResumeLast() }).
 		Handle("r", func() {
 			if t := mb.SelectedThread(threadSel); t != nil {
 				if row := mb.ThreadRowAt(threadSel); row != nil && row.MsgIdx < 0 {
+					// Drafts folder: r resumes the draft (muscle-memory
+					// consistency with Enter) rather than starting a
+					// nonsensical reply to your own draft.
+					if mb.ActiveFolderCanonical() == "Drafts" && len(t.Messages) > 0 {
+						comp.ResumeFromMessage(t.Messages[len(t.Messages)-1])
+						return
+					}
 					comp.Open()
 					comp.SetupReply(*t)
 				}
@@ -799,8 +834,10 @@ func main() {
 }
 
 type composeControls struct {
-	Open       func()
-	SetupReply func(provider.Thread)
+	Open              func()
+	SetupReply        func(provider.Thread)
+	ResumeLast        func()
+	ResumeFromMessage func(provider.Message)
 }
 
 func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int, transition *viewTransition, theme AppTheme) composeControls {
@@ -817,7 +854,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	var contactResults []string
 	var contactSel int
 	var showContacts bool
-	var showDiscard, showSending bool
+	var showSending bool
 	var sendingStatus string
 	// tracks whether compose is the active view. the compose router's
 	// AddOnAfter hook refreshes the editor after every keypress, which calls
@@ -830,6 +867,23 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	var searchQuery, searchPrompt string
 	var searchFwd bool
 
+	// draft state — thread_id the composer is editing ("" = new compose).
+	// scheduleDraftSave debounces cache writes so we're not hitting sqlite
+	// on every keystroke; the timer is reset on every keypress. draftTouched
+	// tracks whether this session saw any edits — without it, exiting a
+	// never-touched fresh compose would "save" an empty state and silently
+	// delete any pre-existing "" draft row.
+	var currentDraftID string
+	var draftSaveTimer *time.Timer
+	var draftTouched bool
+
+	// pendingCursorShow: set true on every compose entry. On the first layer
+	// render (once dimensions are known) we Refresh the editor so the cursor
+	// becomes visible before the user touches the keyboard — otherwise the
+	// viewport is correct but the terminal cursor is missing, which feels
+	// disorienting. Cleared after the first render that satisfies it.
+	var pendingCursorShow bool
+
 	reset := func() {
 		to, cc, subject = "", "", ""
 		replyMsg = nil
@@ -839,6 +893,72 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		fieldFocus.Current = -1
 		focused = false
 		ed.ResetDocument(compose.NewDocument())
+		currentDraftID = ""
+		draftTouched = false
+	}
+
+	snapshotDraft := func() cache.Draft {
+		var body string
+		if ed != nil && ed.Doc() != nil {
+			var sb strings.Builder
+			_ = compose.WriteMarkdown(ed.Doc(), &sb)
+			body = sb.String()
+		}
+		// read directly from field state — outer to/cc/subject only sync
+		// on field exit, so snapshotting them would miss edits still
+		// in-flight while the user is typing into a field.
+		return cache.Draft{
+			ThreadID: currentDraftID,
+			To:       fieldTo.Value,
+			Cc:       fieldCC.Value,
+			Subject:  fieldSubject.Value,
+			Body:     body,
+		}
+	}
+
+	saveDraft := func() {
+		if db == nil {
+			return
+		}
+		d := snapshotDraft()
+		bodyLen := len(d.Body)
+		if err := db.PutDraft(d); err != nil {
+			log.Printf("saveDraft: PutDraft failed: %v", err)
+			return
+		}
+		log.Printf("saveDraft: wrote thread=%q subject=%q bodyLen=%d isEmpty=%v", d.ThreadID, d.Subject, bodyLen, d.IsEmpty())
+	}
+
+	scheduleDraftSave := func() {
+		if !composeActive || db == nil {
+			return
+		}
+		draftTouched = true
+		if draftSaveTimer != nil {
+			draftSaveTimer.Stop()
+		}
+		draftSaveTimer = time.AfterFunc(1*time.Second, saveDraft)
+	}
+
+	loadDraft := func(threadID string) bool {
+		if db == nil {
+			return false
+		}
+		d, found, err := db.GetDraft(threadID)
+		if err != nil || !found {
+			return false
+		}
+		to = d.To
+		cc = d.Cc
+		subject = d.Subject
+		fieldTo.Value = d.To
+		fieldTo.Cursor = len(d.To)
+		fieldCC.Value = d.Cc
+		fieldCC.Cursor = len(d.Cc)
+		fieldSubject.Value = d.Subject
+		fieldSubject.Cursor = len(d.Subject)
+		ed.ResetDocument(compose.ParseMarkdown(d.Body))
+		return true
 	}
 
 	send := func() {
@@ -877,6 +997,11 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			msg.Read = true
 			if db != nil {
 				db.PutSentMessage(msg)
+				// DeleteDraft queues a delete_draft command if there was a
+				// remote copy; flush it now so the server-side draft goes
+				// away in the same moment as the send.
+				db.DeleteDraft(currentDraftID)
+				go mb.ProcessPendingCommands()
 			}
 			log.Printf("sendMessage: sent to %s (msgid=%s)", to, msg.MessageID)
 			*statusText = fmt.Sprintf("sent to %s", to)
@@ -963,23 +1088,6 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				),
 			),
 
-			If(&showDiscard).Then(
-				Overlay.Centered().Backdrop().BackdropFG(theme.BG)(
-					VBox.Border(BorderRounded).BorderFG(theme.Muted).Width(40)(
-						SpaceH(1),
-						Text("discard changes?").Bold().Style(Style{Align: AlignCenter}).Width(38),
-						SpaceH(1),
-						HBox(
-							Space(),
-							Text("y").Bold(), Text(" discard").Dim(),
-							SpaceW(4),
-							Text("n").Bold(), Text(" cancel").Dim(),
-							Space(),
-						),
-						SpaceH(1),
-					),
-				),
-			),
 			If(&showSending).Then(
 				Overlay.Centered().Backdrop().BackdropFG(theme.BG)(
 					VBox.Border(BorderRounded).BorderFG(theme.Muted).Width(40)(
@@ -1004,10 +1112,32 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		h := ed.Layer().ViewportHeight()
 		if w > 0 && h > 0 {
 			ed.SetSize(w, h)
-			ed.UpdateDisplay()
+			if pendingCursorShow {
+				pendingCursorShow = false
+				// first render after compose entry — Refresh also calls
+				// updateCursor so the terminal cursor shows immediately.
+				ed.Refresh()
+			} else {
+				ed.UpdateDisplay()
+			}
 		}
 	}
 	ed.Layer().AlwaysRender = true
+
+	// heartbeat for long compose sessions — safety net that flushes the
+	// current state to server every 60s of continuous editing, so a crash
+	// mid-draft doesn't lose material written between commit points.
+	go func() {
+		ticker := time.NewTicker(60 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			if !composeActive || !draftTouched {
+				continue
+			}
+			saveDraft()
+			mb.ProcessPendingCommands()
+		}
+	}()
 
 	// compose search view
 	app.View("compose-search",
@@ -1057,6 +1187,19 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	// keybindings
 	if router, ok := app.ViewRouter("compose"); ok {
 		exitCompose := func() {
+			// final synchronous draft snapshot before tearing the view down —
+			// any pending debounced save is now moot. skip entirely if the
+			// session saw no edits so we don't clobber an existing draft with
+			// an empty-state delete.
+			if draftSaveTimer != nil {
+				draftSaveTimer.Stop()
+			}
+			if draftTouched {
+				saveDraft()
+				// flush any queued draft-sync commands so the server-side
+				// Drafts folder reflects this session as the user leaves.
+				go mb.ProcessPendingCommands()
+			}
 			composeActive = false
 			reset()
 			app.HideCursor()
@@ -1068,21 +1211,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 		router.Handle("<Esc>", func(_ riffkey.Match) {
 			ed.ExitDialogueIfEmpty()
-			if !ed.Dirty() {
-				exitCompose()
-				return
-			}
-			showDiscard = true
-			confirm := riffkey.NewRouter().Name("confirm-discard").NoCounts()
-			dismiss := func() { showDiscard = false; app.Pop() }
-			confirm.Handle("y", func(_ riffkey.Match) { dismiss(); exitCompose() })
-			confirm.Handle("Y", func(_ riffkey.Match) { dismiss(); exitCompose() })
-			confirm.Handle("<CR>", func(_ riffkey.Match) { dismiss(); exitCompose() })
-			confirm.Handle("n", func(_ riffkey.Match) { dismiss() })
-			confirm.Handle("N", func(_ riffkey.Match) { dismiss() })
-			confirm.Handle("<Esc>", func(_ riffkey.Match) { dismiss() })
-			confirm.AddOnAfter(func() { app.RequestRender() })
-			app.Push(confirm)
+			exitCompose()
 		})
 
 		// send panel
@@ -1138,6 +1267,10 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				handled := th.HandleKey(k)
 				if handled {
 					searchContacts()
+					// typing in To/Cc/Subject must mark the draft dirty too
+					// — without this, header-only edits never trigger
+					// scheduleDraftSave and never reach the server.
+					scheduleDraftSave()
 				}
 				return handled
 			})
@@ -1273,14 +1406,24 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			if focused {
 				app.HideCursor()
 			}
+			scheduleDraftSave()
 		})
 	}
 
 	return composeControls{
 		Open: func() {
 			reset()
+			// Give each new compose its own stable thread_id so multiple
+			// `c` sessions produce independent cache rows and independent
+			// server drafts. Without this, every new compose writes into
+			// the same slot, silently replacing the previous one.
+			currentDraftID = fmt.Sprintf("new-%d", time.Now().UnixNano())
 			ed.SetTypewriterMode(true)
 			composeActive = true
+			pendingCursorShow = true
+			// c is always a fresh canvas — never auto-loads a saved draft.
+			// To resume the last draft (any kind), the user presses C.
+			transition.Start()
 			app.Go("compose")
 			// no ed.Refresh() here — screen dimensions aren't set yet, so
 			// updateCursor would emit SetCursor(0,0)+ShowCursor before the
@@ -1290,8 +1433,15 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			// themselves when they move the cursor.
 		},
 		SetupReply: func(thread provider.Thread) {
+			currentDraftID = thread.ID
 			lastMsg := thread.Messages[len(thread.Messages)-1]
 			replyMsg = &lastMsg
+
+			// resume the thread's draft if one is already saved.
+			if loadDraft(thread.ID) {
+				return
+			}
+
 			to = lastMsg.From.String()
 			s := lastMsg.Subject
 			if !strings.HasPrefix(strings.ToLower(s), "re:") {
@@ -1317,7 +1467,101 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			}
 			ed.ResetDocument(doc)
 		},
+		ResumeLast: func() {
+			if db == nil {
+				return
+			}
+			d, found, err := db.GetLastDraft()
+			if err != nil || !found {
+				*statusText = "no drafts to resume"
+				app.RequestRender()
+				return
+			}
+			reset()
+			currentDraftID = d.ThreadID
+			to = d.To
+			cc = d.Cc
+			subject = d.Subject
+			fieldTo.Value = d.To
+			fieldTo.Cursor = len(d.To)
+			fieldCC.Value = d.Cc
+			fieldCC.Cursor = len(d.Cc)
+			fieldSubject.Value = d.Subject
+			fieldSubject.Cursor = len(d.Subject)
+			ed.ResetDocument(compose.ParseMarkdown(d.Body))
+
+			// for reply drafts, re-hydrate replyMsg from cache so send still
+			// produces correct In-Reply-To / References headers.
+			if d.ThreadID != "" {
+				if t, err := db.GetThread(d.ThreadID); err == nil && len(t.Messages) > 0 {
+					lastMsg := t.Messages[len(t.Messages)-1]
+					replyMsg = &lastMsg
+				}
+			}
+
+			ed.SetTypewriterMode(true)
+			composeActive = true
+			pendingCursorShow = true
+			transition.Start()
+			app.Go("compose")
+		},
+		ResumeFromMessage: func(msg provider.Message) {
+			// use the server UID as the stable local thread_id so subsequent
+			// PutDraft writes align with the existing cache row (if any) and
+			// sync updates the same server draft rather than duplicating.
+			id := msg.ID
+
+			reset()
+			currentDraftID = id
+
+			// prefer local cache state if the user has unsynced edits —
+			// otherwise seed a row from the server message so the first
+			// PutDraft preserves the remote_uid via the ON CONFLICT path.
+			if d, found, err := db.GetDraft(id); err == nil && found {
+				to = d.To
+				cc = d.Cc
+				subject = d.Subject
+				ed.ResetDocument(compose.ParseMarkdown(d.Body))
+			} else {
+				to = formatAddressList(msg.To)
+				cc = formatAddressList(msg.CC)
+				subject = msg.Subject
+				body := msg.TextBody
+				if body == "" && msg.HTMLBody != "" {
+					body = msg.HTMLBody
+				}
+				ed.ResetDocument(compose.ParseMarkdown(body))
+				_ = db.SeedDraft(cache.Draft{
+					ThreadID:  id,
+					To:        to,
+					Cc:        cc,
+					Subject:   subject,
+					Body:      body,
+					RemoteUID: id,
+				})
+			}
+			fieldTo.Value = to
+			fieldTo.Cursor = len(to)
+			fieldCC.Value = cc
+			fieldCC.Cursor = len(cc)
+			fieldSubject.Value = subject
+			fieldSubject.Cursor = len(subject)
+
+			ed.SetTypewriterMode(true)
+			composeActive = true
+			pendingCursorShow = true
+			transition.Start()
+			app.Go("compose")
+		},
 	}
+}
+
+func formatAddressList(addrs []provider.Address) string {
+	parts := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		parts = append(parts, a.String())
+	}
+	return strings.Join(parts, ", ")
 }
 
 func parseRecipients(s string) []provider.Address {

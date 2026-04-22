@@ -475,7 +475,11 @@ func groupIntoThreads(msgs []provider.Message) []provider.Thread {
 		}
 	}
 
-	// fallback: group by normalized subject when InReplyTo doesn't resolve
+	// fallback: group by normalized subject when InReplyTo doesn't resolve.
+	// Skip empty subjects — unlike real conversations, empty subjects are a
+	// signal of "none set yet" (common for drafts), not "these all belong
+	// together." Without this guard every subject-less draft in the Drafts
+	// folder collapses into one megathread.
 	bySubject := make(map[string]string) // normalized subject → first MessageID
 	for i := range msgs {
 		m := &msgs[i]
@@ -483,6 +487,9 @@ func groupIntoThreads(msgs []provider.Message) []provider.Thread {
 			continue
 		}
 		norm := normalizeSubject(m.Subject)
+		if norm == "" {
+			continue
+		}
 		if existing, ok := bySubject[norm]; ok {
 			union(m.MessageID, existing)
 		} else {
