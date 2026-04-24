@@ -38,6 +38,16 @@ type Mailbox struct {
 	previewLines []string
 	previewText  string
 
+	// conversation + guards for the preview pane. The async body-fetch
+	// goroutine spawned from LoadConversation shares this slice with
+	// the synchronous path that gets called on every folder/row change
+	// — without serialisation you get a classic slice-header race
+	// (goroutine reads len, main resets slice, goroutine writes past
+	// end, panic). convEpoch is bumped on every LoadConversation so a
+	// late-returning goroutine can tell its own render was superseded
+	// and bail out cleanly.
+	convMu       sync.Mutex
+	convEpoch    int64
 	conversation []ConversationMessage
 }
 
@@ -364,24 +374,29 @@ func (m *Mailbox) SyncThreads() error {
 		return err
 	}
 	log.Printf("SyncThreads: %q returned %d threads", id, len(result.Threads))
-
-	// Drafts folder reconciles server state INTO the drafts table rather
-	// than overwriting the threads-table snapshot — the drafts table is
-	// the source of truth for this view.
-	if m.cache != nil && m.ActiveFolderCanonical() == "Drafts" {
-		m.reconcileDrafts(result.Threads)
-		m.LoadThreads()
-		return nil
-	}
-
-	// merge cached sent messages into threads for complete conversations
-	if m.cache != nil {
-		result.Threads = m.mergeWithSentMessages(result.Threads)
-		m.preserveCachedBodies(id, result.Threads)
-		m.cache.ReplaceThreads(id, result.Threads)
-	}
-	m.LoadThreads()
+	m.applySyncResult(id, result.Threads)
 	return nil
+}
+
+// applySyncResult routes an IMAP sync result to the right storage path
+// based on the SOURCE folder it came from. Gating on the source (not the
+// current view) matters because a sync can resolve after the user has
+// switched folders — a Starred fetch landing while we're on Drafts must
+// go through the threads table, not be fed to reconcileDrafts which
+// would adopt every message as a fake "server draft".
+func (m *Mailbox) applySyncResult(folderID string, threads []provider.Thread) {
+	if m.cache == nil || folderID == "" {
+		return
+	}
+	if canonicalDisplayName(folderID) == "Drafts" {
+		m.reconcileDrafts(threads)
+		m.LoadThreads()
+		return
+	}
+	threads = m.mergeWithSentMessages(threads)
+	m.preserveCachedBodies(folderID, threads)
+	m.cache.ReplaceThreads(folderID, threads)
+	m.LoadThreads()
 }
 
 // reconcileDrafts brings the local drafts table in line with what the
@@ -745,19 +760,39 @@ func (m *Mailbox) LastMessage(sel int) *provider.Message {
 // LoadConversation populates the conversation slice from the selected thread.
 // Bodies available in cache are included immediately. Missing bodies are
 // fetched from IMAP in the background; onUpdate is called when they arrive.
+//
+// Design: the expensive work (DB lookup via resolveCachedBody, HTML
+// rendering via renderBody) runs WITHOUT the lock on a local slice, so
+// the UI thread is never blocked waiting for another caller's build.
+// Only the epoch bump and the final slice swap are under the mutex. The
+// convEpoch counter lets late-returning async fetch goroutines notice
+// their render was superseded and skip the writeback.
 func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 	t := m.SelectedThread(sel)
+
+	// Claim an epoch up front so any later-returning async goroutine
+	// from our own call can identify itself as "still current".
+	m.convMu.Lock()
+	m.convEpoch++
+	epoch := m.convEpoch
+	m.convMu.Unlock()
+
 	if t == nil || len(t.Messages) == 0 {
-		m.conversation = m.conversation[:0]
+		m.convMu.Lock()
+		if m.convEpoch == epoch {
+			m.conversation = m.conversation[:0]
+		}
+		m.convMu.Unlock()
 		return
 	}
 
-	m.conversation = m.conversation[:0]
-	var needFetch []int // indices of messages with no body
-
+	// Build the new conversation slice into a LOCAL variable — no lock
+	// held during resolveCachedBody / renderBody. Other goroutines can
+	// read or rebuild m.conversation freely while we prepare this one.
+	local := make([]ConversationMessage, 0, len(t.Messages))
+	var needFetch []int
 	for i := range t.Messages {
 		msg := t.Messages[i]
-		// check sent cache (sync, fast)
 		if msg.TextBody == "" && msg.HTMLBody == "" {
 			msg = m.resolveCachedBody(msg)
 			if msg.TextBody != t.Messages[i].TextBody || msg.HTMLBody != t.Messages[i].HTMLBody {
@@ -775,18 +810,29 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 			from = "You"
 		}
 
-		body := m.renderBody(msg)
-
-		m.conversation = append(m.conversation, ConversationMessage{
+		local = append(local, ConversationMessage{
 			Sender: from,
 			Date:   msg.Date.Format("2 Jan 15:04"),
-			Body:   body,
+			Body:   m.renderBody(msg),
 			IsMe:   isMe,
 		})
 
 		if msg.TextBody == "" && msg.HTMLBody == "" {
 			needFetch = append(needFetch, i)
 		}
+	}
+
+	// Publish the built slice — tiny critical section, just a pointer
+	// swap. If a newer LoadConversation has already started, discard
+	// our work; theirs wins.
+	m.convMu.Lock()
+	superseded := m.convEpoch != epoch
+	if !superseded {
+		m.conversation = local
+	}
+	m.convMu.Unlock()
+	if superseded {
+		return
 	}
 
 	// async fetch missing bodies from IMAP.
@@ -822,15 +868,22 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 			if m.cache != nil {
 				m.cache.PutThread(*thread)
 			}
-			// A folder switch while this goroutine was running would
-			// reset m.conversation — skip writes that would land out of
-			// bounds. Next LoadConversation rerenders from cache.
+			// Write back under the same lock, and only if our render is
+			// still current. A later LoadConversation (folder switch,
+			// different thread) bumps convEpoch; we bail without touching
+			// the slice that belongs to someone else now.
+			m.convMu.Lock()
+			if m.convEpoch != epoch {
+				m.convMu.Unlock()
+				return
+			}
 			for _, i := range targets {
 				if i >= len(m.conversation) {
 					continue
 				}
 				m.conversation[i].Body = m.renderBody(thread.Messages[i])
 			}
+			m.convMu.Unlock()
 			onUpdate()
 		}()
 	}

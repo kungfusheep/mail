@@ -66,6 +66,11 @@ func NewMemory() (*Cache, error) {
 	if err != nil {
 		return nil, err
 	}
+	// :memory: gives each connection its own isolated DB — with a pool,
+	// writers and readers can end up on different connections and see
+	// different state. Pin to one connection so in-process tests match
+	// the file-backed behaviour the production cache relies on.
+	db.SetMaxOpenConns(1)
 	c := &Cache{db: db}
 	if err := c.migrate(); err != nil {
 		db.Close()

@@ -161,6 +161,47 @@ func TestDraftsPipeline_RowDatesAndPreview(t *testing.T) {
 	}
 }
 
+// Regression: when a sync for a non-Drafts folder (Inbox / Starred /
+// etc) is in flight and the user switches to Drafts before it resolves,
+// the stale result MUST NOT be routed through reconcileDrafts — every
+// inbox message would otherwise get adopted as a phantom server draft.
+// The dispatch must gate on the SOURCE folder id, not the current view.
+func TestApplySyncResult_StaleSyncDoesNotPolluteDrafts(t *testing.T) {
+	h := newDraftsHarness(t)
+	defer h.unsub()
+
+	before, _ := h.cache.ListDrafts()
+	beforeCount := len(before)
+
+	// Simulate a Starred-folder sync result arriving while the active
+	// view is Drafts. These threads have nothing to do with drafts.
+	starredResult := []provider.Thread{
+		{ID: "s1", Subject: "Receipt for your payment to Discord Inc",
+			Date:     time.Now().AddDate(0, 0, -3),
+			Messages: []provider.Message{{ID: "s1", Subject: "Receipt", TextBody: "receipt"}}},
+		{ID: "s2", Subject: "File your Self Assessment return",
+			Date:     time.Now().AddDate(0, 0, -18),
+			Messages: []provider.Message{{ID: "s2", Subject: "File", TextBody: "filing"}}},
+	}
+	h.mb.applySyncResult("[Gmail]/Starred", starredResult)
+
+	after, _ := h.cache.ListDrafts()
+	if len(after) != beforeCount {
+		var subs []string
+		for _, d := range after {
+			subs = append(subs, d.Subject)
+		}
+		t.Errorf("drafts table grew from %d to %d after stale Starred sync — starred subjects leaked in: %v", beforeCount, len(after), subs)
+	}
+
+	// And the Starred threads table should have the new content (correct
+	// routing): proves the fix doesn't send it somewhere else entirely.
+	starred, _ := h.cache.GetThreads("[Gmail]/Starred", 25)
+	if len(starred) != 2 {
+		t.Errorf("Starred threads table has %d rows, want 2 — sync result wasn't stored correctly", len(starred))
+	}
+}
+
 // Replicates the live panic: a drafts row lands in the list with an
 // empty body (the state between reconcile adopting the UID and the
 // backfill fetch completing), LoadConversation is called (preview
