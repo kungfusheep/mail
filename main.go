@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"os"
@@ -20,6 +22,17 @@ import (
 	smtpprov "github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/riffkey"
 )
+
+// newComposeID returns a stable identifier for a freshly-opened compose
+// session. Random hex rather than a UID or timestamp so the drafts
+// projection can never confuse it with something that came from IMAP.
+func newComposeID() (string, error) {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "draft-" + hex.EncodeToString(b), nil
+}
 
 type AppTheme struct {
 	BG      Color
@@ -95,6 +108,12 @@ func main() {
 	// load from cache
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
+	// Tell the cache which IMAP folder id represents Drafts — draft-table
+	// writes publish on that label so the mailbox subscriber refreshes the
+	// UI. Without this wiring the drafts view silently goes stale.
+	if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
+		db.SetDraftsLabel(draftsID)
+	}
 	mb.LoadThreads()
 	mb.BuildThreadDisplay()
 	mb.SetSelected(0)
@@ -276,16 +295,16 @@ func main() {
 			return
 		}
 
-		ch, unsub := db.Subscribe(label)
-		labelUnsub = unsub
-		go func() {
-			for range ch {
-				mb.LoadThreads()
-				mb.BuildThreadDisplay()
-				mb.SetSelected(threadSel)
-				app.RequestRender()
+		labelUnsub = mb.Watch(label, func() {
+			mb.SetSelected(threadSel)
+			// refresh the preview too — the data under it may have changed
+			// (e.g. reconcileDrafts just backfilled the selected draft's
+			// body, or a sync pulled the rest of a conversation).
+			if loadPreview != nil {
+				loadPreview()
 			}
-		}()
+			app.RequestRender()
+		})
 
 		ctx, cancel := context.WithCancel(context.Background())
 		idleCancel = cancel
@@ -318,6 +337,11 @@ func main() {
 			return
 		}
 		mb.BuildFolderDisplay(labelsOpen)
+		// Fresh folders may reveal a Drafts label the cached view didn't have —
+		// re-set so publish routing is current.
+		if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
+			db.SetDraftsLabel(draftsID)
+		}
 		app.RequestRender()
 
 		mb.SyncSent()
@@ -362,10 +386,11 @@ func main() {
 	handleEnter := func() {
 		// Drafts folder: Enter resumes the draft in the composer rather than
 		// opening a preview — the thread is a draft-in-progress, not a
-		// conversation to read.
+		// conversation to read. Thread id in this folder is the stable
+		// local draft id; ResumeDraft reads straight from the drafts table.
 		if mb.ActiveFolderCanonical() == "Drafts" {
-			if t := mb.SelectedThread(threadSel); t != nil && len(t.Messages) > 0 {
-				comp.ResumeFromMessage(t.Messages[len(t.Messages)-1])
+			if t := mb.SelectedThread(threadSel); t != nil {
+				comp.ResumeDraft(t.ID)
 			}
 			return
 		}
@@ -713,8 +738,8 @@ func main() {
 					// Drafts folder: r resumes the draft (muscle-memory
 					// consistency with Enter) rather than starting a
 					// nonsensical reply to your own draft.
-					if mb.ActiveFolderCanonical() == "Drafts" && len(t.Messages) > 0 {
-						comp.ResumeFromMessage(t.Messages[len(t.Messages)-1])
+					if mb.ActiveFolderCanonical() == "Drafts" {
+						comp.ResumeDraft(t.ID)
 						return
 					}
 					comp.Open()
@@ -837,7 +862,7 @@ type composeControls struct {
 	Open              func()
 	SetupReply        func(provider.Thread)
 	ResumeLast        func()
-	ResumeFromMessage func(provider.Message)
+	ResumeDraft       func(threadID string)
 }
 
 func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int, transition *viewTransition, theme AppTheme) composeControls {
@@ -1415,9 +1440,15 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			reset()
 			// Give each new compose its own stable thread_id so multiple
 			// `c` sessions produce independent cache rows and independent
-			// server drafts. Without this, every new compose writes into
-			// the same slot, silently replacing the previous one.
-			currentDraftID = fmt.Sprintf("new-%d", time.Now().UnixNano())
+			// server drafts. Random hex (not UID-shaped) so the drafts
+			// projection in the mailbox view can distinguish locally-owned
+			// ids from anything that might have leaked in from IMAP.
+			id, err := newComposeID()
+			if err != nil {
+				log.Printf("Open: newComposeID failed: %v", err)
+				return
+			}
+			currentDraftID = id
 			ed.SetTypewriterMode(true)
 			composeActive = true
 			pendingCursorShow = true
@@ -1505,47 +1536,40 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 			transition.Start()
 			app.Go("compose")
 		},
-		ResumeFromMessage: func(msg provider.Message) {
-			// use the server UID as the stable local thread_id so subsequent
-			// PutDraft writes align with the existing cache row (if any) and
-			// sync updates the same server draft rather than duplicating.
-			id := msg.ID
-
-			reset()
-			currentDraftID = id
-
-			// prefer local cache state if the user has unsynced edits —
-			// otherwise seed a row from the server message so the first
-			// PutDraft preserves the remote_uid via the ON CONFLICT path.
-			if d, found, err := db.GetDraft(id); err == nil && found {
-				to = d.To
-				cc = d.Cc
-				subject = d.Subject
-				ed.ResetDocument(compose.ParseMarkdown(d.Body))
-			} else {
-				to = formatAddressList(msg.To)
-				cc = formatAddressList(msg.CC)
-				subject = msg.Subject
-				body := msg.TextBody
-				if body == "" && msg.HTMLBody != "" {
-					body = msg.HTMLBody
-				}
-				ed.ResetDocument(compose.ParseMarkdown(body))
-				_ = db.SeedDraft(cache.Draft{
-					ThreadID:  id,
-					To:        to,
-					Cc:        cc,
-					Subject:   subject,
-					Body:      body,
-					RemoteUID: id,
-				})
+		ResumeDraft: func(threadID string) {
+			// Drafts folder is a projection of the drafts table, so the
+			// thread id we were handed IS the local draft id — read from
+			// the table and we're always in sync with the latest save.
+			if db == nil {
+				return
 			}
-			fieldTo.Value = to
-			fieldTo.Cursor = len(to)
-			fieldCC.Value = cc
-			fieldCC.Cursor = len(cc)
-			fieldSubject.Value = subject
-			fieldSubject.Cursor = len(subject)
+			d, found, err := db.GetDraft(threadID)
+			if err != nil || !found {
+				*statusText = "draft not found"
+				app.RequestRender()
+				return
+			}
+			reset()
+			currentDraftID = d.ThreadID
+			to = d.To
+			cc = d.Cc
+			subject = d.Subject
+			fieldTo.Value = d.To
+			fieldTo.Cursor = len(d.To)
+			fieldCC.Value = d.Cc
+			fieldCC.Cursor = len(d.Cc)
+			fieldSubject.Value = d.Subject
+			fieldSubject.Cursor = len(d.Subject)
+			ed.ResetDocument(compose.ParseMarkdown(d.Body))
+
+			// Reply drafts share a thread id with the parent conversation —
+			// rehydrate replyMsg from that thread so send restores the
+			// In-Reply-To / References headers. New-compose and adopted
+			// server drafts don't match any thread; harmless miss.
+			if t, err := db.GetThread(d.ThreadID); err == nil && len(t.Messages) > 0 {
+				lastMsg := t.Messages[len(t.Messages)-1]
+				replyMsg = &lastMsg
+			}
 
 			ed.SetTypewriterMode(true)
 			composeActive = true

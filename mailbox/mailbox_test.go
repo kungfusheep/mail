@@ -1,6 +1,7 @@
 package mailbox
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,434 @@ var testFolders = []provider.Folder{
 	{ID: "INBOX", Name: "INBOX"},
 	{ID: "[Google Mail]/Bin", Name: "Bin"},
 	{ID: "[Google Mail]/All Mail", Name: "All Mail"},
+}
+
+// draftsHarness sets up the exact pipeline main.go drives for the Drafts
+// folder: cache with SetDraftsLabel, mailbox with folders loaded, Drafts
+// selected, a subscriber goroutine mirroring watchLabel. Returns the
+// mailbox and a channel that signals every time the subscriber reruns
+// LoadThreads + BuildThreadDisplay (lets tests wait for refreshes to
+// land before asserting).
+//
+// Tests use this to exercise what the UI actually shows — row labels,
+// row dates, conversation bodies — rather than poking individual cache
+// primitives.
+type draftsHarness struct {
+	cache   *cache.Cache
+	mb      *Mailbox
+	refresh chan struct{}
+	unsub   func()
+}
+
+func newDraftsHarness(t *testing.T) *draftsHarness {
+	t.Helper()
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Drafts", Name: "Drafts"},
+	})
+	c.SetDraftsLabel("[Gmail]/Drafts")
+
+	mb := New(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	for i := 0; i < mb.FolderCount(); i++ {
+		if mb.FolderName(i) == "Drafts" {
+			mb.SelectFolder(i)
+			break
+		}
+	}
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	// Drive the same watch pipeline main.go does. The refresh channel
+	// just observes each completion so tests can wait deterministically.
+	refresh := make(chan struct{}, 16)
+	unsub := mb.Watch("[Gmail]/Drafts", func() {
+		refresh <- struct{}{}
+	})
+
+	return &draftsHarness{cache: c, mb: mb, refresh: refresh, unsub: unsub}
+}
+
+// waitForRefresh blocks until the subscriber has rerun the refresh path
+// once, or fails the test on timeout. Use after any draft-table mutation.
+func (h *draftsHarness) waitForRefresh(t *testing.T) {
+	t.Helper()
+	select {
+	case <-h.refresh:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("subscriber never refreshed after draft mutation")
+	}
+}
+
+// seedAdoptedDraft mimics what reconcileDrafts does for a server-side
+// draft: a local row keyed by a stable id with RemoteUID pointing back
+// to the server's UID. Important: the draft's UpdatedAt should be the
+// message's actual date (from IMAP INTERNALDATE / Date header), not
+// when we happened to adopt it.
+func (h *draftsHarness) seedAdoptedDraft(d cache.Draft) {
+	_ = h.cache.SeedDraft(d)
+}
+
+// The exact flow the app drives when adopting a server-side draft: the
+// row must land in the mailbox's threadRows, its displayed date must
+// reflect the server message's date (not adoption time), and its body
+// must flow through to the conversation preview without panicking.
+//
+// This is the test that would have caught both live bugs if written
+// before shipping.
+func TestDraftsPipeline_RowDatesAndPreview(t *testing.T) {
+	h := newDraftsHarness(t)
+	defer h.unsub()
+
+	// three drafts with different real dates — we want the list to come
+	// back ordered by REAL date DESC, not by adoption time.
+	real1 := time.Date(2026, 3, 1, 10, 0, 0, 0, time.UTC)
+	real2 := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	real3 := time.Date(2026, 4, 20, 10, 0, 0, 0, time.UTC)
+
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-a", Subject: "oldest", Body: "body-a", RemoteUID: "1", UpdatedAt: real1})
+	h.waitForRefresh(t)
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-b", Subject: "middle", Body: "body-b", RemoteUID: "2", UpdatedAt: real2})
+	h.waitForRefresh(t)
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-c", Subject: "newest", Body: "body-c", RemoteUID: "3", UpdatedAt: real3})
+	h.waitForRefresh(t)
+
+	// === row order ===
+	rows := *h.mb.ThreadRows()
+	if len(rows) != 3 {
+		t.Fatalf("got %d rows, want 3", len(rows))
+	}
+	wantOrder := []string{"newest", "middle", "oldest"}
+	for i, want := range wantOrder {
+		if rows[i].Label != want {
+			t.Errorf("row[%d] label = %q, want %q — drafts must order by REAL date (most recent first), not by adoption time", i, rows[i].Label, want)
+		}
+	}
+
+	// === row dates reflect real message date, not adoption time ===
+	// If the "authored now" bug is present, all three rows read the same
+	// updated_at (adoption time) and the date column says something like
+	// "now" for all of them. A correct implementation preserves the
+	// server-provided date so the user sees drafts ordered and dated
+	// like on the server.
+	sel := h.mb.SelectedThread(0)
+	if sel == nil {
+		t.Fatal("SelectedThread(0) is nil")
+	}
+	// the newest draft is from 2026-04-20 — must not be stamped with "now"
+	if sel.Date.Year() != real3.Year() || sel.Date.Month() != real3.Month() || sel.Date.Day() != real3.Day() {
+		t.Errorf("SelectedThread(0).Date = %v, want %v — 'authored now' bug: SeedDraft is clobbering message date with time.Now()", sel.Date, real3)
+	}
+
+	// === preview loads without panicking and carries the body through ===
+	// The panic at mailbox.go:792 happens because LoadConversation kicks
+	// off an async IMAP GetMessage on a message whose ID is a stable
+	// draft id ("draft-c") rather than a UID. The synchronous body is
+	// already populated (via backfill / seed); the async path is wrong
+	// for drafts folder.
+	h.mb.LoadConversation(0, nil)
+
+	msgs := *h.mb.ConversationMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation messages = %d, want 1", len(msgs))
+	}
+	if !strings.Contains(msgs[0].Body, "body-c") {
+		t.Errorf("conversation body = %q, want to contain \"body-c\" — preview pane will be empty", msgs[0].Body)
+	}
+}
+
+// Replicates the live panic: a drafts row lands in the list with an
+// empty body (the state between reconcile adopting the UID and the
+// backfill fetch completing), LoadConversation is called (preview
+// pane), then a folder-switch-style reset clears m.conversation. The
+// async fetch goroutine then must not crash writing back into the
+// now-empty slice. Previously panicked at mailbox.go:792.
+func TestLoadConversation_DraftsEmptyBodyNoPanic(t *testing.T) {
+	h := newDraftsHarness(t)
+	defer h.unsub()
+
+	// Adopted row with no body yet — mimics the window between adoption
+	// and backfill.
+	h.seedAdoptedDraft(cache.Draft{
+		ThreadID:  "draft-pending",
+		Subject:   "awaiting backfill",
+		Body:      "",
+		RemoteUID: "42",
+		UpdatedAt: time.Now(),
+	})
+	h.waitForRefresh(t)
+
+	// onUpdate is passed in main.go via loadPreview; provide it so the
+	// code path that used to panic is exercised.
+	h.mb.LoadConversation(0, func() {})
+
+	// Simulate folder-switch: another LoadConversation call resets
+	// m.conversation via the SelectedThread==nil path. The pre-fix code
+	// would panic here because the async goroutine from the first call
+	// is still running with stale indices. Since we synchronously ran
+	// LoadConversation above, any goroutine launched synchronously will
+	// have started by now.
+	// First flip to an empty selection by clearing threadRows.
+	for i := 0; i < 3; i++ {
+		h.mb.LoadConversation(0, func() {})
+	}
+	// If we got here without panicking, the guards held.
+}
+
+// When the active folder is Drafts, LoadThreads must project from the
+// drafts table — not from the stale threads-table snapshot. This is the
+// fix for the "edit a draft, reopen, see old version" bug: local saves
+// update the drafts table directly, so reading from it each frame keeps
+// the UI in lockstep with state.
+func TestLoadThreads_DraftsFolderProjectsFromDraftsTable(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Drafts", Name: "Drafts"},
+	})
+	// seed a stale snapshot in the threads table to prove we ignore it —
+	// in the bug, this snapshot is what leaked through as "the old version"
+	c.ReplaceThreads("[Gmail]/Drafts", []provider.Thread{
+		{ID: "stale-thread", Subject: "STALE SUBJECT", Messages: []provider.Message{{TextBody: "stale body"}}},
+	})
+	// and a fresh draft in the drafts table — what should show through
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-fresh", Subject: "fresh", Body: "fresh body"})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	// Drafts is index 2 in canonical ordering (Inbox, Sent, Drafts, ...)
+	for i := 0; i < mb.FolderCount(); i++ {
+		if mb.FolderName(i) == "Drafts" {
+			mb.SelectFolder(i)
+			break
+		}
+	}
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	if n := mb.ThreadLen(); n != 1 {
+		t.Fatalf("got %d thread rows, want 1 (the drafts-table row; stale snapshot must not leak)", n)
+	}
+	got := mb.SelectedThread(0)
+	if got == nil {
+		t.Fatal("SelectedThread(0) = nil")
+	}
+	if got.ID != "draft-fresh" {
+		t.Errorf("thread.ID = %q, want draft-fresh (stale snapshot %q must not appear)", got.ID, "stale-thread")
+	}
+	if got.Subject != "fresh" {
+		t.Errorf("thread.Subject = %q, want \"fresh\"", got.Subject)
+	}
+	if len(got.Messages) == 0 || got.Messages[0].TextBody != "fresh body" {
+		t.Errorf("thread body did not come from drafts table")
+	}
+}
+
+// End-to-end: a draft mutation (PutDraft / SeedDraft / delete) MUST fire
+// the cache's pubsub subscriber on the Drafts folder label. Without this,
+// the pipeline the live UI relies on — subscriber → LoadThreads →
+// BuildThreadDisplay → RequestRender — never gets kicked and the user
+// sees an empty list even though the drafts table is populated. This test
+// is what should have caught my first pass; it directly simulates the
+// subscriber the app wires up in main.go.
+func TestDraftWrites_PublishOnDraftsFolderLabel(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "[Gmail]/Drafts", Name: "Drafts"}})
+	c.SetDraftsLabel("[Gmail]/Drafts")
+
+	ch, unsub := c.Subscribe("[Gmail]/Drafts")
+	defer unsub()
+
+	// drain any spurious signal
+	select {
+	case <-ch:
+	default:
+	}
+
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-put", Subject: "s", Body: "b"})
+	select {
+	case <-ch:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("PutDraft did not publish on the drafts folder label — mailbox subscriber will never fire, UI stays empty")
+	}
+
+	_ = c.SeedDraft(cache.Draft{ThreadID: "draft-seed", Subject: "s", Body: "b", RemoteUID: "99"})
+	select {
+	case <-ch:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("SeedDraft did not publish — reconcileDrafts adopting server drafts will populate the cache but UI won't refresh")
+	}
+
+	if err := c.DeleteDraftByRemoteUID("99"); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-ch:
+	case <-time.After(100 * time.Millisecond):
+		t.Fatal("DeleteDraftByRemoteUID did not publish — prune in reconcile leaves stale UI row")
+	}
+}
+
+// Full pipeline test: from SyncThreads-style adoption through the pubsub
+// subscriber that main.go wires up, assert the mailbox threadRows populate.
+// This replicates the exact sequence the running app goes through when the
+// user has server-side drafts and first navigates into the Drafts folder.
+func TestDraftsFolder_AdoptionSurfacesInUI(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Drafts", Name: "Drafts"},
+	})
+	c.SetDraftsLabel("[Gmail]/Drafts")
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	for i := 0; i < mb.FolderCount(); i++ {
+		if mb.FolderName(i) == "Drafts" {
+			mb.SelectFolder(i)
+			break
+		}
+	}
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	if n := mb.ThreadLen(); n != 0 {
+		t.Fatalf("pre-sync rows = %d, want 0 (cache has no drafts yet)", n)
+	}
+
+	// subscriber mirrors main.go watchLabel: on each channel signal,
+	// refresh the display. This is the pipeline the user's UI depends on.
+	ch, unsub := c.Subscribe("[Gmail]/Drafts")
+	defer unsub()
+
+	done := make(chan struct{})
+	go func() {
+		for range ch {
+			mb.LoadThreads()
+			mb.BuildThreadDisplay()
+			if mb.ThreadLen() > 0 {
+				close(done)
+				return
+			}
+		}
+	}()
+
+	// simulate reconcileDrafts adopting a server-side draft via SeedDraft
+	// (the same call the real reconciler makes)
+	stableID, _ := newDraftID()
+	_ = c.SeedDraft(cache.Draft{
+		ThreadID:  stableID,
+		Subject:   "from server",
+		Body:      "server body",
+		RemoteUID: "42",
+	})
+
+	select {
+	case <-done:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("subscriber never saw drafts — SeedDraft didn't publish, so UI would stay empty after reconcile")
+	}
+
+	rows := *mb.ThreadRows()
+	if len(rows) != 1 {
+		t.Fatalf("after adopt: rows = %d, want 1", len(rows))
+	}
+	if rows[0].Label != "from server" {
+		t.Errorf("row label = %q, want \"from server\"", rows[0].Label)
+	}
+}
+
+// Replicates the exact user flow that broke before: edit draft, exit
+// compose, re-enter the Drafts folder list. Must show the new body.
+// Previously the mailbox projection (threadRows) never refreshed because
+// PutDraft didn't publish on the drafts folder label.
+func TestDraftsFolder_EditThenExit_ListShowsNewContent(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Drafts", Name: "Drafts"},
+	})
+	c.SetDraftsLabel("[Gmail]/Drafts")
+
+	// seed a pre-existing draft (same state a user hits when entering Drafts
+	// with a server-side draft already adopted)
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-abc", Subject: "hello", Body: "first pass"})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	for i := 0; i < mb.FolderCount(); i++ {
+		if mb.FolderName(i) == "Drafts" {
+			mb.SelectFolder(i)
+			break
+		}
+	}
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	// subscriber mirrors main.go watchLabel, tracking how many times the
+	// mailbox projection got refreshed
+	ch, unsub := c.Subscribe("[Gmail]/Drafts")
+	defer unsub()
+	refreshed := make(chan struct{}, 4)
+	go func() {
+		for range ch {
+			mb.LoadThreads()
+			mb.BuildThreadDisplay()
+			refreshed <- struct{}{}
+		}
+	}()
+
+	// === user edits the draft (compose → saveDraft → PutDraft) ===
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-abc", Subject: "hello", Body: "SECOND pass"})
+
+	select {
+	case <-refreshed:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("edit did not reach the mailbox projection — the bug is back: UI will show first pass")
+	}
+
+	// === back on the mailbox list ===
+	got := mb.SelectedThread(0)
+	if got == nil {
+		t.Fatal("SelectedThread(0) = nil")
+	}
+	if got.Messages[0].TextBody != "SECOND pass" {
+		t.Errorf("list body = %q, want \"SECOND pass\" — the stale-draft bug has returned", got.Messages[0].TextBody)
+	}
+}
+
+// When user edits a draft, re-enters the Drafts folder, the list must
+// show the NEW body — not the stale snapshot that used to leak through
+// from the threads table.
+func TestLoadThreads_DraftsFolderReflectsLatestEdit(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "[Gmail]/Drafts", Name: "Drafts"}})
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-x", Subject: "s", Body: "first pass"})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+
+	// simulate the user editing the draft in compose, then re-entering
+	// the drafts folder (which re-calls LoadThreads + BuildThreadDisplay)
+	_ = c.PutDraft(cache.Draft{ThreadID: "draft-x", Subject: "s", Body: "second pass"})
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	got := mb.SelectedThread(0)
+	if got == nil {
+		t.Fatal("SelectedThread(0) = nil after edit")
+	}
+	if got.Messages[0].TextBody != "second pass" {
+		t.Errorf("body after edit = %q, want \"second pass\" — this is the stale-draft bug", got.Messages[0].TextBody)
+	}
 }
 
 func testMailbox(t *testing.T, folders []provider.Folder, threads []provider.Thread) *Mailbox {

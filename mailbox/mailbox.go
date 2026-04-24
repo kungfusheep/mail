@@ -1,6 +1,8 @@
 package mailbox
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -205,6 +207,32 @@ func (m *Mailbox) ActiveFolderCanonical() string {
 	return canonicalDisplayName(m.ActiveFolderID())
 }
 
+// Watch subscribes the mailbox to a cache label and keeps its thread
+// list in lockstep with cache mutations. On every publish we rerun
+// LoadThreads + BuildThreadDisplay (the invariant: threadRows mirrors
+// cache state for the active folder) and then call onRefresh for any
+// app-level work that needs to happen too — re-selecting, reloading
+// the preview, requesting a render.
+//
+// Returned func unsubscribes. Callers hold onto it to swap watchers
+// when the active folder changes.
+func (m *Mailbox) Watch(label string, onRefresh func()) func() {
+	if m.cache == nil || label == "" {
+		return func() {}
+	}
+	ch, unsub := m.cache.Subscribe(label)
+	go func() {
+		for range ch {
+			m.LoadThreads()
+			m.BuildThreadDisplay()
+			if onRefresh != nil {
+				onRefresh()
+			}
+		}
+	}()
+	return unsub
+}
+
 func (m *Mailbox) FolderCount() int {
 	return len(displayFolders)
 }
@@ -222,6 +250,19 @@ func (m *Mailbox) LoadThreads() {
 	if m.cache == nil || m.ActiveFolderID() == "" {
 		return
 	}
+	// Drafts folder is a direct projection of the local drafts table —
+	// the threads table is bypassed entirely so local edits show up the
+	// moment PutDraft returns, without needing to round-trip through IMAP.
+	if m.ActiveFolderCanonical() == "Drafts" {
+		drafts, err := m.cache.ListDrafts()
+		if err != nil {
+			return
+		}
+		m.displayMu.Lock()
+		m.threads = draftsAsThreads(drafts)
+		m.displayMu.Unlock()
+		return
+	}
 	threads, err := m.cache.GetThreads(m.ActiveFolderID(), 25)
 	if err != nil {
 		return
@@ -229,6 +270,51 @@ func (m *Mailbox) LoadThreads() {
 	m.displayMu.Lock()
 	m.threads = threads
 	m.displayMu.Unlock()
+}
+
+// draftsAsThreads projects the local drafts table into the provider.Thread
+// shape the UI renders. Keeps the Drafts folder view driven by one source
+// of truth (the drafts table) — every save updates it, every frame reads
+// from it, no intermediate snapshot to go stale.
+func draftsAsThreads(drafts []cache.Draft) []provider.Thread {
+	threads := make([]provider.Thread, 0, len(drafts))
+	for _, d := range drafts {
+		subject := d.Subject
+		if subject == "" {
+			subject = "(no subject)"
+		}
+		to := parseAddresses(d.To)
+		msg := provider.Message{
+			ID:       d.ThreadID,
+			ThreadID: d.ThreadID,
+			To:       to,
+			CC:       parseAddresses(d.Cc),
+			BCC:      parseAddresses(d.Bcc),
+			Subject:  d.Subject,
+			TextBody: d.Body,
+			Date:     d.UpdatedAt,
+			Read:     true,
+		}
+		threads = append(threads, provider.Thread{
+			ID:           d.ThreadID,
+			Subject:      subject,
+			Snippet:      snippet(d.Body),
+			Messages:     []provider.Message{msg},
+			Date:         d.UpdatedAt,
+			Participants: to,
+		})
+	}
+	return threads
+}
+
+func snippet(body string) string {
+	const max = 120
+	body = strings.TrimSpace(body)
+	body = strings.ReplaceAll(body, "\n", " ")
+	if len(body) <= max {
+		return body
+	}
+	return body[:max]
 }
 
 func (m *Mailbox) SyncSent() {
@@ -279,6 +365,15 @@ func (m *Mailbox) SyncThreads() error {
 	}
 	log.Printf("SyncThreads: %q returned %d threads", id, len(result.Threads))
 
+	// Drafts folder reconciles server state INTO the drafts table rather
+	// than overwriting the threads-table snapshot — the drafts table is
+	// the source of truth for this view.
+	if m.cache != nil && m.ActiveFolderCanonical() == "Drafts" {
+		m.reconcileDrafts(result.Threads)
+		m.LoadThreads()
+		return nil
+	}
+
 	// merge cached sent messages into threads for complete conversations
 	if m.cache != nil {
 		result.Threads = m.mergeWithSentMessages(result.Threads)
@@ -287,6 +382,123 @@ func (m *Mailbox) SyncThreads() error {
 	}
 	m.LoadThreads()
 	return nil
+}
+
+// reconcileDrafts brings the local drafts table in line with what the
+// server has in its Drafts folder. Three cases:
+//
+//   - server UID matches a local row's remote_uid → already tracked, leave
+//     it alone (local edits take precedence over server state by design).
+//   - server UID has no local match → adopt: create a local row with a
+//     fresh stable id so the user can edit it here.
+//   - local row's remote_uid is absent from the server list → the draft was
+//     deleted elsewhere, prune locally.
+//
+// This runs inside SyncThreads on the Drafts folder and replaces the
+// previous ReplaceThreads path for that folder.
+func (m *Mailbox) reconcileDrafts(serverThreads []provider.Thread) {
+	serverUIDs := make(map[string]provider.Message)
+	for _, t := range serverThreads {
+		for _, msg := range t.Messages {
+			if msg.ID != "" {
+				serverUIDs[msg.ID] = msg
+			}
+		}
+	}
+
+	localUIDs, err := m.cache.DraftRemoteUIDs()
+	if err != nil {
+		log.Printf("reconcileDrafts: DraftRemoteUIDs failed: %v", err)
+		return
+	}
+
+	// Adopt unknowns + backfill empty bodies on already-tracked rows.
+	// ListThreads returns headers only for Gmail's Drafts folder, so we
+	// fetch the full message per UID to capture body + full recipient
+	// lists — otherwise the list renders but the preview pane is empty.
+	// The connection is already SELECTed on Drafts from the enclosing
+	// ListThreads call.
+	for uid, msg := range serverUIDs {
+		// case 1: already tracked → only fetch if body is missing
+		if existing, found, err := m.cache.FindDraftByRemoteUID(uid); err == nil && found {
+			if existing.Body != "" {
+				continue
+			}
+			full, gerr := m.imap.GetMessage(uid)
+			if gerr != nil {
+				log.Printf("reconcileDrafts: backfill GetMessage uid=%s failed: %v", uid, gerr)
+				continue
+			}
+			body := full.TextBody
+			if body == "" && full.HTMLBody != "" {
+				body = full.HTMLBody
+			}
+			if err := m.cache.BackfillDraftContent(existing.ThreadID,
+				addrsToString(full.To), addrsToString(full.CC), addrsToString(full.BCC),
+				full.Subject, body, full.Date); err != nil {
+				log.Printf("reconcileDrafts: backfill failed thread=%s: %v", existing.ThreadID, err)
+				continue
+			}
+			log.Printf("reconcileDrafts: backfilled thread=%s from uid=%s bodyLen=%d", existing.ThreadID, uid, len(body))
+			continue
+		}
+		// case 2: unknown → adopt with a fresh stable id
+		newID, err := newDraftID()
+		if err != nil {
+			log.Printf("reconcileDrafts: newDraftID failed: %v", err)
+			continue
+		}
+		full, gerr := m.imap.GetMessage(uid)
+		if gerr != nil {
+			log.Printf("reconcileDrafts: GetMessage uid=%s failed: %v (adopting with headers only)", uid, gerr)
+		} else {
+			msg = full
+		}
+		body := msg.TextBody
+		if body == "" && msg.HTMLBody != "" {
+			body = msg.HTMLBody
+		}
+		_ = m.cache.SeedDraft(cache.Draft{
+			ThreadID:  newID,
+			To:        addrsToString(msg.To),
+			Cc:        addrsToString(msg.CC),
+			Bcc:       addrsToString(msg.BCC),
+			Subject:   msg.Subject,
+			Body:      body,
+			RemoteUID: uid,
+			UpdatedAt: msg.Date,
+		})
+		log.Printf("reconcileDrafts: adopted server uid=%s as thread=%s subject=%q bodyLen=%d date=%s", uid, newID, msg.Subject, len(body), msg.Date.Format(time.RFC3339))
+	}
+
+	// prune: any local row whose remote copy is gone. "" remote_uid means
+	// never-synced local draft — don't touch those.
+	for uid := range localUIDs {
+		if _, ok := serverUIDs[uid]; !ok {
+			if err := m.cache.DeleteDraftByRemoteUID(uid); err == nil {
+				log.Printf("reconcileDrafts: pruned local row for gone uid=%s", uid)
+			}
+		}
+	}
+}
+
+func addrsToString(addrs []provider.Address) string {
+	parts := make([]string, 0, len(addrs))
+	for _, a := range addrs {
+		parts = append(parts, a.String())
+	}
+	return strings.Join(parts, ", ")
+}
+
+// newDraftID generates a stable local identifier for a draft. Unlike IMAP
+// UIDs (which rotate on every APPEND/EXPUNGE), this value is written once
+// and survives every server round-trip for the life of the draft.
+func newDraftID() (string, error) {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "draft-" + hex.EncodeToString(b), nil
 }
 
 // preserveCachedBodies copies previously-fetched message bodies from the
@@ -426,7 +638,9 @@ func (m *Mailbox) BuildThreadDisplay() {
 			}
 		}
 		hasDraft := false
-		if m.cache != nil {
+		// In the Drafts folder every row is already a draft; the inline
+		// "draft" tag is a reply-draft indicator for other folders only.
+		if m.cache != nil && m.ActiveFolderCanonical() != "Drafts" {
 			hasDraft = m.cache.HasDraft(t.ID)
 		}
 		m.threadRows = append(m.threadRows, ThreadRow{
@@ -575,37 +789,49 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 		}
 	}
 
-	// async fetch missing bodies from IMAP
-	if len(needFetch) > 0 && m.imap != nil && onUpdate != nil {
+	// async fetch missing bodies from IMAP.
+	//
+	// Drafts folder is a projection of the local drafts table — the
+	// thread.Messages[i].ID is a stable draft id ("draft-<hex>"), not an
+	// IMAP UID, so GetMessage would misparse it as UID 0 and fetch
+	// nothing. Bodies for drafts are filled by reconcile's backfill path.
+	// Also avoids corrupting the threads table via the PutThread call
+	// below with a synthesised drafts projection.
+	if len(needFetch) > 0 && m.imap != nil && onUpdate != nil && m.ActiveFolderCanonical() != "Drafts" {
 		thread := t
 		folder := m.ActiveFolderID()
+		targets := append([]int(nil), needFetch...)
 		go func() {
-			// select the right folder so UIDs are valid
 			if err := m.imap.SelectFolder(folder); err != nil {
 				log.Printf("conversation: failed to select %s: %v", folder, err)
 				return
 			}
 			changed := false
-			for _, i := range needFetch {
+			for _, i := range targets {
 				full, err := m.imap.GetMessage(thread.Messages[i].ID)
 				if err != nil {
 					continue
 				}
-				// cache first, then update memory
 				thread.Messages[i].TextBody = full.TextBody
 				thread.Messages[i].HTMLBody = full.HTMLBody
 				changed = true
 			}
-			if changed {
-				if m.cache != nil {
-					m.cache.PutThread(*thread)
-				}
-				// update conversation display from cached data
-				for _, i := range needFetch {
-					m.conversation[i].Body = m.renderBody(thread.Messages[i])
-				}
-				onUpdate()
+			if !changed {
+				return
 			}
+			if m.cache != nil {
+				m.cache.PutThread(*thread)
+			}
+			// A folder switch while this goroutine was running would
+			// reset m.conversation — skip writes that would land out of
+			// bounds. Next LoadConversation rerenders from cache.
+			for _, i := range targets {
+				if i >= len(m.conversation) {
+					continue
+				}
+				m.conversation[i].Body = m.renderBody(thread.Messages[i])
+			}
+			onUpdate()
 		}()
 	}
 }
@@ -718,7 +944,7 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	if t == nil {
 		return nil, ""
 	}
-	dest := m.folderIDByDisplayName("Archive")
+	dest := m.FolderIDByDisplayName("Archive")
 	if dest == "" {
 		log.Println("archive: no archive folder found")
 		return nil, ""
@@ -743,7 +969,7 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 	if t == nil {
 		return nil, ""
 	}
-	dest := m.folderIDByDisplayName("Trash")
+	dest := m.FolderIDByDisplayName("Trash")
 	if dest == "" {
 		log.Println("delete: no trash folder found")
 		return nil, ""
@@ -975,7 +1201,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{folder})
 			}
 		case "sync_draft":
-			draftsFolder := m.folderIDByDisplayName("Drafts")
+			draftsFolder := m.FolderIDByDisplayName("Drafts")
 			if draftsFolder == "" {
 				cmdErr = fmt.Errorf("no drafts folder")
 				log.Printf("sync_draft: no Drafts folder resolved (folders loaded: %d)", len(m.folders))
@@ -1001,7 +1227,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 			log.Printf("sync_draft: ok thread=%q newUID=%s", d.ThreadID, newUID)
 			cmdErr = m.cache.UpdateDraftRemoteUID(d.ThreadID, newUID)
 		case "delete_draft":
-			draftsFolder := m.folderIDByDisplayName("Drafts")
+			draftsFolder := m.FolderIDByDisplayName("Drafts")
 			if draftsFolder == "" {
 				cmdErr = fmt.Errorf("no drafts folder")
 				break
@@ -1078,13 +1304,13 @@ func canonicalRank(id string) int {
 	return -1
 }
 
-// folderIDByDisplayName returns the raw IMAP folder ID for a canonical display
+// FolderIDByDisplayName returns the raw IMAP folder ID for a canonical display
 // name (e.g. "Trash" → "[Google Mail]/Bin", "Archive" → "[Google Mail]/All
 // Mail"). Some accounts expose duplicate canonical folders — notably Gmail
 // accounts have both "[Gmail]/Drafts" and "[Google Mail]/Drafts" — so we
 // pick the one with the most messages, matching BuildFolderDisplay's
 // dedup rule. Ties fall to the first one encountered.
-func (m *Mailbox) folderIDByDisplayName(display string) string {
+func (m *Mailbox) FolderIDByDisplayName(display string) string {
 	var bestID string
 	bestTotal := -1
 	for _, f := range m.folders {

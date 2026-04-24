@@ -2,6 +2,7 @@ package cache
 
 import (
 	"testing"
+	"time"
 )
 
 func memCache(t *testing.T) *Cache {
@@ -301,6 +302,131 @@ func TestScenario_ClickDifferentServerDrafts(t *testing.T) {
 
 	if n := countDrafts(t, c); n != 2 {
 		t.Errorf("cache has %d rows, want 2 (one per clicked draft)", n)
+	}
+}
+
+// ListDrafts returns all rows ordered by updated_at DESC so the Drafts
+// folder view can project straight from it.
+func TestListDrafts_OrderedByMostRecentlyUpdated(t *testing.T) {
+	c := memCache(t)
+
+	c.PutDraft(Draft{ThreadID: "draft-a", Body: "oldest"})
+	// small wait so updated_at (second-resolution) differs between rows
+	c.db.Exec("UPDATE drafts SET updated_at = updated_at - 10 WHERE thread_id = 'draft-a'")
+	c.PutDraft(Draft{ThreadID: "draft-b", Body: "middle"})
+	c.db.Exec("UPDATE drafts SET updated_at = updated_at - 5 WHERE thread_id = 'draft-b'")
+	c.PutDraft(Draft{ThreadID: "draft-c", Body: "newest"})
+
+	drafts, err := c.ListDrafts()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(drafts) != 3 {
+		t.Fatalf("got %d drafts, want 3", len(drafts))
+	}
+	if drafts[0].ThreadID != "draft-c" || drafts[2].ThreadID != "draft-a" {
+		t.Errorf("order wrong: %v (want [draft-c, draft-b, draft-a])",
+			[]string{drafts[0].ThreadID, drafts[1].ThreadID, drafts[2].ThreadID})
+	}
+}
+
+// FindDraftByRemoteUID bridges the "server UID" namespace back to the
+// stable local id — sync uses it to decide whether a server-side draft
+// is already tracked locally.
+func TestFindDraftByRemoteUID(t *testing.T) {
+	c := memCache(t)
+
+	_ = c.SeedDraft(Draft{ThreadID: "draft-xyz", Subject: "hi", Body: "body", RemoteUID: "42"})
+
+	got, found, err := c.FindDraftByRemoteUID("42")
+	if err != nil || !found {
+		t.Fatalf("find failed: err=%v found=%v", err, found)
+	}
+	if got.ThreadID != "draft-xyz" {
+		t.Errorf("thread_id = %q, want draft-xyz", got.ThreadID)
+	}
+
+	if _, found, _ := c.FindDraftByRemoteUID("99"); found {
+		t.Error("found draft for unknown remote uid — reconciliation would wrongly skip adoption")
+	}
+	if _, found, _ := c.FindDraftByRemoteUID(""); found {
+		t.Error("empty remote_uid matched rows — locally-only drafts would be wrongly treated as server-tracked")
+	}
+}
+
+// DraftRemoteUIDs feeds the "what's tracked locally?" side of reconciliation.
+// Empty remote_uid means never-synced, and MUST not leak into the set.
+func TestDraftRemoteUIDs_ExcludesUnsynced(t *testing.T) {
+	c := memCache(t)
+
+	_ = c.PutDraft(Draft{ThreadID: "draft-unsynced", Body: "never-sent"}) // no remote_uid
+	_ = c.SeedDraft(Draft{ThreadID: "draft-synced", Body: "server-known", RemoteUID: "42"})
+
+	uids, err := c.DraftRemoteUIDs()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(uids) != 1 || !uids["42"] {
+		t.Errorf("uids = %v, want {42}", uids)
+	}
+}
+
+// BackfillDraftContent is the reconcile-time path for filling in body /
+// recipients that ListThreads didn't return. Must update without queueing
+// a sync (the server already has this content) and must publish so the
+// UI refreshes.
+func TestBackfillDraftContent_UpdatesAndPublishes(t *testing.T) {
+	c := memCache(t)
+	c.SetDraftsLabel("drafts")
+	ch, unsub := c.Subscribe("drafts")
+	defer unsub()
+
+	// seed an adopted-but-bodyless row, drain the seed publish
+	_ = c.SeedDraft(Draft{ThreadID: "draft-x", Subject: "from server", Body: "", RemoteUID: "42"})
+	<-ch
+
+	serverDate := time.Date(2026, 4, 15, 10, 0, 0, 0, time.UTC)
+	if err := c.BackfillDraftContent("draft-x", "to@example.com", "", "", "from server", "the real body", serverDate); err != nil {
+		t.Fatal(err)
+	}
+
+	got, _, _ := c.GetDraft("draft-x")
+	if got.Body != "the real body" {
+		t.Errorf("body = %q, want \"the real body\"", got.Body)
+	}
+	if got.To != "to@example.com" {
+		t.Errorf("to = %q, want \"to@example.com\"", got.To)
+	}
+
+	// must NOT queue a sync_draft — backfill is downstream, not an edit
+	cmds, _ := c.PendingCommands()
+	for _, cmd := range cmds {
+		if cmd.Action == "sync_draft" && cmd.TargetID == "draft-x" {
+			t.Error("backfill queued a sync_draft — will cause the client to PUSH the same content back, creating a loop")
+		}
+	}
+
+	// must publish so subscribers re-render
+	select {
+	case <-ch:
+	default:
+		t.Error("backfill did not publish — preview pane stays empty after reconcile fills in bodies")
+	}
+}
+
+func TestDeleteDraftByRemoteUID(t *testing.T) {
+	c := memCache(t)
+	_ = c.SeedDraft(Draft{ThreadID: "draft-x", Body: "x", RemoteUID: "42"})
+	_ = c.SeedDraft(Draft{ThreadID: "draft-y", Body: "y", RemoteUID: "43"})
+
+	if err := c.DeleteDraftByRemoteUID("42"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := c.GetDraft("draft-x"); found {
+		t.Error("draft-x should have been deleted when its remote copy was pruned")
+	}
+	if _, found, _ := c.GetDraft("draft-y"); !found {
+		t.Error("draft-y was wrongly deleted — DeleteDraftByRemoteUID should only touch the matched row")
 	}
 }
 

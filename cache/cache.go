@@ -16,6 +16,26 @@ import (
 type Cache struct {
 	db   *sql.DB
 	subs pubsub
+
+	// draftsLabel is the IMAP folder ID for the user's Drafts folder. Set
+	// once at startup by the app (cache is storage-only, it doesn't know
+	// about folder semantics). Draft-mutating methods publish on this
+	// label so the mailbox subscriber can refresh the UI — without this,
+	// the drafts table would update silently and the view would stay stale.
+	draftsLabel string
+}
+
+// SetDraftsLabel tells the cache which folder id to publish on when the
+// drafts table is mutated. Should be called once at startup, after folders
+// have been loaded.
+func (c *Cache) SetDraftsLabel(label string) {
+	c.draftsLabel = label
+}
+
+func (c *Cache) publishDrafts() {
+	if c.draftsLabel != "" {
+		c.subs.publish(c.draftsLabel)
+	}
 }
 
 func New() (*Cache, error) {
@@ -160,6 +180,27 @@ func (c *Cache) migrate() error {
 	// here mean the column doesn't exist (fresh install), so we swallow them.
 	c.db.Exec(`INSERT OR IGNORE INTO thread_labels (thread_id, label) SELECT id, folder FROM threads WHERE folder != ''`)
 	c.db.Exec(`INSERT OR IGNORE INTO message_labels (message_id, label) SELECT id, folder FROM messages WHERE folder != ''`)
+
+	// one-shot migration: earlier drafts keyed by raw IMAP UID are now
+	// unreachable — the drafts folder projects from this table using stable
+	// local ids, and UID-keyed rows both collide with server state and can't
+	// be re-found after APPEND/EXPUNGE rotates the UID. Purge them; server
+	// state will be re-adopted with stable ids on next sync.
+	c.db.Exec(`DELETE FROM drafts WHERE thread_id GLOB '[0-9]*'`)
+
+	// one-shot migration: pre-fix versions of SeedDraft stamped adopted
+	// rows with updated_at = time.Now() instead of the server message
+	// date, so the Drafts folder showed every draft as "authored now"
+	// and out of order. Re-adopt by clearing server-sourced rows
+	// (remote_uid set); local-only drafts (never synced) are preserved
+	// so any in-flight user edit isn't lost. Gated by sync_state so it
+	// only runs once per cache.
+	var resetDone string
+	_ = c.db.QueryRow(`SELECT value FROM sync_state WHERE key = 'drafts_v2_reset'`).Scan(&resetDone)
+	if resetDone == "" {
+		c.db.Exec(`DELETE FROM drafts WHERE remote_uid != ''`)
+		c.db.Exec(`INSERT OR REPLACE INTO sync_state (key, value) VALUES ('drafts_v2_reset', '1')`)
+	}
 	return nil
 }
 
@@ -337,6 +378,7 @@ func (c *Cache) PutDraft(d Draft) error {
 	); err != nil {
 		return err
 	}
+	c.publishDrafts()
 	return c.PutCommand(Command{
 		ID:        "sync_draft-" + d.ThreadID,
 		Action:    "sync_draft",
@@ -352,14 +394,30 @@ func (c *Cache) PutDraft(d Draft) error {
 // unsynced local edits for this thread id, those take precedence. Does NOT
 // queue a sync command because the local state matches the server.
 func (c *Cache) SeedDraft(d Draft) error {
-	_, err := c.db.Exec(
+	// The draft's UpdatedAt is the server message's date — preserve it so
+	// the Drafts folder view can order by real message age. Falling back
+	// to time.Now() only for genuinely-new local drafts that have no
+	// server-provided timestamp yet (the provider.Message zero-value).
+	updatedAt := d.UpdatedAt.Unix()
+	if d.UpdatedAt.IsZero() {
+		updatedAt = time.Now().Unix()
+	}
+	res, err := c.db.Exec(
 		`INSERT OR IGNORE INTO drafts
 		 (thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, remote_uid, synced_at, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		d.ThreadID, d.To, d.Cc, d.Bcc, d.Subject, d.Body,
-		d.RemoteUID, time.Now().Unix(), time.Now().Unix(),
+		d.RemoteUID, time.Now().Unix(), updatedAt,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	// Only publish if we actually inserted — OR IGNORE turns a conflicting
+	// insert into a no-op, and signalling a no-op spams the subscriber.
+	if n, _ := res.RowsAffected(); n > 0 {
+		c.publishDrafts()
+	}
+	return nil
 }
 
 func (c *Cache) GetDraft(threadID string) (Draft, bool, error) {
@@ -389,8 +447,12 @@ func (c *Cache) DeleteDraft(threadID string) error {
 	var remoteUID string
 	_ = c.db.QueryRow("SELECT remote_uid FROM drafts WHERE thread_id = ?", threadID).Scan(&remoteUID)
 
-	if _, err := c.db.Exec("DELETE FROM drafts WHERE thread_id = ?", threadID); err != nil {
+	res, err := c.db.Exec("DELETE FROM drafts WHERE thread_id = ?", threadID)
+	if err != nil {
 		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		c.publishDrafts()
 	}
 	// drop any pending sync for this thread — it's moot now
 	_ = c.DeleteCommand("sync_draft-" + threadID)
@@ -418,6 +480,43 @@ func (c *Cache) UpdateDraftRemoteUID(threadID, remoteUID string) error {
 	return err
 }
 
+// BackfillDraftContent updates the local draft row with content pulled
+// from the server (reconciliation path). Unlike PutDraft this does NOT
+// queue a sync command — the server IS the truth here, we're just
+// mirroring it locally. Used to fill in body/recipients on drafts that
+// were previously adopted with only headers. Publishes so the UI picks
+// up the now-visible body.
+//
+// Also rewrites updated_at to the server's message date so the Drafts
+// folder view orders by real age rather than "when we last touched the
+// row." Zero date is treated as "leave it alone".
+func (c *Cache) BackfillDraftContent(threadID, to, cc, bcc, subject, body string, date time.Time) error {
+	var res sql.Result
+	var err error
+	if date.IsZero() {
+		res, err = c.db.Exec(
+			`UPDATE drafts
+			 SET to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, body = ?
+			 WHERE thread_id = ?`,
+			to, cc, bcc, subject, body, threadID,
+		)
+	} else {
+		res, err = c.db.Exec(
+			`UPDATE drafts
+			 SET to_addrs = ?, cc_addrs = ?, bcc_addrs = ?, subject = ?, body = ?, updated_at = ?
+			 WHERE thread_id = ?`,
+			to, cc, bcc, subject, body, date.Unix(), threadID,
+		)
+	}
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		c.publishDrafts()
+	}
+	return nil
+}
+
 // HasDraft returns true if a draft exists for this thread. Cheaper than
 // GetDraft when the caller only needs the boolean (e.g. thread-list indicator).
 func (c *Cache) HasDraft(threadID string) bool {
@@ -433,6 +532,92 @@ func (c *Cache) GCEmptyDrafts() error {
 		"DELETE FROM drafts WHERE TRIM(subject) = '' AND TRIM(body) = ''",
 	)
 	return err
+}
+
+// ListDrafts returns every draft row ordered by most-recently-updated first.
+// The Drafts folder view projects directly from this, so every save is
+// immediately reflected without needing to round-trip through the threads
+// table or IMAP.
+func (c *Cache) ListDrafts() ([]Draft, error) {
+	rows, err := c.db.Query(
+		`SELECT thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, remote_uid, updated_at
+		 FROM drafts ORDER BY updated_at DESC`,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Draft
+	for rows.Next() {
+		var d Draft
+		var updatedAt int64
+		if err := rows.Scan(&d.ThreadID, &d.To, &d.Cc, &d.Bcc, &d.Subject, &d.Body, &d.RemoteUID, &updatedAt); err != nil {
+			return nil, err
+		}
+		d.UpdatedAt = time.Unix(updatedAt, 0)
+		out = append(out, d)
+	}
+	return out, rows.Err()
+}
+
+// FindDraftByRemoteUID looks up a draft by its current server-side UID.
+// Used during Drafts-folder sync to tell "server draft we already have a
+// local row for" from "server draft we've never seen and must adopt".
+func (c *Cache) FindDraftByRemoteUID(remoteUID string) (Draft, bool, error) {
+	if remoteUID == "" {
+		return Draft{}, false, nil
+	}
+	var d Draft
+	var updatedAt int64
+	err := c.db.QueryRow(
+		`SELECT thread_id, to_addrs, cc_addrs, bcc_addrs, subject, body, remote_uid, updated_at
+		 FROM drafts WHERE remote_uid = ?`, remoteUID,
+	).Scan(&d.ThreadID, &d.To, &d.Cc, &d.Bcc, &d.Subject, &d.Body, &d.RemoteUID, &updatedAt)
+	if err == sql.ErrNoRows {
+		return Draft{}, false, nil
+	}
+	if err != nil {
+		return Draft{}, false, err
+	}
+	d.UpdatedAt = time.Unix(updatedAt, 0)
+	return d, true, nil
+}
+
+// DraftRemoteUIDs returns the set of remote_uid values currently held by
+// local draft rows. Sync uses this to detect local rows whose server copy
+// has gone away (deleted in another client) so they can be pruned.
+func (c *Cache) DraftRemoteUIDs() (map[string]bool, error) {
+	rows, err := c.db.Query(`SELECT remote_uid FROM drafts WHERE remote_uid != ''`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]bool)
+	for rows.Next() {
+		var uid string
+		if err := rows.Scan(&uid); err != nil {
+			return nil, err
+		}
+		out[uid] = true
+	}
+	return out, rows.Err()
+}
+
+// DeleteDraftByRemoteUID removes the local row whose remote_uid matches.
+// Used when reconciliation notices the server-side copy is gone. Does NOT
+// queue a delete_draft command — the server copy is already absent.
+func (c *Cache) DeleteDraftByRemoteUID(remoteUID string) error {
+	if remoteUID == "" {
+		return nil
+	}
+	res, err := c.db.Exec(`DELETE FROM drafts WHERE remote_uid = ?`, remoteUID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		c.publishDrafts()
+	}
+	return nil
 }
 
 // GetLastDraft returns the most recently updated draft across all threads.
