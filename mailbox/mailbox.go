@@ -52,13 +52,13 @@ type Mailbox struct {
 }
 
 // read-only pointers for glyph view binding
-func (m *Mailbox) FolderNames() *[]string   { return &m.folderNames }
-func (m *Mailbox) ThreadRows() *[]ThreadRow { return &m.threadRows }
-func (m *Mailbox) PreviewLines() *[]string  { return &m.previewLines }
-func (m *Mailbox) CanonEnd() int            { return m.canonEnd }
-func (m *Mailbox) FolderLen() int           { return len(m.folderNames) }
-func (m *Mailbox) ThreadLen() int           { return len(m.threadRows) }
-func (m *Mailbox) PreviewText() *string                    { return &m.previewText }
+func (m *Mailbox) FolderNames() *[]string                       { return &m.folderNames }
+func (m *Mailbox) ThreadRows() *[]ThreadRow                     { return &m.threadRows }
+func (m *Mailbox) PreviewLines() *[]string                      { return &m.previewLines }
+func (m *Mailbox) CanonEnd() int                                { return m.canonEnd }
+func (m *Mailbox) FolderLen() int                               { return len(m.folderNames) }
+func (m *Mailbox) ThreadLen() int                               { return len(m.threadRows) }
+func (m *Mailbox) PreviewText() *string                         { return &m.previewText }
 func (m *Mailbox) ConversationMessages() *[]ConversationMessage { return &m.conversation }
 
 func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
@@ -271,6 +271,7 @@ func (m *Mailbox) LoadThreads() {
 		m.displayMu.Lock()
 		m.threads = draftsAsThreads(drafts)
 		m.displayMu.Unlock()
+		m.updateActiveFolderUnread()
 		return
 	}
 	threads, err := m.cache.GetThreads(m.ActiveFolderID(), 25)
@@ -280,6 +281,24 @@ func (m *Mailbox) LoadThreads() {
 	m.displayMu.Lock()
 	m.threads = threads
 	m.displayMu.Unlock()
+	m.updateActiveFolderUnread()
+}
+
+func (m *Mailbox) updateActiveFolderUnread() {
+	id := m.ActiveFolderID()
+	if id == "" {
+		return
+	}
+	unread := 0
+	for _, t := range m.threads {
+		unread += t.Unread
+	}
+	for i := range m.folders {
+		if m.folders[i].ID == id {
+			m.folders[i].Unread = unread
+			return
+		}
+	}
 }
 
 // draftsAsThreads projects the local drafts table into the provider.Thread
@@ -1003,13 +1022,15 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 		return nil, ""
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
+	cmdIDs := m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
-		m.cancelCommand(cmdID)
+		for _, id := range cmdIDs {
+			m.cancelCommand(id)
+		}
 		m.cache.PutThread(thread)
 		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.LoadThreads()
@@ -1028,18 +1049,40 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 		return nil, ""
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdID := m.queueCommand("move", t.ID, map[string]string{"folder": dest})
+	cmdIDs := m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
-		m.cancelCommand(cmdID)
+		for _, id := range cmdIDs {
+			m.cancelCommand(id)
+		}
 		m.cache.PutThread(thread)
 		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
+}
+
+func (m *Mailbox) queueMoveCommands(t *provider.Thread, source, dest string) []string {
+	var ids []string
+	for _, msg := range t.Messages {
+		if msg.ID == "" {
+			continue
+		}
+		ids = append(ids, m.queueCommand("move", msg.ID, map[string]string{
+			"folder": dest,
+			"source": source,
+		}))
+	}
+	if len(ids) == 0 && t.ID != "" {
+		ids = append(ids, m.queueCommand("move", t.ID, map[string]string{
+			"folder": dest,
+			"source": source,
+		}))
+	}
+	return ids
 }
 
 func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
@@ -1083,15 +1126,18 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 		return nil, ""
 	}
 	beforeUnread := t.Unread
+	beforeRead := make([]bool, len(t.Messages))
 	markRead := t.Unread > 0
 
 	var cmdIDs []string
-	for _, msg := range t.Messages {
+	for i, msg := range t.Messages {
+		beforeRead[i] = msg.Read
 		if markRead && !msg.Read {
 			cmdIDs = append(cmdIDs, m.queueCommand("mark_read", msg.ID, nil))
 		} else if !markRead {
 			cmdIDs = append(cmdIDs, m.queueCommand("mark_unread", msg.ID, nil))
 		}
+		t.Messages[i].Read = markRead
 	}
 	if markRead {
 		t.Unread = 0
@@ -1112,6 +1158,9 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
+		for i := range thread.Messages {
+			thread.Messages[i].Read = beforeRead[i]
+		}
 		m.cache.PutThread(thread)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
@@ -1124,12 +1173,15 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 		return nil, ""
 	}
 	beforeUnread := t.Unread
+	beforeRead := make([]bool, len(t.Messages))
 
 	var cmdIDs []string
-	for _, msg := range t.Messages {
+	for i, msg := range t.Messages {
+		beforeRead[i] = msg.Read
 		if !msg.Read {
 			cmdIDs = append(cmdIDs, m.queueCommand("mark_read", msg.ID, nil))
 		}
+		t.Messages[i].Read = true
 	}
 	t.Unread = 0
 	thread := *t
@@ -1142,6 +1194,9 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
+		for i := range thread.Messages {
+			thread.Messages[i].Read = beforeRead[i]
+		}
 		m.cache.PutThread(thread)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
@@ -1152,6 +1207,15 @@ func (m *Mailbox) queueCommand(action, targetID string, params map[string]string
 	id := fmt.Sprintf("%s-%s-%d", action, targetID, time.Now().UnixNano())
 	if m.cache == nil {
 		return id
+	}
+	if params == nil {
+		params = map[string]string{}
+	}
+	switch action {
+	case "mark_read", "mark_unread", "star", "unstar", "move":
+		if _, ok := params["source"]; !ok {
+			params["source"] = m.ActiveFolderID()
+		}
 	}
 	m.cache.PutCommand(cache.Command{
 		ID:        id,
@@ -1227,14 +1291,18 @@ func (m *Mailbox) ProcessPendingCommands() {
 		}
 	}()
 	for _, cmd := range cmds {
+		source := cmd.Params["source"]
+		if source == "" {
+			source = folder
+		}
 		// before each UID-dependent op, ensure we're SELECTed on the folder
 		// the UID is valid in. For user actions (mark_read etc.) that means
 		// the active folder the command was queued against. sync_draft and
 		// delete_draft manage their own SELECT.
 		switch cmd.Action {
 		case "mark_read", "mark_unread", "star", "unstar", "move":
-			if folder != "" {
-				_ = m.imap.SelectFolder(folder)
+			if source != "" {
+				_ = m.imap.SelectFolder(source)
 			}
 		}
 		var cmdErr error
@@ -1251,7 +1319,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 		case "move":
 			if f, ok := cmd.Params["folder"]; ok {
 				dest = f
-				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{folder})
+				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{source})
 			}
 		case "sync_draft":
 			draftsFolder := m.FolderIDByDisplayName("Drafts")

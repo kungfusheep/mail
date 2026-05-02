@@ -783,11 +783,14 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	}
 
 	cmds, _ := c.PendingCommands()
-	if len(cmds) != 1 || cmds[0].Action != "move" || cmds[0].TargetID != "t2" {
-		t.Errorf("pending commands = %v, want move t2", cmds)
+	if len(cmds) != 1 || cmds[0].Action != "move" || cmds[0].TargetID != "m2" {
+		t.Errorf("pending commands = %v, want move m2", cmds)
 	}
 	if cmds[0].Params["folder"] != "[Google Mail]/All Mail" {
 		t.Errorf("move folder = %q, want [Google Mail]/All Mail", cmds[0].Params["folder"])
+	}
+	if cmds[0].Params["source"] != "INBOX" {
+		t.Errorf("move source = %q, want INBOX", cmds[0].Params["source"])
 	}
 
 	// undo should restore the thread
@@ -798,6 +801,47 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	cmds, _ = c.PendingCommands()
 	if len(cmds) != 0 {
 		t.Errorf("after undo: pending commands = %d, want 0", len(cmds))
+	}
+}
+
+func TestArchive_QueuesEveryMessageInThread(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "m2", Subject: "grouped", Date: now, Messages: []provider.Message{{ID: "m1"}, {ID: "m2"}}},
+	})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	mb.Archive(0)
+
+	cmds, _ := c.PendingCommands()
+	if len(cmds) != 2 {
+		t.Fatalf("pending commands = %d, want 2", len(cmds))
+	}
+	got := map[string]bool{}
+	for _, cmd := range cmds {
+		if cmd.Action != "move" {
+			t.Errorf("action = %q, want move", cmd.Action)
+		}
+		if cmd.Params["folder"] != "[Google Mail]/All Mail" {
+			t.Errorf("move folder = %q, want [Google Mail]/All Mail", cmd.Params["folder"])
+		}
+		if cmd.Params["source"] != "INBOX" {
+			t.Errorf("move source = %q, want INBOX", cmd.Params["source"])
+		}
+		got[cmd.TargetID] = true
+	}
+	for _, id := range []string{"m1", "m2"} {
+		if !got[id] {
+			t.Errorf("missing queued move for %s", id)
+		}
 	}
 }
 
@@ -830,6 +874,15 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 	if rows[0].Unread {
 		t.Error("expected read after toggle")
 	}
+	for _, msg := range mb.threads[0].Messages {
+		if !msg.Read {
+			t.Errorf("message %s still unread after toggle", msg.ID)
+		}
+	}
+	mb.BuildFolderDisplay(false)
+	if got := (*mb.FolderNames())[0]; got != "Inbox" {
+		t.Errorf("folder label after mark read = %q, want Inbox", got)
+	}
 
 	cmds, _ := c.PendingCommands()
 	if len(cmds) != 2 {
@@ -841,6 +894,11 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 	rows = *mb.ThreadRows()
 	if !rows[0].Unread {
 		t.Error("expected unread after undo")
+	}
+	for _, msg := range mb.threads[0].Messages {
+		if msg.Read {
+			t.Errorf("message %s still read after undo", msg.ID)
+		}
 	}
 }
 

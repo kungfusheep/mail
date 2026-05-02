@@ -120,7 +120,6 @@ func main() {
 	mb.LoadConversation(0, nil)
 
 	t := themeDark
-	_ = themeLight
 
 	// inbox view state
 	var (
@@ -231,26 +230,31 @@ func main() {
 	// because it seemed to trigger a top-row-loss bug; that turned out to be
 	// the emoji/wide-rune width issue (fixed in glyph).
 	composeTheme := compose.Theme{
-		Name:                  "mail",
-		Text:                  t.FG,
-		Background:            t.BG,
-		Bold:                  Style{Attr: AttrBold},
-		Italic:                Style{Attr: AttrItalic},
-		Underline:             Style{Attr: AttrUnderline},
-		Strikethrough:         Style{Attr: AttrStrikethrough},
-		Code:                  Style{FG: t.FG},
-		Accent:                Style{FG: t.Accent},
-		Heading1:              Style{FG: t.Bright, Attr: AttrBold},
-		Heading2:              Style{FG: t.Bright, Attr: AttrBold},
-		Heading3:              Style{FG: t.Bright, Attr: AttrBold},
-		Heading4:              Style{FG: t.FG, Attr: AttrBold},
-		Heading5:              Style{FG: t.FG, Attr: AttrBold},
-		Heading6:              Style{FG: t.FG, Attr: AttrBold},
-		Blockquote:            Style{FG: t.Subtle, Attr: AttrItalic},
-		CodeBlock:             Style{FG: t.FG},
-		ListBullet:            Style{FG: t.Subtle},
-		Callout:               Style{FG: t.Accent},
-		Divider:               Style{FG: t.Muted, Attr: AttrDim},
+		Name:          "mail",
+		Text:          t.FG,
+		Background:    t.BG,
+		Bold:          Style{Attr: AttrBold},
+		Italic:        Style{Attr: AttrItalic},
+		Underline:     Style{Attr: AttrUnderline},
+		Strikethrough: Style{Attr: AttrStrikethrough},
+		Code:          Style{FG: t.FG},
+		Accent:        Style{FG: t.Accent},
+		Heading1:      Style{FG: t.Bright, Attr: AttrBold},
+		Heading2:      Style{FG: t.Bright, Attr: AttrBold},
+		Heading3:      Style{FG: t.Bright, Attr: AttrBold},
+		Heading4:      Style{FG: t.FG, Attr: AttrBold},
+		Heading5:      Style{FG: t.FG, Attr: AttrBold},
+		Heading6:      Style{FG: t.FG, Attr: AttrBold},
+		Blockquote:    Style{FG: t.Subtle, Attr: AttrItalic},
+		CodeBlock:     Style{FG: t.FG},
+		ListBullet:    Style{FG: t.Subtle},
+		Callout:       Style{FG: t.Accent},
+		Divider:       Style{FG: t.Muted, Attr: AttrDim},
+		Cursor: compose.CursorColors{
+			Normal: t.Bright,
+			Insert: Hex(0x5af78e),
+			Visual: Hex(0xf4f99d),
+		},
 		DialogueCharacter:     Style{FG: t.Bright, Attr: AttrBold},
 		DialogueText:          Style{FG: t.FG},
 		DialogueParenthetical: Style{FG: t.Subtle, Attr: AttrItalic},
@@ -297,6 +301,7 @@ func main() {
 
 		labelUnsub = mb.Watch(label, func() {
 			mb.SetSelected(threadSel)
+			mb.BuildFolderDisplay(labelsOpen)
 			// refresh the preview too — the data under it may have changed
 			// (e.g. reconcileDrafts just backfilled the selected draft's
 			// body, or a sync pulled the rest of a conversation).
@@ -350,6 +355,7 @@ func main() {
 		if err := mb.SyncThreads(); err != nil {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
+		mb.BuildFolderDisplay(labelsOpen)
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
 		loadPreview()
@@ -366,6 +372,7 @@ func main() {
 		if err := mb.SyncThreads(); err != nil {
 			statusText = fmt.Sprintf("sync: %v", err)
 		}
+		mb.BuildFolderDisplay(labelsOpen)
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
 		app.RequestRender()
@@ -381,6 +388,7 @@ func main() {
 		if convView != nil {
 			convView.Refresh()
 		}
+		app.RequestRender()
 	}
 
 	handleEnter := func() {
@@ -446,7 +454,7 @@ func main() {
 		watchLabel(mb.ActiveFolderID())
 	}
 
-	fade := Animate.Duration(400 * time.Millisecond).Ease(EaseOutCubic)
+	fade := Animate
 	accentMarker := Style{FG: t.Accent}
 
 	// kv backs the help modal's key→description rows; IIFEs in the template
@@ -510,7 +518,7 @@ func main() {
 						Style(fade(&threadListStyle)).
 						SelectedStyle(Style{}).
 						Marker("  ").
-						Render(func(row *mailbox.ThreadRow) any {
+						Render(func(row *mailbox.ThreadRow) Component {
 							itemBG := If(&row.Selected).Then(t.SelBG).Else(
 								If(&row.Grouped).
 									Then(t.GroupBG).
@@ -543,8 +551,10 @@ func main() {
 
 				VBox.Grow(3).CascadeStyle(&previewStyle)(
 					HRule(), SpaceH(1),
-					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) { convView = sv })(
-						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) any {
+					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) {
+						convView = sv
+					})(
+						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) Component {
 							return VBox(
 								HBox(
 									Text(&msg.Sender).Style(
@@ -569,10 +579,18 @@ func main() {
 			// the screen; the modal itself is dodged so it stays crisp.
 			If(&helpOpen).Then(OverlayNode{
 				Centered: true,
-				Child: VBox.Width(56).Fill(t.BG).Border(BorderSoft).BorderFG(t.BG).NodeRef(&helpRef).Gap(1)(
+				Child: VBox.
+					Width(56).
+					Fill(t.BG).
+					PaddingVH(1, 2).
+					NodeRef(&helpRef).
+					Opacity(
+						In(Animate(1.0)).Out(Animate(0)),
+					).
+					Gap(1)(
 					Text("keyboard").FG(t.Bright).Bold(),
 					HBox(
-						func() any {
+						func() Component {
 							rows := []kv{
 								{"j / k", "up / down"},
 								{"h / l", "pane left / right"},
@@ -583,12 +601,12 @@ func main() {
 							}
 							return VBox.Grow(3)(
 								Text("navigate").FG(t.Subtle),
-								ForEach(&rows, func(r *kv) any {
+								ForEach(&rows, func(r *kv) Component {
 									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(8), Text(&r.desc).FG(t.Subtle))
 								}),
 							)
 						}(),
-						func() any {
+						func() Component {
 							rows := []kv{
 								{"c", "compose"},
 								{"C", "resume draft"},
@@ -601,27 +619,25 @@ func main() {
 							}
 							return VBox.Grow(2)(
 								Text("actions").FG(t.Subtle),
-								ForEach(&rows, func(r *kv) any {
+								ForEach(&rows, func(r *kv) Component {
 									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(3), Text(&r.desc).FG(t.Subtle))
 								}),
 							)
 						}(),
 					),
 					ScreenEffect(
-						SEVignette().Strength(Animate.From(0).Duration(1*time.Second).Ease(EaseOutQuint)(0.55)).Dodge(&helpRef).Smooth(),
+						SEVignette().Strength(
+							In(
+								Animate.From(0)(0.55),
+							).Out(
+
+								Animate(0),
+							),
+						).Dodge(&helpRef).Smooth(),
 						SEDropShadow().Focus(&helpRef),
 					),
 				),
-			}).Else(
-				ScreenEffect(
-					// FIX: this is wrong - we don't
-					// currently have a way to reverse
-					// animations/screen effects when
-					// removing them - maybe needs a
-					// .ReverseOnExit() or an OnExit callback
-					SEVignette().Strength(Animate.Duration(1*time.Second).Ease(EaseOutQuint).From(0.55)(0)).Smooth(),
-				),
-			),
+			}),
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
@@ -661,7 +677,9 @@ func main() {
 					loadPreview()
 				}
 			case 2:
-				convView.Layer().ScrollDown(1)
+				if convView != nil {
+					convView.Layer().ScrollDown(1)
+				}
 			}
 		}).
 		Handle("k", func() {
@@ -678,7 +696,9 @@ func main() {
 					loadPreview()
 				}
 			case 2:
-				convView.Layer().ScrollUp(1)
+				if convView != nil {
+					convView.Layer().ScrollUp(1)
+				}
 			}
 		}).
 		Handle("l", func() {
@@ -751,6 +771,7 @@ func main() {
 			if pane == 1 {
 				pushUndo(mb.Archive(threadSel))
 				clampThreadSel()
+				mb.BuildFolderDisplay(labelsOpen)
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -758,6 +779,7 @@ func main() {
 			if pane == 1 {
 				pushUndo(mb.Delete(threadSel))
 				clampThreadSel()
+				mb.BuildFolderDisplay(labelsOpen)
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -770,6 +792,7 @@ func main() {
 		Handle("e", func() {
 			if pane == 1 {
 				pushUndo(mb.ToggleRead(threadSel))
+				mb.BuildFolderDisplay(labelsOpen)
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -778,6 +801,7 @@ func main() {
 				undoStack[len(undoStack)-1]()
 				undoStack = undoStack[:len(undoStack)-1]
 				clampThreadSel()
+				mb.BuildFolderDisplay(labelsOpen)
 				loadPreview()
 				if len(undoStack) > 0 {
 					statusText = fmt.Sprintf("%d undoable — u to undo", len(undoStack))
@@ -859,10 +883,22 @@ func main() {
 }
 
 type composeControls struct {
-	Open              func()
-	SetupReply        func(provider.Thread)
-	ResumeLast        func()
-	ResumeDraft       func(threadID string)
+	Open        func()
+	SetupReply  func(provider.Thread)
+	ResumeLast  func()
+	ResumeDraft func(threadID string)
+}
+
+func composeCursorColor(ed *compose.Editor) Color {
+	t := ed.Theme()
+	switch ed.Mode() {
+	case compose.ModeInsert:
+		return t.Cursor.Insert
+	case compose.ModeVisual:
+		return t.Cursor.Visual
+	default:
+		return t.Cursor.Normal
+	}
 }
 
 func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int, transition *viewTransition, theme AppTheme) composeControls {
@@ -902,12 +938,19 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 	var draftSaveTimer *time.Timer
 	var draftTouched bool
 
-	// pendingCursorShow: set true on every compose entry. On the first layer
-	// render (once dimensions are known) we Refresh the editor so the cursor
-	// becomes visible before the user touches the keyboard — otherwise the
-	// viewport is correct but the terminal cursor is missing, which feels
-	// disorienting. Cleared after the first render that satisfies it.
+	// pendingCursorShow: set true on every compose entry. While the view
+	// transition is still fading in, the real terminal cursor stays hidden
+	// and transition.TargetEffect paints a fake cursor into the buffer. Once
+	// the transition completes, Refresh hands back to the real cursor.
 	var pendingCursorShow bool
+
+	transition.CursorOverlay(func() (int, int, Color, bool) {
+		if !composeActive || focused {
+			return 0, 0, Color{}, false
+		}
+		x, y := ed.CursorScreenPos()
+		return x, y, composeCursorColor(ed), true
+	})
 
 	reset := func() {
 		to, cc, subject = "", "", ""
@@ -1082,7 +1125,7 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 
 			VBox(
 				SpaceH(1),
-				HBox(Space(), VBox.Width(60)(
+				HBox(Space(), VBox.Width(64)(
 					HBox.Gap(1).NodeRef(&toFieldRef)(
 						Text("TO").FG(&labelTo),
 						TextInput{Field: &fieldTo, FocusGroup: &fieldFocus, FocusIndex: 0,
@@ -1138,10 +1181,13 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 		if w > 0 && h > 0 {
 			ed.SetSize(w, h)
 			if pendingCursorShow {
-				pendingCursorShow = false
-				// first render after compose entry — Refresh also calls
-				// updateCursor so the terminal cursor shows immediately.
-				ed.Refresh()
+				if transition.Complete() {
+					pendingCursorShow = false
+					ed.Refresh()
+				} else {
+					ed.UpdateDisplay()
+					app.HideCursor()
+				}
 			} else {
 				ed.UpdateDisplay()
 			}
@@ -1428,6 +1474,9 @@ func setupComposeView(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *s
 				return
 			}
 			ed.Refresh()
+			if pendingCursorShow && !transition.Complete() {
+				app.HideCursor()
+			}
 			if focused {
 				app.HideCursor()
 			}

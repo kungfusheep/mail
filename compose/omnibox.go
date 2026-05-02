@@ -3,8 +3,9 @@ package compose
 import (
 	"fmt"
 	"strings"
-	"github.com/kungfusheep/glyph"
 	"unicode/utf8"
+
+	"github.com/kungfusheep/glyph"
 )
 
 // OmniboxItem represents an item in the omnibox results
@@ -169,7 +170,6 @@ func (o *Omnibox) filter() {
 	}
 }
 
-
 // fuzzyMatch checks if all chars in pattern appear in str in order
 func fuzzyMatch(str, pattern string) bool {
 	pi := 0
@@ -240,7 +240,7 @@ func (o *Omnibox) Render(screenWidth, screenHeight int, theme Theme) any {
 	separator := glyph.Text(sepLine).FG(borderColor).BG(bgColor)
 
 	// build result rows
-	children := []any{inputRow, separator}
+	children := []glyph.Component{inputRow, separator}
 
 	maxResults := o.maxHeight
 	if len(o.Filtered) < maxResults {
@@ -284,7 +284,7 @@ func (o *Omnibox) Render(screenWidth, screenHeight int, theme Theme) any {
 		}
 
 		// build the row
-		rowChildren := []any{
+		rowChildren := []glyph.Component{
 			glyph.Text(" " + icon + " ").Style(iconStyle),
 			glyph.Text(item.Label).Style(rowStyle),
 		}

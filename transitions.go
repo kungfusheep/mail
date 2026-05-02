@@ -35,6 +35,8 @@ type viewTransition struct {
 	oldCells  []Cell // full capture of the source view's last frame
 	oldW      int
 	oldH      int
+
+	cursorOverlay func() (x, y int, color Color, ok bool)
 }
 
 func NewViewTransition(duration time.Duration, bg, peak Color) *viewTransition {
@@ -49,6 +51,14 @@ func NewViewTransition(duration time.Duration, bg, peak Color) *viewTransition {
 func (t *viewTransition) Start() {
 	t.active = true
 	t.startTime = time.Now()
+}
+
+func (t *viewTransition) Complete() bool {
+	return !t.active || time.Since(t.startTime) >= t.duration
+}
+
+func (t *viewTransition) CursorOverlay(fn func() (x, y int, color Color, ok bool)) {
+	t.cursorOverlay = fn
 }
 
 // progress returns 0..1 over the transition's duration. Returns 1.0 (and
@@ -106,6 +116,14 @@ func (s sourceTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {
 			s.tr.oldCells[y*w+x] = buf.Get(x, y)
+		}
+	}
+	if s.tr.cursorOverlay != nil {
+		x, y, color, ok := s.tr.cursorOverlay()
+		if ok && x >= 0 && x < w && y >= 0 && y < h {
+			cell := s.tr.oldCells[y*w+x]
+			cell.Style.BG = color
+			s.tr.oldCells[y*w+x] = cell
 		}
 	}
 }
@@ -168,6 +186,15 @@ func (s targetTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	// PHASE 2 — compose content fades IN uniformly from background.
 	p2 := (p - phase1End) / (1 - phase1End)
 	eased := p2 * p2 * (3 - 2*p2)
+
+	if s.tr.cursorOverlay != nil {
+		x, y, color, ok := s.tr.cursorOverlay()
+		if ok && buf.InBounds(x, y) {
+			cell := buf.Get(x, y)
+			cell.Style.BG = color
+			buf.Set(x, y, cell)
+		}
+	}
 
 	for y := 0; y < h; y++ {
 		for x := 0; x < w; x++ {

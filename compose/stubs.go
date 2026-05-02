@@ -52,7 +52,7 @@ func FocusScopeFromString(s string) FocusScope {
 }
 
 // buildView stub - the real implementation lives in the main app
-var buildView = func(ed *Editor) any { return nil }
+var buildView = func(ed *Editor) glyph.Component { return nil }
 
 // enterInsertMode stub - wired up by the main app via SetEnterInsertMode
 var enterInsertMode = func(app *glyph.App, ed *Editor) {}
