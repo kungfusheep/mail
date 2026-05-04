@@ -46,6 +46,15 @@ type AppTheme struct {
 	GroupBG Color
 }
 
+type mailCommand struct {
+	Label       string
+	Description string
+	Key         string
+	Section     string
+	Action      func()
+	Selected    bool
+}
+
 var themeDark = AppTheme{
 	BG:      Hex(0x1a1a1a),
 	Bright:  Hex(0xeeeeee),
@@ -68,6 +77,19 @@ var themeLight = AppTheme{
 	Accent:  Hex(0xe60012),
 	SelBG:   Hex(0xe8e8e8),
 	GroupBG: Hex(0xeeeeee),
+}
+
+func fuzzyMatch(str, pattern string) bool {
+	if pattern == "" {
+		return true
+	}
+	i := 0
+	for _, r := range str {
+		if i < len(pattern) && r == rune(pattern[i]) {
+			i++
+		}
+	}
+	return i == len(pattern)
 }
 
 func main() {
@@ -454,6 +476,252 @@ func main() {
 		watchLabel(mb.ActiveFolderID())
 	}
 
+	startSearch := func() {
+		searchQuery = ""
+		app.HideCursor()
+		app.PushView("search")
+	}
+
+	var (
+		omniboxQuery    string
+		omniboxSel      int
+		omniboxOpen     bool
+		omniboxEmpty    bool
+		omniboxHeight   int16 = 20
+		omniboxMaxRows        = 6
+		omniboxItems    []mailCommand
+		omniboxFiltered []mailCommand
+		omniboxVisible  []mailCommand
+	)
+
+	updateOmniboxLayout := func(width, height int) {
+		h := height * 6 / 10
+		if h < 10 {
+			h = 10
+		}
+		if h > height-4 {
+			h = height - 4
+		}
+		if h < 6 {
+			h = 6
+		}
+		omniboxHeight = int16(h)
+
+		rows := (h - 6) / 3
+		if rows < 1 {
+			rows = 1
+		}
+		omniboxMaxRows = rows
+		_ = width
+	}
+
+	size := app.Size()
+	updateOmniboxLayout(size.Width, size.Height)
+
+	refreshOmniboxVisible := func() {
+		omniboxVisible = omniboxVisible[:0]
+		omniboxEmpty = len(omniboxFiltered) == 0
+		if len(omniboxFiltered) == 0 {
+			return
+		}
+		start := 0
+		if omniboxSel >= omniboxMaxRows {
+			start = omniboxSel - omniboxMaxRows + 1
+		}
+		end := start + omniboxMaxRows
+		if end > len(omniboxFiltered) {
+			end = len(omniboxFiltered)
+		}
+		omniboxVisible = append(omniboxVisible, omniboxFiltered[start:end]...)
+	}
+
+	refreshOmniboxSelection := func() {
+		if omniboxSel >= len(omniboxFiltered) {
+			omniboxSel = len(omniboxFiltered) - 1
+		}
+		if omniboxSel < 0 {
+			omniboxSel = 0
+		}
+		for i := range omniboxFiltered {
+			omniboxFiltered[i].Selected = i == omniboxSel
+		}
+		refreshOmniboxVisible()
+	}
+
+	refreshOmnibox := func() {
+		q := strings.ToLower(strings.TrimSpace(omniboxQuery))
+		omniboxFiltered = omniboxFiltered[:0]
+		for _, item := range omniboxItems {
+			haystack := strings.ToLower(item.Label + " " + item.Description + " " + item.Key + " " + item.Section)
+			if q == "" || strings.Contains(haystack, q) || fuzzyMatch(haystack, q) {
+				omniboxFiltered = append(omniboxFiltered, item)
+			}
+		}
+		refreshOmniboxSelection()
+	}
+
+	app.OnResize(func(width, height int) {
+		updateOmniboxLayout(width, height)
+		refreshOmniboxVisible()
+	})
+
+	var omniboxRouter *riffkey.Router
+
+	openOmnibox := func() {
+		if omniboxOpen {
+			return
+		}
+		omniboxQuery = ""
+		omniboxSel = 0
+		omniboxOpen = true
+		refreshOmnibox()
+		app.HideCursor()
+		app.Push(omniboxRouter)
+		app.RequestRender()
+	}
+
+	closeOmnibox := func() {
+		if !omniboxOpen {
+			return
+		}
+		omniboxQuery = ""
+		omniboxOpen = false
+		refreshOmnibox()
+		app.Pop()
+		app.HideCursor()
+		app.RequestRender()
+	}
+
+	moveOmnibox := func(delta int) {
+		if len(omniboxFiltered) == 0 {
+			omniboxSel = 0
+			return
+		}
+		omniboxSel += delta
+		if omniboxSel < 0 {
+			omniboxSel = len(omniboxFiltered) - 1
+		}
+		if omniboxSel >= len(omniboxFiltered) {
+			omniboxSel = 0
+		}
+		refreshOmniboxSelection()
+	}
+
+	pageOmnibox := func(delta int) {
+		if len(omniboxFiltered) == 0 {
+			omniboxSel = 0
+			return
+		}
+		omniboxSel += delta
+		if omniboxSel < 0 {
+			omniboxSel = 0
+		}
+		if omniboxSel >= len(omniboxFiltered) {
+			omniboxSel = len(omniboxFiltered) - 1
+		}
+		refreshOmniboxSelection()
+	}
+
+	threadAction := func(label string, fn func()) {
+		if mb.ThreadLen() == 0 {
+			statusText = label + ": no thread selected"
+			return
+		}
+		fn()
+	}
+
+	omniboxItems = []mailCommand{
+		{Label: "Compose New", Description: "start a fresh message", Key: "c", Section: "compose", Action: func() { comp.Open() }},
+		{Label: "Resume Draft", Description: "continue the latest saved draft", Key: "C", Section: "compose", Action: func() { comp.ResumeLast() }},
+		{Label: "Reply To Selected Thread", Description: "reply to the current conversation", Key: "r", Section: "compose", Action: func() {
+			threadAction("reply", func() {
+				if t := mb.SelectedThread(threadSel); t != nil {
+					if row := mb.ThreadRowAt(threadSel); row != nil && row.MsgIdx < 0 && mb.ActiveFolderCanonical() == "Drafts" {
+						comp.ResumeDraft(t.ID)
+						return
+					}
+					comp.Open()
+					comp.SetupReply(*t)
+				}
+			})
+		}},
+		{Label: "Refresh Mail", Description: "process pending changes and sync this folder", Key: "sync", Section: "mail", Action: func() {
+			statusText = "syncing..."
+			go syncThreadsFromNetwork()
+		}},
+		{Label: "Toggle Folders", Description: "show or hide grouped labels", Key: "enter", Section: "navigation", Action: func() {
+			labelsOpen = !labelsOpen
+			mb.BuildFolderDisplay(labelsOpen)
+			if folderSel >= mb.FolderLen() {
+				folderSel = mb.FolderLen() - 1
+			}
+			if folderSel < 0 {
+				folderSel = 0
+			}
+			statusText = "folders toggled"
+		}},
+		{Label: "Focus Folders", Description: "move focus to the folder pane", Key: "h", Section: "navigation", Action: func() {
+			pane = 0
+			updateFocus()
+		}},
+		{Label: "Focus Threads", Description: "move focus to the thread list", Key: "tab", Section: "navigation", Action: func() {
+			pane = 1
+			updateFocus()
+		}},
+		{Label: "Focus Preview", Description: "move focus to the message preview", Key: "l", Section: "navigation", Action: func() {
+			pane = 2
+			updateFocus()
+		}},
+		{Label: "Search Mail", Description: "search cached messages", Key: "/", Section: "mail", Action: startSearch},
+		{Label: "Open Selected Thread", Description: "open, expand, or preview the selected row", Key: "enter", Section: "thread", Action: handleEnter},
+		{Label: "Archive Selected Thread", Description: "move the selected thread out of inbox", Key: "a", Section: "thread", Action: func() {
+			threadAction("archive", func() {
+				pushUndo(mb.Archive(threadSel))
+				clampThreadSel()
+				mb.BuildFolderDisplay(labelsOpen)
+				loadPreview()
+				go mb.ProcessPendingCommands()
+			})
+		}},
+		{Label: "Delete Selected Thread", Description: "move the selected thread to trash", Key: "d", Section: "thread", Action: func() {
+			threadAction("delete", func() {
+				pushUndo(mb.Delete(threadSel))
+				clampThreadSel()
+				mb.BuildFolderDisplay(labelsOpen)
+				loadPreview()
+				go mb.ProcessPendingCommands()
+			})
+		}},
+		{Label: "Toggle Star", Description: "star or unstar the selected thread", Key: "s", Section: "thread", Action: func() {
+			threadAction("star", func() {
+				pushUndo(mb.ToggleStar(threadSel))
+				go mb.ProcessPendingCommands()
+			})
+		}},
+		{Label: "Toggle Read", Description: "mark selected thread read or unread", Key: "e", Section: "thread", Action: func() {
+			threadAction("read", func() {
+				pushUndo(mb.ToggleRead(threadSel))
+				mb.BuildFolderDisplay(labelsOpen)
+				go mb.ProcessPendingCommands()
+			})
+		}},
+		{Label: "Undo Last Thread Action", Description: "restore the latest archive/delete/read/star change", Key: "u", Section: "thread", Action: func() {
+			if len(undoStack) == 0 {
+				statusText = "nothing to undo"
+				return
+			}
+			undoStack[len(undoStack)-1]()
+			undoStack = undoStack[:len(undoStack)-1]
+			clampThreadSel()
+			mb.BuildFolderDisplay(labelsOpen)
+			loadPreview()
+			statusText = "undone"
+		}},
+		{Label: "Show Keyboard Help", Description: "open the in-app keybinding help", Key: "?", Section: "help", Action: func() { helpOpen = true }},
+		{Label: "Quit Mail", Description: "exit the app", Key: "q", Section: "system", Action: func() { app.Stop() }},
+	}
+	refreshOmnibox()
+
 	fade := Animate
 	accentMarker := Style{FG: t.Accent}
 
@@ -574,6 +842,55 @@ func main() {
 				),
 			),
 			SpaceH(1),
+			If(&omniboxOpen).Then(
+				Overlay.Centered().Backdrop().BackdropFG(t.Muted)(
+					VBox.
+						Width(86).
+						Height(&omniboxHeight).
+						Fill(t.BG).
+						PaddingTRBL(1, 2, 1, 2).
+						Gap(1)(
+						HBox(
+							Text("mail").FG(t.Bright).Bold(),
+							SpaceW(1),
+							Text("commands").FG(t.Subtle),
+							Space(),
+							Text("j/k").FG(t.Muted),
+							SpaceW(2),
+							Text("<esc>").FG(t.Muted),
+						),
+						HBox.Fill(t.GroupBG).PaddingVH(0, 1)(
+							Text("> ").FG(t.Accent).Bold(),
+							If(&omniboxQuery).Eq("").
+								Then(Text("type a command").FG(t.Muted)).
+								Else(Text(&omniboxQuery).FG(t.Bright)),
+						),
+						ForEach(&omniboxVisible, func(cmd *mailCommand) Component {
+							itemBG := If(&cmd.Selected).Then(t.SelBG).Else(t.BG)
+							keyStyle := If(&cmd.Selected).
+								Then(Style{FG: t.Bright, BG: t.SelBG}).
+								Else(Style{FG: t.Subtle, BG: t.BG})
+							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG).PaddingTRBL(0, 1, 0, 1)(
+								HBox(
+									Text(&cmd.Label).FG(t.Bright),
+									Space(),
+									Text(&cmd.Key).Style(keyStyle),
+								),
+								HBox(
+									Text(&cmd.Section).FG(t.Accent),
+									SpaceW(2),
+									Text(&cmd.Description).FG(t.Subtle),
+								),
+							)
+						}),
+						If(&omniboxEmpty).Then(
+							VBox.Fill(t.BG).PaddingTRBL(1, 1, 1, 1)(
+								Text("no commands").FG(t.Subtle),
+							),
+						),
+					),
+				),
+			),
 
 			// help modal — ? toggles. Vignette subtly darkens the rest of
 			// the screen; the modal itself is dodged so it stays crisp.
@@ -642,6 +959,8 @@ func main() {
 	).NoCounts().
 		Handle("q", app.Stop).
 		Handle("?", func() { helpOpen = !helpOpen }).
+		Handle("<C-p>", openOmnibox).
+		Handle("<Space>", openOmnibox).
 		Handle(",", func() {
 			shimmerIdx = (shimmerIdx - 1 + len(variantNames)) % len(variantNames)
 			// applyVariant()
@@ -811,10 +1130,68 @@ func main() {
 			}
 		}).
 		Handle("/", func() {
-			searchQuery = ""
-			app.HideCursor()
-			app.PushView("search")
+			startSearch()
 		})
+
+	execOmnibox := func() {
+		if omniboxSel < 0 || omniboxSel >= len(omniboxFiltered) {
+			return
+		}
+		action := omniboxFiltered[omniboxSel].Action
+		closeOmnibox()
+		if action != nil {
+			action()
+		}
+	}
+
+	omniboxRouter = riffkey.NewRouter().Name("omnibox").NoCounts()
+	omniboxRouter.Handle("<CR>", func(_ riffkey.Match) { execOmnibox() })
+	omniboxRouter.Handle("<Enter>", func(_ riffkey.Match) { execOmnibox() })
+	omniboxRouter.Handle("<Esc>", func(_ riffkey.Match) { closeOmnibox() })
+	omniboxRouter.Handle("<C-c>", func(_ riffkey.Match) { closeOmnibox() })
+	omniboxRouter.Handle("j", func(_ riffkey.Match) { moveOmnibox(1) })
+	omniboxRouter.Handle("<Down>", func(_ riffkey.Match) { moveOmnibox(1) })
+	omniboxRouter.Handle("<Tab>", func(_ riffkey.Match) { moveOmnibox(1) })
+	omniboxRouter.Handle("<C-n>", func(_ riffkey.Match) { moveOmnibox(1) })
+	omniboxRouter.Handle("k", func(_ riffkey.Match) { moveOmnibox(-1) })
+	omniboxRouter.Handle("<Up>", func(_ riffkey.Match) { moveOmnibox(-1) })
+	omniboxRouter.Handle("<S-Tab>", func(_ riffkey.Match) { moveOmnibox(-1) })
+	omniboxRouter.Handle("<C-p>", func(_ riffkey.Match) { moveOmnibox(-1) })
+	omniboxRouter.Handle("<C-d>", func(_ riffkey.Match) { pageOmnibox(5) })
+	omniboxRouter.Handle("<C-u>", func(_ riffkey.Match) { pageOmnibox(-5) })
+	omniboxRouter.Handle("g", func(_ riffkey.Match) {
+		omniboxSel = 0
+		refreshOmniboxSelection()
+	})
+	omniboxRouter.Handle("G", func(_ riffkey.Match) {
+		if len(omniboxFiltered) > 0 {
+			omniboxSel = len(omniboxFiltered) - 1
+		}
+		refreshOmniboxSelection()
+	})
+	omniboxRouter.Handle("<BS>", func(_ riffkey.Match) {
+		if len(omniboxQuery) > 0 {
+			runes := []rune(omniboxQuery)
+			omniboxQuery = string(runes[:len(runes)-1])
+			omniboxSel = 0
+			refreshOmnibox()
+		}
+	})
+	omniboxRouter.Handle("<Space>", func(_ riffkey.Match) {
+		omniboxQuery += " "
+		omniboxSel = 0
+		refreshOmnibox()
+	})
+	omniboxRouter.HandleUnmatched(func(k riffkey.Key) bool {
+		if k.Rune != 0 && k.Mod == 0 {
+			omniboxQuery += string(k.Rune)
+			omniboxSel = 0
+			refreshOmnibox()
+			app.RequestRender()
+			return true
+		}
+		return false
+	})
 
 	app.View("search",
 		VBox(
