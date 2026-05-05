@@ -827,7 +827,7 @@ func main() {
 									Then(t.GroupBG).
 									Else(t.ThreadBG),
 							)
-							return VBox.Fill(t.ThreadBG)(
+							return VBox.Fill(t.ThreadBG).PaddingTRBL(0, 1, 0, 0)(
 								If(&row.HasGroup).Then(
 									VBox.Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 1)(
 										Text(&row.GroupLabel).FG(t.Accent).Dim().Bold(),
@@ -890,7 +890,7 @@ func main() {
 						FitContent().
 						Fill(t.BG).
 						PaddingTRBL(1, 2, 1, 2).
-						Opacity(In(1).Out(Animate(0.0))).
+						Opacity(In(1).Out(Animate.Duration(500*time.Millisecond)(0.0))).
 						NodeRef(&omniboxRef)(
 						HBox(
 							Text("mail").FG(t.Bright).Bold(),
@@ -932,11 +932,9 @@ func main() {
 							),
 						),
 						ScreenEffect(
-							SEDropShadow().Focus(&omniboxRef).Strength(
-								In(Animate(0.3)).Out(Animate(0.0)),
-							),
+							SEDropShadow().Focus(&omniboxRef).Strength(0.3),
 							SEVignette().Smooth().Dodge(&omniboxRef).Strength(
-								In(Animate(0.3)).Out(Animate(0.0)),
+								In(Animate(0.3)).Out(Animate.Duration(500*time.Millisecond)(0.0)),
 							),
 						),
 					),
