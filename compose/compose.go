@@ -16,6 +16,23 @@ func (e *Editor) Subject() string {
 	return ""
 }
 
+// Markdown serializes the editor document as markdown.
+func (e *Editor) Markdown() string {
+	var b strings.Builder
+	_ = WriteMarkdown(e.doc, &b)
+	return b.String()
+}
+
+// LoadMarkdown replaces the current document with parsed markdown.
+func (e *Editor) LoadMarkdown(body string) {
+	e.ResetDocument(ParseMarkdown(body))
+}
+
+// ResetEmpty replaces the current document with a new empty document.
+func (e *Editor) ResetEmpty() {
+	e.ResetDocument(NewDocument())
+}
+
 // ToHTML converts the document to HTML for email sending
 func (e *Editor) ToHTML() string {
 	var b strings.Builder

@@ -1,4 +1,4 @@
-package main
+package transition
 
 import (
 	"math"
@@ -7,14 +7,14 @@ import (
 	. "github.com/kungfusheep/glyph"
 )
 
-// viewTransition coordinates a two-phase "settle and rise" between views.
+// Transition coordinates a two-phase "settle and rise" between views.
 // Phase 1 shows the OLD view's silhouette dimming out over an empty field.
 // Phase 2 cascade-reveals the NEW view from the centre outward.
 //
 // Usage:
 //
 //	// one shared state
-//	tr := NewViewTransition(400*time.Millisecond, bg, peak)
+//	tr := transition.New(400*time.Millisecond, bg, peak)
 //
 //	// on the OLD view — continuously records its silhouette when inactive,
 //	// and renders the phase-1 overlay when the transition is running.
@@ -26,7 +26,7 @@ import (
 //	// trigger — call just before app.PushView(...)
 //	tr.Start()
 //	app.PushView("compose")
-type viewTransition struct {
+type Transition struct {
 	duration time.Duration
 	bg, peak Color
 
@@ -39,8 +39,8 @@ type viewTransition struct {
 	cursorOverlay func() (x, y int, color Color, ok bool)
 }
 
-func NewViewTransition(duration time.Duration, bg, peak Color) *viewTransition {
-	return &viewTransition{
+func New(duration time.Duration, bg, peak Color) *Transition {
+	return &Transition{
 		duration: duration,
 		bg:       bg,
 		peak:     peak,
@@ -48,22 +48,22 @@ func NewViewTransition(duration time.Duration, bg, peak Color) *viewTransition {
 }
 
 // Start begins the transition. Call immediately before switching views.
-func (t *viewTransition) Start() {
+func (t *Transition) Start() {
 	t.active = true
 	t.startTime = time.Now()
 }
 
-func (t *viewTransition) Complete() bool {
+func (t *Transition) Complete() bool {
 	return !t.active || time.Since(t.startTime) >= t.duration
 }
 
-func (t *viewTransition) CursorOverlay(fn func() (x, y int, color Color, ok bool)) {
+func (t *Transition) CursorOverlay(fn func() (x, y int, color Color, ok bool)) {
 	t.cursorOverlay = fn
 }
 
 // progress returns 0..1 over the transition's duration. Returns 1.0 (and
 // sets active=false) once complete.
-func (t *viewTransition) progress() float64 {
+func (t *Transition) progress() float64 {
 	if !t.active {
 		return 0
 	}
@@ -80,14 +80,14 @@ func (t *viewTransition) progress() float64 {
 // SourceEffect sits on the OLD view. While the transition is inactive it
 // records the current silhouette. While active (phase 1) it overlays the
 // old silhouette fading out, over a cleared background.
-func (t *viewTransition) SourceEffect() Effect {
+func (t *Transition) SourceEffect() Effect {
 	return sourceTransitionEffect{tr: t}
 }
 
 // TargetEffect sits on the NEW view. When active, it uses the transition's
 // progress to render phases. Phase 1: clears new view entirely, shows old
 // silhouette fading. Phase 2: cascade-reveals the new view from centre out.
-func (t *viewTransition) TargetEffect() Effect {
+func (t *Transition) TargetEffect() Effect {
 	return targetTransitionEffect{tr: t}
 }
 
@@ -101,7 +101,7 @@ func isEmoji(r rune) bool {
 	return r >= 0x1F000 || (r >= 0x2600 && r <= 0x27BF) || (r >= 0x2300 && r <= 0x23FF) || (r >= 0x2B00 && r <= 0x2BFF)
 }
 
-type sourceTransitionEffect struct{ tr *viewTransition }
+type sourceTransitionEffect struct{ tr *Transition }
 
 func (s sourceTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	if s.tr.active {
@@ -128,7 +128,7 @@ func (s sourceTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	}
 }
 
-type targetTransitionEffect struct{ tr *viewTransition }
+type targetTransitionEffect struct{ tr *Transition }
 
 func (s targetTransitionEffect) Apply(buf *Buffer, ctx PostContext) {
 	p := s.tr.progress()

@@ -1,4 +1,4 @@
-package main
+package transition
 
 import (
 	"math"
@@ -36,7 +36,7 @@ func TestTargetTransitionSeedsFakeCursorBeforeFade(t *testing.T) {
 	textBG := Hex(0x304050)
 	cursor := Hex(0x5af78e)
 
-	tr := NewViewTransition(time.Second, bg, Hex(0x3a3a3a))
+	tr := New(time.Second, bg, Hex(0x3a3a3a))
 	tr.active = true
 	tr.startTime = time.Now().Add(-725 * time.Millisecond)
 	tr.CursorOverlay(func() (int, int, Color, bool) {
@@ -70,7 +70,7 @@ func TestSourceTransitionCapturesFakeCursorWithoutMutatingLiveBuffer(t *testing.
 	textBG := Hex(0x304050)
 	cursor := Hex(0x5af78e)
 
-	tr := NewViewTransition(time.Second, bg, Hex(0x3a3a3a))
+	tr := New(time.Second, bg, Hex(0x3a3a3a))
 	tr.CursorOverlay(func() (int, int, Color, bool) {
 		return 1, 0, cursor, true
 	})

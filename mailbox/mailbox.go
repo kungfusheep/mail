@@ -1,8 +1,6 @@
 package mailbox
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"log"
 	"sort"
@@ -328,13 +326,13 @@ func draftsAsThreads(drafts []cache.Draft) []provider.Thread {
 		if subject == "" {
 			subject = "(no subject)"
 		}
-		to := parseAddresses(d.To)
+		to := provider.ParseAddressList(d.To)
 		msg := provider.Message{
 			ID:       d.ThreadID,
 			ThreadID: d.ThreadID,
 			To:       to,
-			CC:       parseAddresses(d.Cc),
-			BCC:      parseAddresses(d.Bcc),
+			CC:       provider.ParseAddressList(d.Cc),
+			BCC:      provider.ParseAddressList(d.Bcc),
 			Subject:  d.Subject,
 			TextBody: d.Body,
 			Date:     d.UpdatedAt,
@@ -493,9 +491,9 @@ func (m *Mailbox) reconcileDrafts(serverThreads []provider.Thread) {
 			continue
 		}
 		// case 2: unknown → adopt with a fresh stable id
-		newID, err := newDraftID()
+		newID, err := cache.NewDraftID()
 		if err != nil {
-			log.Printf("reconcileDrafts: newDraftID failed: %v", err)
+			log.Printf("reconcileDrafts: NewDraftID failed: %v", err)
 			continue
 		}
 		full, gerr := m.imap.GetMessage(uid)
@@ -538,17 +536,6 @@ func addrsToString(addrs []provider.Address) string {
 		parts = append(parts, a.String())
 	}
 	return strings.Join(parts, ", ")
-}
-
-// newDraftID generates a stable local identifier for a draft. Unlike IMAP
-// UIDs (which rotate on every APPEND/EXPUNGE), this value is written once
-// and survives every server round-trip for the life of the draft.
-func newDraftID() (string, error) {
-	b := make([]byte, 12)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return "draft-" + hex.EncodeToString(b), nil
 }
 
 // preserveCachedBodies copies previously-fetched message bodies from the
@@ -1267,33 +1254,12 @@ func (m *Mailbox) cancelCommand(id string) {
 // attached to (if any), resolved at send time via replyMsg rather than here.
 func draftToMessage(d cache.Draft) provider.Message {
 	return provider.Message{
-		To:       parseAddresses(d.To),
-		CC:       parseAddresses(d.Cc),
-		BCC:      parseAddresses(d.Bcc),
+		To:       provider.ParseAddressList(d.To),
+		CC:       provider.ParseAddressList(d.Cc),
+		BCC:      provider.ParseAddressList(d.Bcc),
 		Subject:  d.Subject,
 		TextBody: d.Body,
 	}
-}
-
-func parseAddresses(s string) []provider.Address {
-	if s == "" {
-		return nil
-	}
-	var out []provider.Address
-	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
-		if part == "" {
-			continue
-		}
-		if idx := strings.LastIndex(part, "<"); idx >= 0 {
-			name := strings.TrimSpace(part[:idx])
-			email := strings.TrimSpace(strings.TrimRight(part[idx+1:], ">"))
-			out = append(out, provider.Address{Name: name, Email: email})
-		} else {
-			out = append(out, provider.Address{Email: part})
-		}
-	}
-	return out
 }
 
 func (m *Mailbox) ProcessPendingCommands() {

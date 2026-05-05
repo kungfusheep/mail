@@ -19,3 +19,27 @@ func TestAddressString(t *testing.T) {
 		}
 	}
 }
+
+func TestParseAddressList(t *testing.T) {
+	got := ParseAddressList("Pete <pete@example.com>, test@example.com, , Support <help@example.com>")
+	want := []Address{
+		{Name: "Pete", Email: "pete@example.com"},
+		{Email: "test@example.com"},
+		{Name: "Support", Email: "help@example.com"},
+	}
+
+	if len(got) != len(want) {
+		t.Fatalf("len(ParseAddressList) = %d, want %d", len(got), len(want))
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("ParseAddressList[%d] = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+}
+
+func TestParseAddressListEmpty(t *testing.T) {
+	if got := ParseAddressList(""); got != nil {
+		t.Fatalf("ParseAddressList(\"\") = %+v, want nil", got)
+	}
+}

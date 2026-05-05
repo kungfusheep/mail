@@ -1,6 +1,9 @@
 package provider
 
-import "time"
+import (
+	"strings"
+	"time"
+)
 
 type Address struct {
 	Name  string
@@ -14,6 +17,27 @@ func (a Address) String() string {
 	return a.Name + " <" + a.Email + ">"
 }
 
+func ParseAddressList(s string) []Address {
+	if s == "" {
+		return nil
+	}
+	var addrs []Address
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if idx := strings.LastIndex(part, "<"); idx >= 0 {
+			name := strings.TrimSpace(part[:idx])
+			email := strings.TrimSpace(strings.TrimRight(part[idx+1:], ">"))
+			addrs = append(addrs, Address{Name: name, Email: email})
+		} else {
+			addrs = append(addrs, Address{Email: part})
+		}
+	}
+	return addrs
+}
+
 type Folder struct {
 	ID   string
 	Name string
@@ -24,7 +48,7 @@ type Folder struct {
 }
 
 type Message struct {
-	ID      string
+	ID string
 	// thread this message belongs to
 	ThreadID string
 	From     Address
@@ -47,8 +71,8 @@ type Message struct {
 }
 
 type Thread struct {
-	ID       string
-	Subject  string
+	ID      string
+	Subject string
 	// most recent message snippet
 	Snippet  string
 	Messages []Message
@@ -59,9 +83,9 @@ type Thread struct {
 }
 
 type ListOptions struct {
-	Folder    string
-	Query     string
-	PageToken string
+	Folder     string
+	Query      string
+	PageToken  string
 	MaxResults int
 }
 

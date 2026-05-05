@@ -1,4 +1,4 @@
-package main
+package effects
 
 import (
 	"math"
@@ -275,7 +275,7 @@ func (s shimmerSweep) Apply(buf *Buffer, ctx PostContext) {
 type shimmerPulse struct {
 	bgColor, peakColor Color
 	opacityPtr         *float64
-	originX, originY   float64 // in cell-units; if negative, use screen centre
+	originX, originY   float64  // in cell-units; if negative, use screen centre
 	startedAtPtr       *float64 // seconds since app start when triggered; 0 = inactive
 	duration           float64
 }
@@ -290,9 +290,9 @@ func ShimmerPulse(bg, peak Color) shimmerPulse {
 	}
 }
 
-func (s shimmerPulse) Opacity(p *float64) shimmerPulse     { s.opacityPtr = p; return s }
-func (s shimmerPulse) Trigger(p *float64) shimmerPulse     { s.startedAtPtr = p; return s }
-func (s shimmerPulse) Origin(x, y float64) shimmerPulse    { s.originX = x; s.originY = y; return s }
+func (s shimmerPulse) Opacity(p *float64) shimmerPulse  { s.opacityPtr = p; return s }
+func (s shimmerPulse) Trigger(p *float64) shimmerPulse  { s.startedAtPtr = p; return s }
+func (s shimmerPulse) Origin(x, y float64) shimmerPulse { s.originX = x; s.originY = y; return s }
 
 func (s shimmerPulse) Apply(buf *Buffer, ctx PostContext) {
 	opacity := 1.0
@@ -1182,7 +1182,7 @@ func (s shimmerSilhouetteEcho) Apply(buf *Buffer, ctx PostContext) {
 	default: // phase 4: zoom back (1/maxZoom → 1.0)
 		p := (progress - 3*phaseLen) / phaseLen
 		eased := p * p * (3 - 2*p)
-		scale = math.Pow(maxZoom, -(1-eased))
+		scale = math.Pow(maxZoom, -(1 - eased))
 	}
 
 	// brightness fades near scale 1 (would overlap UI) in either direction
@@ -1264,14 +1264,15 @@ func (s shimmerSilhouetteEcho) Apply(buf *Buffer, ctx PostContext) {
 
 // brailleBits maps (row, col) → bit position in a Braille character.
 // Unicode Braille layout:
-//   dot 1 (col 0, row 0) = bit 0
-//   dot 2 (col 0, row 1) = bit 1
-//   dot 3 (col 0, row 2) = bit 2
-//   dot 7 (col 0, row 3) = bit 6
-//   dot 4 (col 1, row 0) = bit 3
-//   dot 5 (col 1, row 1) = bit 4
-//   dot 6 (col 1, row 2) = bit 5
-//   dot 8 (col 1, row 3) = bit 7
+//
+//	dot 1 (col 0, row 0) = bit 0
+//	dot 2 (col 0, row 1) = bit 1
+//	dot 3 (col 0, row 2) = bit 2
+//	dot 7 (col 0, row 3) = bit 6
+//	dot 4 (col 1, row 0) = bit 3
+//	dot 5 (col 1, row 1) = bit 4
+//	dot 6 (col 1, row 2) = bit 5
+//	dot 8 (col 1, row 3) = bit 7
 var brailleBits = [4][2]uint8{
 	{0, 3},
 	{1, 4},

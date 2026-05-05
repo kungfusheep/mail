@@ -382,7 +382,7 @@ func TestDraftsFolder_AdoptionSurfacesInUI(t *testing.T) {
 
 	// simulate reconcileDrafts adopting a server-side draft via SeedDraft
 	// (the same call the real reconciler makes)
-	stableID, _ := newDraftID()
+	stableID, _ := cache.NewDraftID()
 	_ = c.SeedDraft(cache.Draft{
 		ThreadID:  stableID,
 		Subject:   "from server",

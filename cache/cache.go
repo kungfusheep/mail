@@ -1,7 +1,9 @@
 package cache
 
 import (
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -23,6 +25,17 @@ type Cache struct {
 	// label so the mailbox subscriber can refresh the UI — without this,
 	// the drafts table would update silently and the view would stay stale.
 	draftsLabel string
+}
+
+// NewDraftID generates a stable local identifier for a draft. Unlike IMAP
+// UIDs (which rotate on every APPEND/EXPUNGE), this value is written once
+// and survives every server round-trip for the life of the draft.
+func NewDraftID() (string, error) {
+	b := make([]byte, 12)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return "draft-" + hex.EncodeToString(b), nil
 }
 
 // SetDraftsLabel tells the cache which folder id to publish on when the
