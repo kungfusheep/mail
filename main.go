@@ -851,6 +851,7 @@ func main() {
 						FitContent().
 						Fill(t.BG).
 						PaddingTRBL(1, 2, 1, 2).
+						Opacity(In(1).Out(Animate(0.0))).
 						NodeRef(&omniboxRef)(
 						HBox(
 							Text("mail").FG(t.Bright).Bold(),
@@ -893,8 +894,12 @@ func main() {
 							),
 						),
 						ScreenEffect(
-							SEDropShadow().Focus(&omniboxRef),
-							SEVignette().Dodge(&omniboxRef),
+							SEDropShadow().Focus(&omniboxRef).Strength(
+								In(Animate(0.3)).Out(Animate(0.0)),
+							),
+							SEVignette().Dodge(&omniboxRef).Strength(
+								In(Animate(0.3)).Out(Animate(0.0)),
+							),
 						),
 					),
 				),
