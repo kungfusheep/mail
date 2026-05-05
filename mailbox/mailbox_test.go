@@ -698,6 +698,34 @@ func TestCacheRoundTrip_Threads(t *testing.T) {
 	}
 }
 
+func TestBuildThreadDisplay_DateGroups(t *testing.T) {
+	now := time.Now()
+	mb := testMailbox(t,
+		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
+		[]provider.Thread{
+			{ID: "today", Subject: "today", Date: now},
+			{ID: "today2", Subject: "today again", Date: now.Add(-time.Hour)},
+			{ID: "yesterday", Subject: "yesterday", Date: now.AddDate(0, 0, -1)},
+			{ID: "week", Subject: "this week", Date: now.AddDate(0, 0, -3)},
+			{ID: "earlier", Subject: "earlier", Date: now.AddDate(0, 0, -12)},
+		},
+	)
+
+	rows := *mb.ThreadRows()
+	if len(rows) != 5 {
+		t.Fatalf("got %d thread rows, want 5", len(rows))
+	}
+	want := []string{"TODAY", "", "YESTERDAY", "THIS WEEK", "EARLIER"}
+	for i := range want {
+		if rows[i].GroupLabel != want[i] {
+			t.Fatalf("row %d group = %q, want %q", i, rows[i].GroupLabel, want[i])
+		}
+		if rows[i].HasGroup != (want[i] != "") {
+			t.Fatalf("row %d HasGroup = %v, want %v", i, rows[i].HasGroup, want[i] != "")
+		}
+	}
+}
+
 // thread interaction tests
 
 func TestToggleThread_ExpandCollapse(t *testing.T) {

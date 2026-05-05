@@ -35,15 +35,16 @@ func newComposeID() (string, error) {
 }
 
 type AppTheme struct {
-	BG      Color
-	Bright  Color // selected item, emphasis
-	FG      Color // active pane content
-	Subtle  Color // dates, senders, secondary info
-	Dim     Color // inactive pane content
-	Muted   Color // help bar, status
-	Accent  Color
-	SelBG   Color
-	GroupBG Color
+	BG       Color
+	Bright   Color // selected item, emphasis
+	FG       Color // active pane content
+	Subtle   Color // dates, senders, secondary info
+	Dim      Color // inactive pane content
+	Muted    Color // help bar, status
+	Accent   Color
+	SelBG    Color
+	GroupBG  Color
+	ThreadBG Color
 }
 
 type mailCommand struct {
@@ -56,27 +57,29 @@ type mailCommand struct {
 }
 
 var themeDark = AppTheme{
-	BG:      Hex(0x1a1a1a),
-	Bright:  Hex(0xeeeeee),
-	FG:      Hex(0xb0b0b0),
-	Subtle:  Hex(0x777777),
-	Dim:     Hex(0x565656),
-	Muted:   Hex(0x3a3a3a),
-	Accent:  Hex(0xe60012),
-	SelBG:   Hex(0x2e2e2e),
-	GroupBG: Hex(0x242424),
+	BG:       Hex(0x1c1c1c),
+	Bright:   Hex(0xe8e6e3),
+	FG:       Hex(0xb8b5b0),
+	Subtle:   Hex(0x8b8780),
+	Dim:      Hex(0x5f5b55),
+	Muted:    Hex(0x3f3c38),
+	Accent:   Hex(0xe8e6e3),
+	SelBG:    Hex(0x302f2c),
+	GroupBG:  Hex(0x252421),
+	ThreadBG: Hex(0x191918),
 }
 
 var themeLight = AppTheme{
-	BG:      Hex(0xf6f6f6),
-	Bright:  Hex(0x111111),
-	FG:      Hex(0x333333),
-	Subtle:  Hex(0x777777),
-	Dim:     Hex(0xaaaaaa),
-	Muted:   Hex(0xcccccc),
-	Accent:  Hex(0xe60012),
-	SelBG:   Hex(0xe8e8e8),
-	GroupBG: Hex(0xeeeeee),
+	BG:       Hex(0xf6f6f6),
+	Bright:   Hex(0x111111),
+	FG:       Hex(0x333333),
+	Subtle:   Hex(0x777777),
+	Dim:      Hex(0xaaaaaa),
+	Muted:    Hex(0xcccccc),
+	Accent:   Hex(0xe60012),
+	SelBG:    Hex(0xe8e8e8),
+	GroupBG:  Hex(0xeeeeee),
+	ThreadBG: Hex(0xf1f3f1),
 }
 
 func fuzzyMatch(str, pattern string) bool {
@@ -145,14 +148,15 @@ func main() {
 
 	// inbox view state
 	var (
-		folderSel   int
-		threadSel   int
-		labelsOpen  bool
-		helpOpen    bool
-		helpRef     NodeRef
-		frame       int
-		statusText  = "Inbox"
-		searchQuery string
+		folderSel        int
+		threadSel        int
+		labelsOpen       bool
+		helpOpen         bool
+		helpRef          NodeRef
+		frame            int
+		statusText       = "Inbox"
+		searchQuery      string
+		threadUnreadText string
 
 		// pane styles — active uses FG, inactive uses dim
 		folderStyle     = Style{FG: t.Dim}
@@ -185,6 +189,16 @@ func main() {
 			previewStyle = Style{FG: t.FG}
 		}
 	}
+
+	updateThreadHeader := func() {
+		unread := mb.ActiveFolderUnread()
+		if unread <= 0 {
+			threadUnreadText = ""
+			return
+		}
+		threadUnreadText = fmt.Sprintf("%d unread", unread)
+	}
+	updateThreadHeader()
 
 	// shimmer catalogue — navigate with , and . (prev/next). Label shows
 	// in the status bar. Only the active variant is included in the view
@@ -324,6 +338,7 @@ func main() {
 		labelUnsub = mb.Watch(label, func() {
 			mb.SetSelected(threadSel)
 			mb.BuildFolderDisplay(labelsOpen)
+			updateThreadHeader()
 			// refresh the preview too — the data under it may have changed
 			// (e.g. reconcileDrafts just backfilled the selected draft's
 			// body, or a sync pulled the rest of a conversation).
@@ -364,6 +379,7 @@ func main() {
 			return
 		}
 		mb.BuildFolderDisplay(labelsOpen)
+		updateThreadHeader()
 		// Fresh folders may reveal a Drafts label the cached view didn't have —
 		// re-set so publish routing is current.
 		if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
@@ -380,6 +396,7 @@ func main() {
 		mb.BuildFolderDisplay(labelsOpen)
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
+		updateThreadHeader()
 		loadPreview()
 		app.RequestRender()
 
@@ -397,6 +414,7 @@ func main() {
 		mb.BuildFolderDisplay(labelsOpen)
 		mb.BuildThreadDisplay()
 		mb.SetSelected(threadSel)
+		updateThreadHeader()
 		app.RequestRender()
 	}
 
@@ -427,12 +445,14 @@ func main() {
 		if msg := mb.SelectedMessage(threadSel); msg != nil {
 			mb.LoadPreview(*msg, app.Size().Width)
 			mb.MarkRead(threadSel)
+			updateThreadHeader()
 			pane = 2
 			updateFocus()
 			return
 		}
 		mb.ToggleThread(threadSel)
 		mb.MarkRead(threadSel)
+		updateThreadHeader()
 		loadPreview()
 	}
 
@@ -469,6 +489,7 @@ func main() {
 		mb.BuildThreadDisplay()
 		threadSel = 0
 		mb.SetSelected(0)
+		updateThreadHeader()
 		loadPreview()
 		undoStack = nil
 		statusText = mb.FolderName(folderSel)
@@ -658,6 +679,7 @@ func main() {
 			if folderSel < 0 {
 				folderSel = 0
 			}
+			updateThreadHeader()
 			statusText = "folders toggled"
 		}},
 		{Label: "Focus Folders", Description: "move focus to the folder pane", Key: "h", Section: "navigation", Action: func() {
@@ -679,6 +701,7 @@ func main() {
 				pushUndo(mb.Archive(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				loadPreview()
 				go mb.ProcessPendingCommands()
 			})
@@ -688,6 +711,7 @@ func main() {
 				pushUndo(mb.Delete(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				loadPreview()
 				go mb.ProcessPendingCommands()
 			})
@@ -702,6 +726,7 @@ func main() {
 			threadAction("read", func() {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				go mb.ProcessPendingCommands()
 			})
 		}},
@@ -714,6 +739,7 @@ func main() {
 			undoStack = undoStack[:len(undoStack)-1]
 			clampThreadSel()
 			mb.BuildFolderDisplay(labelsOpen)
+			updateThreadHeader()
 			loadPreview()
 			statusText = "undone"
 		}},
@@ -734,7 +760,7 @@ func main() {
 	var omniboxRef NodeRef
 
 	app.View("main",
-		VBox.PaddingTRBL(1, 2, 0, 2)(
+		VBox.PaddingTRBL(0, 2, 0, 2)(
 			// --- wormhole family (active focus) ---
 			// If(&onWormhole).Then(ScreenEffect(ShimmerWormhole(t.BG, peakColor).Speed(&wormholeSpeed))),
 			// If(&onWStreaks).Then(ScreenEffect(ShimmerWormholeWarp(t.BG, peakColor).Speed(&wormholeSpeed))),
@@ -759,21 +785,19 @@ func main() {
 			// If(&onSpiral).Then(ScreenEffect(ShimmerSpiral(t.BG, peakColor))),
 			// If(&onVignette).Then(ScreenEffect(ShimmerVignette(t.BG, peakColor))),
 			// If(&onScatter).Then(ScreenEffect(ShimmerScatter(t.BG, peakColor))),
-			SpaceH(1),
-			HBox(
-				Text("mail").FG(t.Bright).Bold(),
-				SpaceW(2),
-				Text(&statusText).FG(t.Subtle),
-				SpaceW(2),
-				Text("·").FG(t.Muted),
-				SpaceW(2),
-				Text(&shimmerLabel).FG(t.Accent).Italic(),
-			),
-			SpaceH(1),
 			HBox.Grow(1).Gap(4)(
 
-				VBox.Grow(1).CascadeStyle(&folderStyle)(
-					HRule(), SpaceH(1),
+				VBox.Grow(1).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&folderStyle)(
+					HBox(
+						Text("mail").FG(t.Bright).Bold(),
+						SpaceW(2),
+						Text(&statusText).FG(t.Subtle),
+						SpaceW(2),
+						Text("·").FG(t.Muted),
+						SpaceW(2),
+						Text(&shimmerLabel).FG(t.Accent).Italic(),
+					),
+					SpaceH(2),
 					List(mb.FolderNames()).
 						Selection(&folderSel).
 						Style(fade(&folderListStyle)).
@@ -781,8 +805,17 @@ func main() {
 						Marker("● ").MarkerStyle(accentMarker),
 				),
 
-				VBox.Grow(3).CascadeStyle(&threadStyle)(
-					HRule(), SpaceH(1),
+				VBox.Grow(3).Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&threadStyle)(
+					HBox(
+						SpaceW(3),
+						Text(&statusText).FG(t.Accent).Bold(),
+						SpaceW(1),
+						Text(&threadUnreadText).FG(t.Subtle),
+						Space(),
+						Text("Newest ▾").FG(t.Subtle),
+						SpaceW(2),
+					),
+					SpaceH(2),
 					List(mb.ThreadRows()).
 						Selection(&threadSel).
 						Style(fade(&threadListStyle)).
@@ -792,38 +825,45 @@ func main() {
 							itemBG := If(&row.Selected).Then(t.SelBG).Else(
 								If(&row.Grouped).
 									Then(t.GroupBG).
-									Else(fade(t.BG)),
+									Else(t.ThreadBG),
 							)
-							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG)(
-								HBox(
-									If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
-									SpaceW(1),
-									HBox.Grow(1)(
-										Text(&row.Label).Style(
-											If(&row.Unread).
-												Then(Style{Attr: AttrBold}).
-												Else(Style{})),
-										SpaceW(1),
-										If(&row.Starred).Then(Text("★").FG(t.Accent)),
+							return VBox.Fill(t.ThreadBG)(
+								If(&row.HasGroup).Then(
+									VBox.Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 1)(
+										Text(&row.GroupLabel).FG(t.Accent).Dim().Bold(),
 									),
-									SpaceW(2),
-									Text(&row.Date).Dim(),
 								),
-								HBox(
-									SpaceW(2),
-									Text(&row.Sender).Dim(),
-									SpaceW(2),
-									If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
+								VBox.Fill(itemBG).PaddingVH(1, 2)(
+									HBox(
+										If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
+										SpaceW(1),
+										HBox.Grow(1)(
+											Text(&row.Label).Style(
+												If(&row.Unread).
+													Then(Style{Attr: AttrBold}).
+													Else(Style{})),
+											SpaceW(1),
+											If(&row.Starred).Then(Text("★").FG(t.Accent)),
+										),
+										SpaceW(2),
+										Text(&row.Date).Dim(),
+									),
+									HBox(
+										SpaceW(2),
+										Text(&row.Sender).Dim(),
+										SpaceW(2),
+										If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
+									),
 								),
 							)
 						}),
 				),
 
-				VBox.Grow(3).CascadeStyle(&previewStyle)(
-					HRule(), SpaceH(1),
+				VBox.Grow(3).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&previewStyle)(
 					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) {
 						convView = sv
 					})(
+						SpaceH(2),
 						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) Component {
 							return VBox(
 								HBox(
@@ -843,7 +883,6 @@ func main() {
 					),
 				),
 			),
-			SpaceH(1),
 			If(&omniboxOpen).Then(
 				Overlay.Centered()(
 					VBox.
@@ -875,15 +914,14 @@ func main() {
 							keyStyle := If(&cmd.Selected).
 								Then(Style{FG: t.Bright, BG: t.SelBG}).
 								Else(Style{FG: t.Subtle, BG: t.BG})
-							return VBox.Fill(itemBG).Border(BorderSoft).BorderFG(itemBG).PaddingTRBL(0, 1, 0, 1)(
+							return VBox.Fill(itemBG).PaddingVH(1, 2)(
 								HBox(
 									Text(&cmd.Label).FG(t.Bright),
 									Space(),
 									Text(&cmd.Key).Style(keyStyle),
 								),
 								HBox(
-									Text(&cmd.Section).FG(t.Accent),
-									SpaceW(2),
+									Text(&cmd.Section).FG(t.Accent).Width(12),
 									Text(&cmd.Description).FG(t.Subtle),
 								),
 							)
@@ -897,7 +935,7 @@ func main() {
 							SEDropShadow().Focus(&omniboxRef).Strength(
 								In(Animate(0.3)).Out(Animate(0.0)),
 							),
-							SEVignette().Dodge(&omniboxRef).Strength(
+							SEVignette().Smooth().Dodge(&omniboxRef).Strength(
 								In(Animate(0.3)).Out(Animate(0.0)),
 							),
 						),
@@ -1059,6 +1097,7 @@ func main() {
 				if folderSel == mb.CanonEnd() {
 					labelsOpen = !labelsOpen
 					mb.BuildFolderDisplay(labelsOpen)
+					updateThreadHeader()
 					break
 				}
 				pane = 1
@@ -1104,6 +1143,7 @@ func main() {
 				pushUndo(mb.Archive(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -1112,6 +1152,7 @@ func main() {
 				pushUndo(mb.Delete(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -1125,6 +1166,7 @@ func main() {
 			if pane == 1 {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				go mb.ProcessPendingCommands()
 			}
 		}).
@@ -1134,6 +1176,7 @@ func main() {
 				undoStack = undoStack[:len(undoStack)-1]
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
+				updateThreadHeader()
 				loadPreview()
 				if len(undoStack) > 0 {
 					statusText = fmt.Sprintf("%d undoable — u to undo", len(undoStack))
@@ -1231,6 +1274,7 @@ func main() {
 			mb.BuildThreadDisplay()
 			threadSel = 0
 			mb.SetSelected(0)
+			updateThreadHeader()
 			pane = 1
 			updateFocus()
 			statusText = fmt.Sprintf("search: %q (%d)", q, len(results))

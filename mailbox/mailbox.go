@@ -209,6 +209,22 @@ func (m *Mailbox) ActiveFolderID() string {
 	return ""
 }
 
+func (m *Mailbox) ActiveFolderUnread() int {
+	id := m.ActiveFolderID()
+	if id == "" {
+		return 0
+	}
+	for _, f := range m.folders {
+		if f.ID == id {
+			return f.Unread
+		}
+	}
+	if m.active < len(displayFolders) && displayFolders[m.active].ID == id {
+		return displayFolders[m.active].Unread
+	}
+	return 0
+}
+
 // ActiveFolderCanonical returns the canonical display name of the active
 // folder (e.g. "Inbox", "Drafts", "Trash") or "" if the folder isn't one
 // of the well-known system folders. Callers use this to special-case
@@ -644,6 +660,7 @@ func (m *Mailbox) BuildThreadDisplay() {
 	m.displayMu.Lock()
 	defer m.displayMu.Unlock()
 	m.threadRows = nil
+	lastGroup := ""
 	for i, t := range m.threads {
 		sender := ""
 		if len(t.Participants) > 0 {
@@ -677,15 +694,23 @@ func (m *Mailbox) BuildThreadDisplay() {
 		if m.cache != nil && m.ActiveFolderCanonical() != "Drafts" {
 			hasDraft = m.cache.HasDraft(t.ID)
 		}
+		group := dateGroup(t.Date)
+		groupLabel := ""
+		if group != lastGroup {
+			groupLabel = group
+			lastGroup = group
+		}
 		m.threadRows = append(m.threadRows, ThreadRow{
-			ThreadIdx: i,
-			MsgIdx:    -1,
-			Label:     t.Subject,
-			Sender:    sender,
-			Date:      relativeTime(t.Date),
-			Unread:    t.Unread > 0,
-			Starred:   starred,
-			HasDraft:  hasDraft,
+			ThreadIdx:  i,
+			MsgIdx:     -1,
+			Label:      t.Subject,
+			Sender:     sender,
+			Date:       relativeTime(t.Date),
+			GroupLabel: groupLabel,
+			HasGroup:   groupLabel != "",
+			Unread:     t.Unread > 0,
+			Starred:    starred,
+			HasDraft:   hasDraft,
 		})
 	}
 }
@@ -1490,6 +1515,25 @@ func relativeTime(t time.Time) string {
 	}
 }
 
+func dateGroup(t time.Time) string {
+	now := time.Now()
+	year, month, day := now.Date()
+	today := time.Date(year, month, day, 0, 0, 0, 0, now.Location())
+	d := t.In(now.Location())
+	date := time.Date(d.Year(), d.Month(), d.Day(), 0, 0, 0, 0, now.Location())
+
+	switch {
+	case !date.Before(today):
+		return "TODAY"
+	case date.Equal(today.AddDate(0, 0, -1)):
+		return "YESTERDAY"
+	case date.After(today.AddDate(0, 0, -7)):
+		return "THIS WEEK"
+	default:
+		return "EARLIER"
+	}
+}
+
 func formatAddresses(addrs []provider.Address) string {
 	var parts []string
 	for _, a := range addrs {
@@ -1507,17 +1551,19 @@ type ConversationMessage struct {
 }
 
 type ThreadRow struct {
-	ThreadIdx int
-	MsgIdx    int // -1 for thread header, >= 0 for message
-	Label     string
-	Sender    string
-	Date      string
-	Unread    bool
-	Starred   bool
-	HasDraft  bool
-	Expanded  bool
-	Selected  bool
-	Grouped   bool
+	ThreadIdx  int
+	MsgIdx     int // -1 for thread header, >= 0 for message
+	Label      string
+	Sender     string
+	Date       string
+	GroupLabel string
+	HasGroup   bool
+	Unread     bool
+	Starred    bool
+	HasDraft   bool
+	Expanded   bool
+	Selected   bool
+	Grouped    bool
 }
 
 func (m *Mailbox) SetSelected(sel int) {
