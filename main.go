@@ -487,8 +487,7 @@ func main() {
 		omniboxSel      int
 		omniboxOpen     bool
 		omniboxEmpty    bool
-		omniboxHeight   int16 = 20
-		omniboxMaxRows        = 6
+		omniboxMaxRows  = 6
 		omniboxItems    []mailCommand
 		omniboxFiltered []mailCommand
 		omniboxVisible  []mailCommand
@@ -505,9 +504,10 @@ func main() {
 		if h < 6 {
 			h = 6
 		}
-		omniboxHeight = int16(h)
-
-		rows := (h - 6) / 3
+		// Each command row is a bordered two-line VBox, so it consumes four
+		// rows plus the parent gap. Use the 60% screen-height band only as a
+		// max-row budget; the omnibox background itself sizes to visible rows.
+		rows := (h - 6) / 5
 		if rows < 1 {
 			rows = 1
 		}
@@ -731,6 +731,8 @@ func main() {
 
 	// peakColor := Hex(0x242424)
 
+	var omniboxRef NodeRef
+
 	app.View("main",
 		VBox.PaddingTRBL(1, 2, 0, 2)(
 			// --- wormhole family (active focus) ---
@@ -843,13 +845,13 @@ func main() {
 			),
 			SpaceH(1),
 			If(&omniboxOpen).Then(
-				Overlay.Centered().Backdrop().BackdropFG(t.Muted)(
+				Overlay.Centered()(
 					VBox.
 						Width(86).
-						Height(&omniboxHeight).
+						FitContent().
 						Fill(t.BG).
 						PaddingTRBL(1, 2, 1, 2).
-						Gap(1)(
+						NodeRef(&omniboxRef)(
 						HBox(
 							Text("mail").FG(t.Bright).Bold(),
 							SpaceW(1),
@@ -859,12 +861,14 @@ func main() {
 							SpaceW(2),
 							Text("<esc>").FG(t.Muted),
 						),
+						SpaceH(1),
 						HBox.Fill(t.GroupBG).PaddingVH(0, 1)(
 							Text("> ").FG(t.Accent).Bold(),
 							If(&omniboxQuery).Eq("").
 								Then(Text("type a command").FG(t.Muted)).
 								Else(Text(&omniboxQuery).FG(t.Bright)),
 						),
+						SpaceH(1),
 						ForEach(&omniboxVisible, func(cmd *mailCommand) Component {
 							itemBG := If(&cmd.Selected).Then(t.SelBG).Else(t.BG)
 							keyStyle := If(&cmd.Selected).
@@ -887,6 +891,10 @@ func main() {
 							VBox.Fill(t.BG).PaddingTRBL(1, 1, 1, 1)(
 								Text("no commands").FG(t.Subtle),
 							),
+						),
+						ScreenEffect(
+							SEDropShadow().Focus(&omniboxRef),
+							SEVignette().Dodge(&omniboxRef),
 						),
 					),
 				),
