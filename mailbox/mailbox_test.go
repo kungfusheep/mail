@@ -5,7 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
+	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/provider"
 )
 
@@ -158,6 +160,33 @@ func TestDraftsPipeline_RowDatesAndPreview(t *testing.T) {
 	}
 	if !strings.Contains(msgs[0].Body, "body-c") {
 		t.Errorf("conversation body = %q, want to contain \"body-c\" — preview pane will be empty", msgs[0].Body)
+	}
+	if len(msgs[0].BodySpans) == 0 {
+		t.Fatal("conversation body spans are empty — rich preview pane will be empty")
+	}
+	if !strings.Contains(msgs[0].BodySpans[0].Text, "body-c") {
+		t.Errorf("conversation body span = %q, want to contain \"body-c\" — rich preview pane will be empty", msgs[0].BodySpans[0].Text)
+	}
+}
+
+func TestBodySpansFromSegments_StylesNonMainSegments(t *testing.T) {
+	spans := bodySpansFromSegments([]preview.Segment{
+		{Kind: preview.SegmentMain, Text: "Main body"},
+		{Kind: preview.SegmentQuote, Text: "> old reply"},
+		{Kind: preview.SegmentSignature, Text: "Thanks"},
+	})
+
+	if len(spans) != 5 {
+		t.Fatalf("body spans = %d, want 5 including separators", len(spans))
+	}
+	if spans[0].Text != "Main body" || spans[0].Style.Attr != glyph.AttrNone {
+		t.Fatalf("main span = %#v, want unstyled main body", spans[0])
+	}
+	if spans[2].Text != "> old reply" || !spans[2].Style.Attr.Has(glyph.AttrDim) || !spans[2].Style.Attr.Has(glyph.AttrItalic) {
+		t.Fatalf("quote span = %#v, want dim italic quoted text", spans[2])
+	}
+	if spans[4].Text != "Thanks" || !spans[4].Style.Attr.Has(glyph.AttrDim) {
+		t.Fatalf("signature span = %#v, want dim signature text", spans[4])
 	}
 }
 

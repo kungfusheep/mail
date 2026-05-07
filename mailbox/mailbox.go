@@ -8,15 +8,16 @@ import (
 	"sync"
 	"time"
 
+	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
-	imapprov "github.com/kungfusheep/mail/imap"
+	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/provider"
 )
 
 type Mailbox struct {
 	cache *cache.Cache
-	imap  *imapprov.IMAP
+	imap  *imap.IMAP
 	email string
 
 	folders []provider.Folder
@@ -76,8 +77,8 @@ func New(c *cache.Cache, email string) *Mailbox {
 	return &Mailbox{cache: c, email: email}
 }
 
-func (m *Mailbox) SetIMAP(imap *imapprov.IMAP) {
-	m.imap = imap
+func (m *Mailbox) SetIMAP(imapClient *imap.IMAP) {
+	m.imap = imapClient
 }
 
 // folders
@@ -841,11 +842,14 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 			from = "You"
 		}
 
+		segments := m.renderSegments(msg)
 		local = append(local, ConversationMessage{
-			Sender: from,
-			Date:   msg.Date.Format("2 Jan 15:04"),
-			Body:   m.renderBody(msg),
-			IsMe:   isMe,
+			Sender:    from,
+			Date:      msg.Date.Format("2 Jan 15:04"),
+			Body:      bodyFromSegments(segments),
+			BodySpans: bodySpansFromSegments(segments),
+			Segments:  segments,
+			IsMe:      isMe,
 		})
 
 		if msg.TextBody == "" && msg.HTMLBody == "" {
@@ -912,7 +916,10 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 				if i >= len(m.conversation) {
 					continue
 				}
-				m.conversation[i].Body = m.renderBody(thread.Messages[i])
+				segments := m.renderSegments(thread.Messages[i])
+				m.conversation[i].Body = bodyFromSegments(segments)
+				m.conversation[i].BodySpans = bodySpansFromSegments(segments)
+				m.conversation[i].Segments = segments
 			}
 			m.convMu.Unlock()
 			onUpdate()
@@ -955,6 +962,55 @@ func (m *Mailbox) cacheMessageBody(msg provider.Message) {
 }
 
 func (m *Mailbox) renderBody(msg provider.Message) string {
+	return bodyFromSegments(m.renderSegments(msg))
+}
+
+func bodyFromSegments(segments []preview.Segment) string {
+	if len(segments) == 0 {
+		return ""
+	}
+	var parts []string
+	for _, segment := range segments {
+		if segment.Kind != preview.SegmentMain {
+			break
+		}
+		parts = append(parts, segment.Text)
+	}
+	return strings.TrimSpace(strings.Join(parts, "\n"))
+}
+
+func bodySpansFromSegments(segments []preview.Segment) []glyph.Span {
+	if len(segments) == 0 {
+		return nil
+	}
+	spans := make([]glyph.Span, 0, len(segments)*2)
+	for _, segment := range segments {
+		text := strings.TrimSpace(segment.Text)
+		if text == "" {
+			continue
+		}
+		if len(spans) > 0 {
+			spans = append(spans, glyph.Span{Text: "\n"})
+		}
+		spans = append(spans, glyph.Span{Text: text, Style: segmentStyle(segment.Kind)})
+	}
+	return spans
+}
+
+func segmentStyle(kind preview.SegmentKind) glyph.Style {
+	switch kind {
+	case preview.SegmentQuote:
+		return glyph.Style{Attr: glyph.AttrDim | glyph.AttrItalic}
+	case preview.SegmentSignature, preview.SegmentFooter:
+		return glyph.Style{Attr: glyph.AttrDim}
+	case preview.SegmentForwarded:
+		return glyph.Style{Attr: glyph.AttrDim}
+	default:
+		return glyph.Style{}
+	}
+}
+
+func (m *Mailbox) renderSegments(msg provider.Message) []preview.Segment {
 	body := msg.TextBody
 	if msg.HTMLBody != "" {
 		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, 72)
@@ -962,8 +1018,7 @@ func (m *Mailbox) renderBody(msg provider.Message) string {
 		body = preview.RenderHTML(body, "", 72)
 	}
 	body = preview.Sanitize(body)
-	body = preview.StripQuoted(body)
-	return strings.TrimSpace(body)
+	return preview.SegmentText(strings.TrimSpace(body))
 }
 
 func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
@@ -1510,10 +1565,12 @@ func formatAddresses(addrs []provider.Address) string {
 
 // ThreadRow is a display row — either a thread header or an expanded message
 type ConversationMessage struct {
-	Sender string
-	Date   string
-	Body   string
-	IsMe   bool
+	Sender    string
+	Date      string
+	Body      string
+	BodySpans []glyph.Span
+	Segments  []preview.Segment
+	IsMe      bool
 }
 
 type ThreadRow struct {

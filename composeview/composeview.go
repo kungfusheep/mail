@@ -11,8 +11,8 @@ import (
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/mailbox"
 	"github.com/kungfusheep/mail/provider"
-	smtpprov "github.com/kungfusheep/mail/smtp"
-	mailtheme "github.com/kungfusheep/mail/theme"
+	"github.com/kungfusheep/mail/smtp"
+	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
 	"github.com/kungfusheep/riffkey"
 )
@@ -36,14 +36,14 @@ func cursorColor(ed *compose.Editor) Color {
 	}
 }
 
-func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMTP, db *cache.Cache, statusText *string, frame *int, tr *transition.Transition, theme mailtheme.Theme) Controls {
+func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.SMTP, db *cache.Cache, statusText *string, frame *int, tr *transition.Transition, palette theme.Theme) Controls {
 	var to, cc, subject string
 	var replyMsg *provider.Message
 
 	var fieldTo, fieldCC, fieldSubject InputState
 	var fieldFocus FocusGroup
 	var focused bool
-	labelTo, labelCC, labelSub := theme.Muted, theme.Muted, theme.Muted
+	labelTo, labelCC, labelSub := palette.Muted, palette.Muted, palette.Muted
 	var toFieldRef, ccFieldRef NodeRef
 	var contactResults []string
 	var contactSel int
@@ -139,7 +139,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMT
 
 	send := func() {
 		log.Printf("sendMessage: to=%q cc=%q subject=%q", to, cc, subject)
-		if smtp == nil {
+		if smtpClient == nil {
 			log.Println("sendMessage: no smtp configured")
 			return
 		}
@@ -160,7 +160,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMT
 
 		go func() {
 			log.Println("sendMessage: sending via smtp...")
-			err := smtp.Send(&msg)
+			err := smtpClient.Send(&msg)
 			showSending = false
 			if err != nil {
 				log.Printf("sendMessage: failed: %v", err)
@@ -247,7 +247,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMT
 
 			If(&showContacts).Then(
 				Overlay.Above(&toFieldRef)(
-					VBox.Border(BorderRounded).BorderFG(theme.Muted)(
+					VBox.Border(BorderRounded).BorderFG(palette.Muted)(
 						List(&contactResults).
 							Selection(&contactSel).
 							SelectedStyle(Style{Attr: AttrInverse}).
@@ -257,12 +257,12 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMT
 			),
 
 			If(&showSending).Then(
-				Overlay.Centered().Backdrop().BackdropFG(theme.BG)(
-					VBox.Border(BorderRounded).BorderFG(theme.Muted).Width(40)(
+				Overlay.Centered().Backdrop().BackdropFG(palette.BG)(
+					VBox.Border(BorderRounded).BorderFG(palette.Muted).Width(40)(
 						SpaceH(1),
 						HBox(
 							Space(),
-							Spinner(frame).Frames(SpinnerDots).FG(theme.Subtle),
+							Spinner(frame).Frames(SpinnerDots).FG(palette.Subtle),
 							SpaceW(1),
 							Text(&sendingStatus).Style(Style{Align: AlignCenter}),
 							Space(),
@@ -379,9 +379,9 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtp *smtpprov.SMT
 		syncLabels := func() {
 			for i, l := range labels {
 				if focused && fieldFocus.Current == i {
-					*l = theme.Bright
+					*l = palette.Bright
 				} else {
-					*l = theme.Muted
+					*l = palette.Muted
 				}
 			}
 		}

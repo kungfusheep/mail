@@ -15,10 +15,10 @@ import (
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/composeview"
 	"github.com/kungfusheep/mail/contacts"
-	imapprov "github.com/kungfusheep/mail/imap"
+	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
-	smtpprov "github.com/kungfusheep/mail/smtp"
-	mailtheme "github.com/kungfusheep/mail/theme"
+	"github.com/kungfusheep/mail/smtp"
+	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
 	"github.com/kungfusheep/riffkey"
 )
@@ -59,26 +59,43 @@ func main() {
 	log.Println("starting mail")
 
 	app := NewApp()
-	app.SetDefaultStyle(Style{FG: mailtheme.Dark().FG, BG: mailtheme.Dark().BG})
+	app.SetDefaultStyle(Style{FG: theme.Dark().FG, BG: theme.Dark().BG})
 
-	db, err := cache.New()
+	var db *cache.Cache
+	if cachePath := os.Getenv("MAIL_CACHE_PATH"); cachePath != "" {
+		db, err = cache.NewAt(cachePath)
+	} else {
+		db, err = cache.New()
+	}
 	if err != nil {
 		log.Fatal(err)
 	}
 	// sweep any leftover empty-body drafts from earlier writes
 	_ = db.GCEmptyDrafts()
 
-	cfg, err := imapprov.LoadConfig()
-	if err != nil {
-		log.Fatal(err)
+	offline := os.Getenv("MAIL_OFFLINE") == "1"
+	email := os.Getenv("MAIL_EMAIL")
+	var cfg imap.Config
+	if !offline {
+		cfg, err = imap.LoadConfig()
+		if err != nil {
+			log.Fatal(err)
+		}
+		email = cfg.Email
+	}
+	if email == "" {
+		email = "me@example.test"
 	}
 
-	mb := mailbox.New(db, cfg.Email)
-	smtp := smtpprov.New(smtpprov.Config{
-		Server:   cfg.SMTPServer,
-		Email:    cfg.Email,
-		Password: cfg.Password,
-	})
+	mb := mailbox.New(db, email)
+	var smtpClient *smtp.SMTP
+	if !offline {
+		smtpClient = smtp.New(smtp.Config{
+			Server:   cfg.SMTPServer,
+			Email:    cfg.Email,
+			Password: cfg.Password,
+		})
+	}
 
 	// load from cache
 	mb.LoadFolders()
@@ -94,7 +111,7 @@ func main() {
 	mb.SetSelected(0)
 	mb.LoadConversation(0, nil)
 
-	t := mailtheme.Dark()
+	t := theme.Dark()
 
 	// inbox view state
 	var (
@@ -215,19 +232,19 @@ func main() {
 	// mailbox share the same dark background. Earlier we left Background unset
 	// because it seemed to trigger a top-row-loss bug; that turned out to be
 	// the emoji/wide-rune width issue (fixed in glyph).
-	composeTheme := mailtheme.ComposeTheme(t)
+	composeTheme := theme.ComposeTheme(t)
 
 	editor := compose.NewEditor(compose.NewDocument(), "")
 	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := composeview.Setup(app, editor, mb, smtp, db, &statusText, &frame, composeTransition, t)
+	comp := composeview.Setup(app, editor, mb, smtpClient, db, &statusText, &frame, composeTransition, t)
 
 	var convView *ScrollViewC
 	var loadPreview func()
 
 	// imap connection (nil until Authenticate succeeds in the goroutine below)
-	var imap *imapprov.IMAP
+	var imapClient *imap.IMAP
 
 	// idle + cache subscription, per active label. watchLabel cancels any
 	// prior watcher and starts a new pair:
@@ -249,7 +266,7 @@ func main() {
 			labelUnsub()
 			labelUnsub = nil
 		}
-		if label == "" || imap == nil {
+		if label == "" || imapClient == nil {
 			return
 		}
 
@@ -269,7 +286,7 @@ func main() {
 		ctx, cancel := context.WithCancel(context.Background())
 		idleCancel = cancel
 		go func() {
-			if err := imap.Idle(ctx, label, func() {
+			if err := imapClient.Idle(ctx, label, func() {
 				log.Printf("idle: change on %s, syncing", label)
 				if err := mb.SyncThreads(); err != nil {
 					log.Printf("idle sync: %v", err)
@@ -281,48 +298,50 @@ func main() {
 	}
 
 	// connect and sync in background
-	go func() {
-		imap = imapprov.New(cfg)
-		if err := imap.Authenticate(); err != nil {
-			statusText = fmt.Sprintf("imap: %v", err)
+	if !offline {
+		go func() {
+			imapClient = imap.New(cfg)
+			if err := imapClient.Authenticate(); err != nil {
+				statusText = fmt.Sprintf("imap: %v", err)
+				app.RequestRender()
+				return
+			}
+			mb.SetIMAP(imapClient)
+			log.Println("imap: authenticated")
+
+			if err := mb.SyncFolders(); err != nil {
+				statusText = fmt.Sprintf("sync: %v", err)
+				app.RequestRender()
+				return
+			}
+			mb.BuildFolderDisplay(labelsOpen)
+			updateThreadHeader()
+			// Fresh folders may reveal a Drafts label the cached view didn't have —
+			// re-set so publish routing is current.
+			if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
+				db.SetDraftsLabel(draftsID)
+			}
 			app.RequestRender()
-			return
-		}
-		mb.SetIMAP(imap)
-		log.Println("imap: authenticated")
 
-		if err := mb.SyncFolders(); err != nil {
-			statusText = fmt.Sprintf("sync: %v", err)
+			mb.SyncSent()
+			mb.ProcessPendingCommands()
+
+			if err := mb.SyncThreads(); err != nil {
+				statusText = fmt.Sprintf("sync: %v", err)
+			}
+			mb.BuildFolderDisplay(labelsOpen)
+			mb.BuildThreadDisplay()
+			mb.SetSelected(threadSel)
+			updateThreadHeader()
+			loadPreview()
 			app.RequestRender()
-			return
-		}
-		mb.BuildFolderDisplay(labelsOpen)
-		updateThreadHeader()
-		// Fresh folders may reveal a Drafts label the cached view didn't have —
-		// re-set so publish routing is current.
-		if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
-			db.SetDraftsLabel(draftsID)
-		}
-		app.RequestRender()
 
-		mb.SyncSent()
-		mb.ProcessPendingCommands()
+			go cacheContacts(db)
 
-		if err := mb.SyncThreads(); err != nil {
-			statusText = fmt.Sprintf("sync: %v", err)
-		}
-		mb.BuildFolderDisplay(labelsOpen)
-		mb.BuildThreadDisplay()
-		mb.SetSelected(threadSel)
-		updateThreadHeader()
-		loadPreview()
-		app.RequestRender()
-
-		go cacheContacts(db)
-
-		// start live updates on the active label
-		watchLabel(mb.ActiveFolderID())
-	}()
+			// start live updates on the active label
+			watchLabel(mb.ActiveFolderID())
+		}()
+	}
 
 	syncThreadsFromNetwork := func() {
 		mb.ProcessPendingCommands()
@@ -794,7 +813,7 @@ func main() {
 									Text(&msg.Date).Dim(),
 								),
 								SpaceH(1),
-								TextBlock(&msg.Body),
+								RichTextNode{Spans: &msg.BodySpans},
 								SpaceH(1),
 							)
 						}),

@@ -57,11 +57,15 @@ func New() (*Cache, error) {
 		return nil, err
 	}
 	dir := filepath.Join(home, ".config", "mail")
-	if err := os.MkdirAll(dir, 0700); err != nil {
+	return NewAt(filepath.Join(dir, "cache.db"))
+}
+
+func NewAt(path string) (*Cache, error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return nil, err
 	}
 
-	db, err := sql.Open("sqlite3", filepath.Join(dir, "cache.db"))
+	db, err := sql.Open("sqlite3", path)
 	if err != nil {
 		return nil, err
 	}

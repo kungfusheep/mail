@@ -18,16 +18,16 @@ import (
 	"sort"
 	"strings"
 
-	imapprov "github.com/kungfusheep/mail/imap"
+	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/provider"
 )
 
 func main() {
-	cfg, err := imapprov.LoadConfig()
+	cfg, err := imap.LoadConfig()
 	if err != nil {
 		fatal("loading config: %v", err)
 	}
-	im := imapprov.New(cfg)
+	im := imap.New(cfg)
 	if err := im.Authenticate(); err != nil {
 		fatal("authenticate: %v", err)
 	}
@@ -84,8 +84,8 @@ func main() {
 
 	type dup struct {
 		subject string
-		keep   provider.Message
-		remove []provider.Message
+		keep    provider.Message
+		remove  []provider.Message
 	}
 	var dups []dup
 	for k, ms := range groups {
@@ -97,8 +97,8 @@ func main() {
 		})
 		dups = append(dups, dup{
 			subject: k.subject,
-			keep:   ms[0],
-			remove: ms[1:],
+			keep:    ms[0],
+			remove:  ms[1:],
 		})
 	}
 	sort.Slice(dups, func(i, j int) bool {
@@ -151,7 +151,7 @@ func main() {
 // Gmail accounts often expose both "[Gmail]/Drafts" and "[Google Mail]/Drafts"
 // as aliases; we pick whichever has more messages, falling back to the first
 // folder whose ID ends in "/Drafts" or equals "Drafts".
-func resolveDraftsFolder(im *imapprov.IMAP) (string, error) {
+func resolveDraftsFolder(im *imap.IMAP) (string, error) {
 	folders, err := im.ListFolders()
 	if err != nil {
 		return "", err
