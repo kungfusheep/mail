@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"fmt"
 	"log"
 	"os"
@@ -14,9 +13,9 @@ import (
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/composeview"
-	"github.com/kungfusheep/mail/contacts"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
@@ -242,118 +241,7 @@ func main() {
 
 	var convView *ScrollViewC
 	var loadPreview func()
-
-	// imap connection (nil until Authenticate succeeds in the goroutine below)
-	var imapClient *imap.IMAP
-
-	// idle + cache subscription, per active label. watchLabel cancels any
-	// prior watcher and starts a new pair:
-	//   - a goroutine listening to cache.Subscribe(label); fires a UI refresh
-	//     whenever the network (or anything else) writes to that label.
-	//   - IDLE on a second IMAP connection; on change it triggers SyncThreads,
-	//     which writes to cache, which in turn fires the subscriber above.
-	var (
-		idleCancel context.CancelFunc
-		labelUnsub func()
-	)
-
-	watchLabel := func(label string) {
-		if idleCancel != nil {
-			idleCancel()
-			idleCancel = nil
-		}
-		if labelUnsub != nil {
-			labelUnsub()
-			labelUnsub = nil
-		}
-		if label == "" || imapClient == nil {
-			return
-		}
-
-		labelUnsub = mb.Watch(label, func() {
-			mb.SetSelected(threadSel)
-			mb.BuildFolderDisplay(labelsOpen)
-			updateThreadHeader()
-			// refresh the preview too — the data under it may have changed
-			// (e.g. reconcileDrafts just backfilled the selected draft's
-			// body, or a sync pulled the rest of a conversation).
-			if loadPreview != nil {
-				loadPreview()
-			}
-			app.RequestRender()
-		})
-
-		ctx, cancel := context.WithCancel(context.Background())
-		idleCancel = cancel
-		go func() {
-			if err := imapClient.Idle(ctx, label, func() {
-				log.Printf("idle: change on %s, syncing", label)
-				if err := mb.SyncThreads(); err != nil {
-					log.Printf("idle sync: %v", err)
-				}
-			}); err != nil && ctx.Err() == nil {
-				log.Printf("idle %s: %v", label, err)
-			}
-		}()
-	}
-
-	// connect and sync in background
-	if !offline {
-		go func() {
-			imapClient = imap.New(cfg)
-			if err := imapClient.Authenticate(); err != nil {
-				statusText = fmt.Sprintf("imap: %v", err)
-				app.RequestRender()
-				return
-			}
-			mb.SetIMAP(imapClient)
-			log.Println("imap: authenticated")
-
-			if err := mb.SyncFolders(); err != nil {
-				statusText = fmt.Sprintf("sync: %v", err)
-				app.RequestRender()
-				return
-			}
-			mb.BuildFolderDisplay(labelsOpen)
-			updateThreadHeader()
-			// Fresh folders may reveal a Drafts label the cached view didn't have —
-			// re-set so publish routing is current.
-			if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
-				db.SetDraftsLabel(draftsID)
-			}
-			app.RequestRender()
-
-			mb.SyncSent()
-			mb.ProcessPendingCommands()
-
-			if err := mb.SyncThreads(); err != nil {
-				statusText = fmt.Sprintf("sync: %v", err)
-			}
-			mb.BuildFolderDisplay(labelsOpen)
-			mb.BuildThreadDisplay()
-			mb.SetSelected(threadSel)
-			updateThreadHeader()
-			loadPreview()
-			app.RequestRender()
-
-			go cacheContacts(db)
-
-			// start live updates on the active label
-			watchLabel(mb.ActiveFolderID())
-		}()
-	}
-
-	syncThreadsFromNetwork := func() {
-		mb.ProcessPendingCommands()
-		if err := mb.SyncThreads(); err != nil {
-			statusText = fmt.Sprintf("sync: %v", err)
-		}
-		mb.BuildFolderDisplay(labelsOpen)
-		mb.BuildThreadDisplay()
-		mb.SetSelected(threadSel)
-		updateThreadHeader()
-		app.RequestRender()
-	}
+	var rt *mailruntime.Runtime
 
 	loadPreview = func() {
 		mb.LoadConversation(threadSel, func() {
@@ -430,8 +318,10 @@ func main() {
 		loadPreview()
 		undoStack = nil
 		statusText = mb.FolderName(folderSel)
-		go syncThreadsFromNetwork()
-		watchLabel(mb.ActiveFolderID())
+		if rt != nil {
+			rt.WatchActiveFolder()
+			rt.SyncActiveFolder()
+		}
 	}
 
 	startSearch := func() {
@@ -605,7 +495,9 @@ func main() {
 		}},
 		{Label: "Refresh Mail", Description: "process pending changes and sync this folder", Key: "sync", Section: "mail", Action: func() {
 			statusText = "syncing..."
-			go syncThreadsFromNetwork()
+			if rt != nil {
+				rt.SyncActiveFolder()
+			}
 		}},
 		{Label: "Toggle Folders", Description: "show or hide grouped labels", Key: "enter", Section: "navigation", Action: func() {
 			labelsOpen = !labelsOpen
@@ -640,7 +532,9 @@ func main() {
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
 				loadPreview()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			})
 		}},
 		{Label: "Delete Selected Thread", Description: "move the selected thread to trash", Key: "d", Section: "thread", Action: func() {
@@ -650,13 +544,17 @@ func main() {
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
 				loadPreview()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			})
 		}},
 		{Label: "Toggle Star", Description: "star or unstar the selected thread", Key: "s", Section: "thread", Action: func() {
 			threadAction("star", func() {
 				pushUndo(mb.ToggleStar(threadSel))
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			})
 		}},
 		{Label: "Toggle Read", Description: "mark selected thread read or unread", Key: "e", Section: "thread", Action: func() {
@@ -664,7 +562,9 @@ func main() {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			})
 		}},
 		{Label: "Undo Last Thread Action", Description: "restore the latest archive/delete/read/star change", Key: "u", Section: "thread", Action: func() {
@@ -1079,7 +979,9 @@ func main() {
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			}
 		}).
 		Handle("d", func() {
@@ -1088,13 +990,17 @@ func main() {
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			}
 		}).
 		Handle("s", func() {
 			if pane == 1 {
 				pushUndo(mb.ToggleStar(threadSel))
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			}
 		}).
 		Handle("e", func() {
@@ -1102,7 +1008,9 @@ func main() {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				go mb.ProcessPendingCommands()
+				if rt != nil {
+					rt.FlushPending()
+				}
 			}
 		}).
 		Handle("u", func() {
@@ -1238,6 +1146,34 @@ func main() {
 		})
 	}
 
+	rt = mailruntime.New(db, mb, mailruntime.Config{
+		Backend: !offline,
+		IMAP:    cfg,
+	}, mailruntime.Callbacks{
+		Status: func(text string) {
+			statusText = text
+		},
+		FoldersChanged: func() {
+			mb.BuildFolderDisplay(labelsOpen)
+			if draftsID := mb.FolderIDByDisplayName("Drafts"); draftsID != "" {
+				db.SetDraftsLabel(draftsID)
+			}
+			updateThreadHeader()
+		},
+		ThreadsChanged: func() {
+			mb.BuildFolderDisplay(labelsOpen)
+			mb.BuildThreadDisplay()
+			clampThreadSel()
+			updateThreadHeader()
+			if loadPreview != nil {
+				loadPreview()
+			}
+		},
+		Render: app.RequestRender,
+	})
+	rt.Start()
+	defer rt.Close()
+
 	// spinner
 	go func() {
 		for range time.Tick(80 * time.Millisecond) {
@@ -1248,17 +1184,5 @@ func main() {
 
 	if err := app.RunFrom("main"); err != nil {
 		log.Fatal(err)
-	}
-}
-
-func cacheContacts(db *cache.Cache) {
-	if db == nil {
-		return
-	}
-	log.Println("contacts: loading from macOS...")
-	all := contacts.All()
-	log.Printf("contacts: loaded %d, caching", len(all))
-	if len(all) > 0 {
-		db.PutContacts(all)
 	}
 }
