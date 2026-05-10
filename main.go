@@ -5,7 +5,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strings"
 	"syscall"
 	"time"
 
@@ -28,20 +27,6 @@ type mailCommand struct {
 	Key         string
 	Section     string
 	Action      func()
-	Selected    bool
-}
-
-func fuzzyMatch(str, pattern string) bool {
-	if pattern == "" {
-		return true
-	}
-	i := 0
-	for _, r := range str {
-		if i < len(pattern) && r == rune(pattern[i]) {
-			i++
-		}
-	}
-	return i == len(pattern)
 }
 
 func main() {
@@ -331,14 +316,11 @@ func main() {
 	}
 
 	var (
-		omniboxQuery    string
-		omniboxSel      int
-		omniboxOpen     bool
-		omniboxEmpty    bool
-		omniboxMaxRows  = 6
-		omniboxItems    []mailCommand
-		omniboxFiltered []mailCommand
-		omniboxVisible  []mailCommand
+		omniboxOpen    bool
+		omniboxEmpty   = true
+		omniboxMaxRows = 6
+		omniboxItems   []mailCommand
+		omniboxList    *FilterListC[mailCommand]
 	)
 
 	updateOmniboxLayout := func(width, height int) {
@@ -366,65 +348,33 @@ func main() {
 	size := app.Size()
 	updateOmniboxLayout(size.Width, size.Height)
 
-	refreshOmniboxVisible := func() {
-		omniboxVisible = omniboxVisible[:0]
-		omniboxEmpty = len(omniboxFiltered) == 0
-		if len(omniboxFiltered) == 0 {
-			return
-		}
-		start := 0
-		if omniboxSel >= omniboxMaxRows {
-			start = omniboxSel - omniboxMaxRows + 1
-		}
-		end := start + omniboxMaxRows
-		if end > len(omniboxFiltered) {
-			end = len(omniboxFiltered)
-		}
-		omniboxVisible = append(omniboxVisible, omniboxFiltered[start:end]...)
+	refreshOmniboxState := func() {
+		omniboxEmpty = omniboxList == nil || omniboxList.Filter().Len() == 0
 	}
 
-	refreshOmniboxSelection := func() {
-		if omniboxSel >= len(omniboxFiltered) {
-			omniboxSel = len(omniboxFiltered) - 1
+	app.OnBeforeRender(func() {
+		if omniboxOpen {
+			refreshOmniboxState()
 		}
-		if omniboxSel < 0 {
-			omniboxSel = 0
-		}
-		for i := range omniboxFiltered {
-			omniboxFiltered[i].Selected = i == omniboxSel
-		}
-		refreshOmniboxVisible()
-	}
-
-	refreshOmnibox := func() {
-		q := strings.ToLower(strings.TrimSpace(omniboxQuery))
-		omniboxFiltered = omniboxFiltered[:0]
-		for _, item := range omniboxItems {
-			haystack := strings.ToLower(item.Label + " " + item.Description + " " + item.Key + " " + item.Section)
-			if q == "" || strings.Contains(haystack, q) || fuzzyMatch(haystack, q) {
-				omniboxFiltered = append(omniboxFiltered, item)
-			}
-		}
-		refreshOmniboxSelection()
-	}
+	})
 
 	app.OnResize(func(width, height int) {
 		updateOmniboxLayout(width, height)
-		refreshOmniboxVisible()
+		if omniboxList != nil {
+			omniboxList.MaxVisible(omniboxMaxRows)
+		}
 	})
-
-	var omniboxRouter *riffkey.Router
 
 	openOmnibox := func() {
 		if omniboxOpen {
 			return
 		}
-		omniboxQuery = ""
-		omniboxSel = 0
+		if omniboxList != nil {
+			omniboxList.Clear()
+		}
+		refreshOmniboxState()
 		omniboxOpen = true
-		refreshOmnibox()
 		app.HideCursor()
-		app.Push(omniboxRouter)
 		app.RequestRender()
 	}
 
@@ -432,42 +382,64 @@ func main() {
 		if !omniboxOpen {
 			return
 		}
-		omniboxQuery = ""
+		if omniboxList != nil {
+			omniboxList.Clear()
+		}
+		refreshOmniboxState()
 		omniboxOpen = false
-		refreshOmnibox()
-		app.Pop()
 		app.HideCursor()
 		app.RequestRender()
 	}
 
 	moveOmnibox := func(delta int) {
-		if len(omniboxFiltered) == 0 {
-			omniboxSel = 0
+		if omniboxList == nil || omniboxList.Filter().Len() == 0 {
 			return
 		}
-		omniboxSel += delta
-		if omniboxSel < 0 {
-			omniboxSel = len(omniboxFiltered) - 1
+		before := omniboxList.Selected()
+		if delta > 0 {
+			omniboxList.SelectNext()
+			if omniboxList.Selected() == before {
+				for range omniboxList.Filter().Len() {
+					omniboxList.SelectPrev()
+				}
+			}
+			return
 		}
-		if omniboxSel >= len(omniboxFiltered) {
-			omniboxSel = 0
+		omniboxList.SelectPrev()
+		if omniboxList.Selected() == before {
+			for range omniboxList.Filter().Len() {
+				omniboxList.SelectNext()
+			}
 		}
-		refreshOmniboxSelection()
 	}
 
 	pageOmnibox := func(delta int) {
-		if len(omniboxFiltered) == 0 {
-			omniboxSel = 0
+		if omniboxList == nil || omniboxList.Filter().Len() == 0 {
 			return
 		}
-		omniboxSel += delta
-		if omniboxSel < 0 {
-			omniboxSel = 0
+		if delta > 0 {
+			omniboxList.PageDown()
+		} else {
+			omniboxList.PageUp()
 		}
-		if omniboxSel >= len(omniboxFiltered) {
-			omniboxSel = len(omniboxFiltered) - 1
+	}
+
+	firstOmnibox := func() {
+		if omniboxList == nil {
+			return
 		}
-		refreshOmniboxSelection()
+		for range omniboxList.Filter().Len() {
+			omniboxList.SelectPrev()
+		}
+	}
+
+	lastOmnibox := func() {
+		if omniboxList == nil {
+			return
+		}
+		for range omniboxList.Filter().Len() {
+			omniboxList.SelectNext()
+		}
 	}
 
 	threadAction := func(label string, fn func()) {
@@ -583,7 +555,43 @@ func main() {
 		{Label: "Show Keyboard Help", Description: "open the in-app keybinding help", Key: "?", Section: "help", Action: func() { helpOpen = true }},
 		{Label: "Quit Mail", Description: "exit the app", Key: "q", Section: "system", Action: func() { app.Stop() }},
 	}
-	refreshOmnibox()
+	omniboxList = FilterList(&omniboxItems, func(cmd *mailCommand) string {
+		return cmd.Label + " " + cmd.Description + " " + cmd.Key + " " + cmd.Section
+	}).
+		Placeholder("type a command").
+		MaxVisible(omniboxMaxRows).
+		Marker("  ").
+		Style(Style{BG: t.BG}).
+		SelectedStyle(Style{FG: t.Bright, BG: t.SelBG}).
+		Render(func(cmd *mailCommand) Component {
+			return VBox.PaddingVH(1, 2)(
+				HBox(
+					Text(&cmd.Label).FG(t.Bright),
+					Space(),
+					Text(&cmd.Key).FG(t.Subtle),
+				),
+				HBox(
+					Text(&cmd.Section).FG(t.Accent).Width(12),
+					Text(&cmd.Description).FG(t.Subtle),
+				),
+			)
+		})
+	refreshOmniboxState()
+
+	execOmnibox := func() {
+		if omniboxList == nil {
+			return
+		}
+		cmd := omniboxList.Selected()
+		if cmd == nil {
+			return
+		}
+		action := cmd.Action
+		closeOmnibox()
+		if action != nil {
+			action()
+		}
+	}
 
 	fade := Animate
 	accentMarker := Style{FG: t.Accent}
@@ -713,7 +721,7 @@ func main() {
 									Text(&msg.Date).Dim(),
 								),
 								SpaceH(1),
-								RichTextNode{Spans: &msg.BodySpans},
+								Rich(&msg.BodySpans),
 								SpaceH(1),
 							)
 						}),
@@ -729,6 +737,24 @@ func main() {
 						PaddingTRBL(1, 2, 1, 2).
 						Opacity(In(1).Out(Animate.Duration(500*time.Millisecond)(0.0))).
 						NodeRef(&omniboxRef)(
+						On.Modal(
+							Key("<CR>", execOmnibox),
+							Key("<Enter>", execOmnibox),
+							Key("<Esc>", closeOmnibox),
+							Key("<C-c>", closeOmnibox),
+							Key("j", func() { moveOmnibox(1) }),
+							Key("<Down>", func() { moveOmnibox(1) }),
+							Key("<Tab>", func() { moveOmnibox(1) }),
+							Key("<C-n>", func() { moveOmnibox(1) }),
+							Key("k", func() { moveOmnibox(-1) }),
+							Key("<Up>", func() { moveOmnibox(-1) }),
+							Key("<S-Tab>", func() { moveOmnibox(-1) }),
+							Key("<C-p>", func() { moveOmnibox(-1) }),
+							Key("<C-d>", func() { pageOmnibox(1) }),
+							Key("<C-u>", func() { pageOmnibox(-1) }),
+							Key("g", firstOmnibox),
+							Key("G", lastOmnibox),
+						),
 						HBox(
 							Text("mail").FG(t.Bright).Bold(),
 							SpaceW(1),
@@ -739,30 +765,7 @@ func main() {
 							Text("<esc>").FG(t.Muted),
 						),
 						SpaceH(1),
-						HBox.Fill(t.GroupBG).PaddingVH(0, 1)(
-							Text("> ").FG(t.Accent).Bold(),
-							If(&omniboxQuery).Eq("").
-								Then(Text("type a command").FG(t.Muted)).
-								Else(Text(&omniboxQuery).FG(t.Bright)),
-						),
-						SpaceH(1),
-						ForEach(&omniboxVisible, func(cmd *mailCommand) Component {
-							itemBG := If(&cmd.Selected).Then(t.SelBG).Else(t.BG)
-							keyStyle := If(&cmd.Selected).
-								Then(Style{FG: t.Bright, BG: t.SelBG}).
-								Else(Style{FG: t.Subtle, BG: t.BG})
-							return VBox.Fill(itemBG).PaddingVH(1, 2)(
-								HBox(
-									Text(&cmd.Label).FG(t.Bright),
-									Space(),
-									Text(&cmd.Key).Style(keyStyle),
-								),
-								HBox(
-									Text(&cmd.Section).FG(t.Accent).Width(12),
-									Text(&cmd.Description).FG(t.Subtle),
-								),
-							)
-						}),
+						omniboxList,
 						If(&omniboxEmpty).Then(
 							VBox.Fill(t.BG).PaddingTRBL(1, 1, 1, 1)(
 								Text("no commands").FG(t.Subtle),
@@ -780,67 +783,68 @@ func main() {
 
 			// help modal — ? toggles. Vignette subtly darkens the rest of
 			// the screen; the modal itself is dodged so it stays crisp.
-			If(&helpOpen).Then(OverlayNode{
-				Centered: true,
-				Child: VBox.
-					Width(56).
-					Fill(t.BG).
-					PaddingVH(1, 2).
-					NodeRef(&helpRef).
-					Opacity(
-						In(Animate(1.0)).Out(Animate(0)),
-					).
-					Gap(1)(
-					Text("keyboard").FG(t.Bright).Bold(),
-					HBox(
-						func() Component {
-							rows := []kv{
-								{"j / k", "up / down"},
-								{"h / l", "pane left / right"},
-								{"tab", "next pane"},
-								{"enter", "open"},
-								{"o", "expand thread"},
-								{"/", "search"},
-							}
-							return VBox.Grow(3)(
-								Text("navigate").FG(t.Subtle),
-								ForEach(&rows, func(r *kv) Component {
-									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(8), Text(&r.desc).FG(t.Subtle))
-								}),
-							)
-						}(),
-						func() Component {
-							rows := []kv{
-								{"c", "compose"},
-								{"C", "resume draft"},
-								{"r", "reply"},
-								{"a", "archive"},
-								{"d", "delete"},
-								{"s", "star"},
-								{"e", "toggle read"},
-								{"u", "undo"},
-							}
-							return VBox.Grow(2)(
-								Text("actions").FG(t.Subtle),
-								ForEach(&rows, func(r *kv) Component {
-									return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(3), Text(&r.desc).FG(t.Subtle))
-								}),
-							)
-						}(),
-					),
-					ScreenEffect(
-						SEVignette().Strength(
-							In(
-								Animate.From(0)(0.55),
-							).Out(
+			If(&helpOpen).Then(
+				Overlay.Centered()(
+					VBox.
+						Width(56).
+						Fill(t.BG).
+						PaddingVH(1, 2).
+						NodeRef(&helpRef).
+						Opacity(
+							In(Animate(1.0)).Out(Animate(0)),
+						).
+						Gap(1)(
+						Text("keyboard").FG(t.Bright).Bold(),
+						HBox(
+							func() Component {
+								rows := []kv{
+									{"j / k", "up / down"},
+									{"h / l", "pane left / right"},
+									{"tab", "next pane"},
+									{"enter", "open"},
+									{"o", "expand thread"},
+									{"/", "search"},
+								}
+								return VBox.Grow(3)(
+									Text("navigate").FG(t.Subtle),
+									ForEach(&rows, func(r *kv) Component {
+										return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(8), Text(&r.desc).FG(t.Subtle))
+									}),
+								)
+							}(),
+							func() Component {
+								rows := []kv{
+									{"c", "compose"},
+									{"C", "resume draft"},
+									{"r", "reply"},
+									{"a", "archive"},
+									{"d", "delete"},
+									{"s", "star"},
+									{"e", "toggle read"},
+									{"u", "undo"},
+								}
+								return VBox.Grow(2)(
+									Text("actions").FG(t.Subtle),
+									ForEach(&rows, func(r *kv) Component {
+										return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(3), Text(&r.desc).FG(t.Subtle))
+									}),
+								)
+							}(),
+						),
+						ScreenEffect(
+							SEVignette().Strength(
+								In(
+									Animate.From(0)(0.55),
+								).Out(
 
-								Animate(0),
-							),
-						).Dodge(&helpRef).Smooth(),
-						SEDropShadow().Focus(&helpRef),
+									Animate(0),
+								),
+							).Dodge(&helpRef).Smooth(),
+							SEDropShadow().Focus(&helpRef),
+						),
 					),
 				),
-			}),
+			),
 		),
 	).NoCounts().
 		Handle("q", app.Stop).
@@ -1031,66 +1035,6 @@ func main() {
 		Handle("/", func() {
 			startSearch()
 		})
-
-	execOmnibox := func() {
-		if omniboxSel < 0 || omniboxSel >= len(omniboxFiltered) {
-			return
-		}
-		action := omniboxFiltered[omniboxSel].Action
-		closeOmnibox()
-		if action != nil {
-			action()
-		}
-	}
-
-	omniboxRouter = riffkey.NewRouter().Name("omnibox").NoCounts()
-	omniboxRouter.Handle("<CR>", func(_ riffkey.Match) { execOmnibox() })
-	omniboxRouter.Handle("<Enter>", func(_ riffkey.Match) { execOmnibox() })
-	omniboxRouter.Handle("<Esc>", func(_ riffkey.Match) { closeOmnibox() })
-	omniboxRouter.Handle("<C-c>", func(_ riffkey.Match) { closeOmnibox() })
-	omniboxRouter.Handle("j", func(_ riffkey.Match) { moveOmnibox(1) })
-	omniboxRouter.Handle("<Down>", func(_ riffkey.Match) { moveOmnibox(1) })
-	omniboxRouter.Handle("<Tab>", func(_ riffkey.Match) { moveOmnibox(1) })
-	omniboxRouter.Handle("<C-n>", func(_ riffkey.Match) { moveOmnibox(1) })
-	omniboxRouter.Handle("k", func(_ riffkey.Match) { moveOmnibox(-1) })
-	omniboxRouter.Handle("<Up>", func(_ riffkey.Match) { moveOmnibox(-1) })
-	omniboxRouter.Handle("<S-Tab>", func(_ riffkey.Match) { moveOmnibox(-1) })
-	omniboxRouter.Handle("<C-p>", func(_ riffkey.Match) { moveOmnibox(-1) })
-	omniboxRouter.Handle("<C-d>", func(_ riffkey.Match) { pageOmnibox(5) })
-	omniboxRouter.Handle("<C-u>", func(_ riffkey.Match) { pageOmnibox(-5) })
-	omniboxRouter.Handle("g", func(_ riffkey.Match) {
-		omniboxSel = 0
-		refreshOmniboxSelection()
-	})
-	omniboxRouter.Handle("G", func(_ riffkey.Match) {
-		if len(omniboxFiltered) > 0 {
-			omniboxSel = len(omniboxFiltered) - 1
-		}
-		refreshOmniboxSelection()
-	})
-	omniboxRouter.Handle("<BS>", func(_ riffkey.Match) {
-		if len(omniboxQuery) > 0 {
-			runes := []rune(omniboxQuery)
-			omniboxQuery = string(runes[:len(runes)-1])
-			omniboxSel = 0
-			refreshOmnibox()
-		}
-	})
-	omniboxRouter.Handle("<Space>", func(_ riffkey.Match) {
-		omniboxQuery += " "
-		omniboxSel = 0
-		refreshOmnibox()
-	})
-	omniboxRouter.HandleUnmatched(func(k riffkey.Key) bool {
-		if k.Rune != 0 && k.Mod == 0 {
-			omniboxQuery += string(k.Rune)
-			omniboxSel = 0
-			refreshOmnibox()
-			app.RequestRender()
-			return true
-		}
-		return false
-	})
 
 	app.View("search",
 		VBox(

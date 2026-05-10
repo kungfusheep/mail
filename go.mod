@@ -6,7 +6,7 @@ require (
 	github.com/emersion/go-imap/v2 v2.0.0-beta.8
 	github.com/emersion/go-message v0.18.2
 	github.com/kungfusheep/glyph v0.0.0-20260323093108-ce68c2bba572
-	github.com/kungfusheep/riffkey v0.0.0-20260216102013-df19649e3a0d
+	github.com/kungfusheep/riffkey v0.0.0-20260424163050-c13d19def76f
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/mattn/go-sqlite3 v1.14.37
 )

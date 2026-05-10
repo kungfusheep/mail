@@ -13,7 +13,7 @@ type OmniboxItem struct {
 	Label       string
 	Description string
 	Icon        string // optional icon/prefix
-	Display     string // pre-formatted display string for SelectionList
+	Display     string // pre-formatted display string
 	Action      func()
 }
 
@@ -25,9 +25,6 @@ type Omnibox struct {
 	Selected  int           // exported for reactive binding
 	Visible   bool          // exported for reactive binding
 	maxHeight int
-
-	// SelectionList reference for Up/Down navigation
-	List *glyph.SelectionList
 
 	// styling
 	width          int

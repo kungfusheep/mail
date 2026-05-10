@@ -228,18 +228,18 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 				HBox(Space(), VBox.Width(64)(
 					HBox.Gap(1).NodeRef(&toFieldRef)(
 						Text("TO").FG(&labelTo),
-						TextInput{Field: &fieldTo, FocusGroup: &fieldFocus, FocusIndex: 0,
-							Placeholder: "·····", PlaceholderStyle: Style{Attr: AttrDim}},
+						Input().Field(&fieldTo).FocusGroup(&fieldFocus, 0).
+							Placeholder("·····").PlaceholderStyle(Style{Attr: AttrDim}),
 					),
 					HBox.Gap(1).NodeRef(&ccFieldRef)(
 						Text("CC").FG(&labelCC),
-						TextInput{Field: &fieldCC, FocusGroup: &fieldFocus, FocusIndex: 1,
-							Placeholder: "·····", PlaceholderStyle: Style{Attr: AttrDim}},
+						Input().Field(&fieldCC).FocusGroup(&fieldFocus, 1).
+							Placeholder("·····").PlaceholderStyle(Style{Attr: AttrDim}),
 					),
 					HBox.Gap(1)(
 						Text("SUBJECT").FG(&labelSub),
-						TextInput{Field: &fieldSubject, FocusGroup: &fieldFocus, FocusIndex: 2,
-							Placeholder: "·····", PlaceholderStyle: Style{Attr: AttrDim}},
+						Input().Field(&fieldSubject).FocusGroup(&fieldFocus, 2).
+							Placeholder("·····").PlaceholderStyle(Style{Attr: AttrDim}),
 					),
 				), Space()),
 				SpaceH(1),

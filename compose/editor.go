@@ -180,7 +180,6 @@ type Editor struct {
 	browserVisible  bool
 	browserEntries  []BrowserEntry
 	browserSelected int
-	browserList     *glyph.SelectionList
 
 	// project index
 	projectIndex *ProjectIndex
@@ -283,7 +282,6 @@ func NewEditor(doc *Document, filename string) *Editor {
 	ed.rebuildCharacterHistory()
 	return ed
 }
-
 
 // =============================================================================
 // Exported Accessors
@@ -8019,4 +8017,3 @@ func extractWords(text string) []string {
 
 	return words
 }
-
