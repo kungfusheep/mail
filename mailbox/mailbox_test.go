@@ -821,9 +821,9 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	c := testCache(t)
 	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
-		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
-		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
-		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2", MessageID: "<m2@test>"}}},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3", MessageID: "<m3@test>"}}},
 	})
 
 	mb := New(c, "test@example.com")
@@ -849,6 +849,10 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 	if cmds[0].Params["source"] != "INBOX" {
 		t.Errorf("move source = %q, want INBOX", cmds[0].Params["source"])
 	}
+	archived, _ := c.GetThreads("[Google Mail]/All Mail", 25)
+	if len(archived) != 1 || archived[0].ID != "t2" {
+		t.Fatalf("archive folder threads = %v, want t2", archived)
+	}
 
 	// undo should restore the thread
 	undo()
@@ -856,8 +860,25 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 		t.Fatalf("after undo: rows = %d, want 3", mb.ThreadLen())
 	}
 	cmds, _ = c.PendingCommands()
-	if len(cmds) != 0 {
-		t.Errorf("after undo: pending commands = %d, want 0", len(cmds))
+	if len(cmds) != 2 {
+		t.Fatalf("after undo: pending commands = %d, want 2", len(cmds))
+	}
+	inverse := cmds[1]
+	if inverse.Action != "move" || inverse.TargetID != "m2" {
+		t.Errorf("undo command = %#v, want move m2", inverse)
+	}
+	if inverse.Params["folder"] != "INBOX" {
+		t.Errorf("undo folder = %q, want INBOX", inverse.Params["folder"])
+	}
+	if inverse.Params["source"] != "[Google Mail]/All Mail" {
+		t.Errorf("undo source = %q, want [Google Mail]/All Mail", inverse.Params["source"])
+	}
+	if inverse.Params["message_id"] != "<m2@test>" {
+		t.Errorf("undo message_id = %q, want <m2@test>", inverse.Params["message_id"])
+	}
+	archived, _ = c.GetThreads("[Google Mail]/All Mail", 25)
+	if len(archived) != 0 {
+		t.Fatalf("after undo: archive folder threads = %d, want 0", len(archived))
 	}
 }
 
@@ -866,7 +887,7 @@ func TestArchive_QueuesEveryMessageInThread(t *testing.T) {
 	c := testCache(t)
 	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
-		{ID: "m2", Subject: "grouped", Date: now, Messages: []provider.Message{{ID: "m1"}, {ID: "m2"}}},
+		{ID: "m2", Subject: "grouped", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}, {ID: "m2", MessageID: "<m2@test>"}}},
 	})
 
 	mb := New(c, "test@example.com")
@@ -892,6 +913,9 @@ func TestArchive_QueuesEveryMessageInThread(t *testing.T) {
 		}
 		if cmd.Params["source"] != "INBOX" {
 			t.Errorf("move source = %q, want INBOX", cmd.Params["source"])
+		}
+		if cmd.Params["message_id"] == "" {
+			t.Errorf("move message_id is empty for %s", cmd.TargetID)
 		}
 		got[cmd.TargetID] = true
 	}
@@ -959,16 +983,90 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 	}
 }
 
+func TestToggleStar_PreservesSelectedRow(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
+	})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.SetSelected(1)
+
+	undo, _ := mb.ToggleStar(1)
+
+	rows := *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after star toggle")
+	}
+	if !rows[1].Starred {
+		t.Fatal("expected selected row to show starred after toggle")
+	}
+
+	undo()
+	rows = *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after star undo")
+	}
+	if rows[1].Starred {
+		t.Fatal("expected selected row to show unstarred after undo")
+	}
+}
+
+func TestToggleRead_PreservesSelectedRow(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1", Read: true}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Unread: 1, Messages: []provider.Message{{ID: "m2", Read: false}}},
+	})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.SetSelected(1)
+
+	undo, _ := mb.ToggleRead(1)
+
+	rows := *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after read toggle")
+	}
+	if rows[1].Unread {
+		t.Fatal("expected selected row to show read after toggle")
+	}
+
+	undo()
+	rows = *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after read undo")
+	}
+	if !rows[1].Unread {
+		t.Fatal("expected selected row to show unread after undo")
+	}
+}
+
 func TestDelete_WithExpandedThread(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
 	c.PutFolders(testFolders)
 	c.ReplaceThreads("INBOX", []provider.Thread{
 		{ID: "t1", Subject: "has messages", Date: now, Messages: []provider.Message{
-			{ID: "m1", From: provider.Address{Email: "a@x.com"}, Date: now},
-			{ID: "m2", From: provider.Address{Email: "b@x.com"}, Date: now},
+			{ID: "m1", MessageID: "<m1@test>", From: provider.Address{Email: "a@x.com"}, Date: now},
+			{ID: "m2", MessageID: "<m2@test>", From: provider.Address{Email: "b@x.com"}, Date: now},
 		}},
-		{ID: "t2", Subject: "other", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+		{ID: "t2", Subject: "other", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m3", MessageID: "<m3@test>"}}},
 	})
 
 	mb := New(c, "test@example.com")
@@ -978,13 +1076,114 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 	mb.LoadThreads()
 	mb.BuildThreadDisplay()
 
-	mb.Delete(0)
+	undo, _ := mb.Delete(0)
 	rows := *mb.ThreadRows()
 	if len(rows) != 1 {
 		t.Fatalf("after delete: rows = %d, want 1", len(rows))
 	}
 	if rows[0].Label != "other" {
 		t.Errorf("remaining = %q, want 'other'", rows[0].Label)
+	}
+	trashed, _ := c.GetThreads("[Google Mail]/Bin", 25)
+	if len(trashed) != 1 || trashed[0].ID != "t1" {
+		t.Fatalf("trash folder threads = %v, want t1", trashed)
+	}
+
+	undo()
+	if mb.ThreadLen() != 2 {
+		t.Fatalf("after undo: rows = %d, want 2", mb.ThreadLen())
+	}
+	trashed, _ = c.GetThreads("[Google Mail]/Bin", 25)
+	if len(trashed) != 0 {
+		t.Fatalf("after undo: trash folder threads = %d, want 0", len(trashed))
+	}
+	cmds, _ := c.PendingCommands()
+	if len(cmds) != 4 {
+		t.Fatalf("after undo: pending commands = %d, want 4", len(cmds))
+	}
+	gotInverse := map[string]bool{}
+	for _, inverse := range cmds[2:] {
+		if inverse.Action != "move" {
+			t.Errorf("undo action = %q, want move", inverse.Action)
+		}
+		if inverse.Params["folder"] != "INBOX" {
+			t.Errorf("undo folder = %q, want INBOX", inverse.Params["folder"])
+		}
+		if inverse.Params["source"] != "[Google Mail]/Bin" {
+			t.Errorf("undo source = %q, want [Google Mail]/Bin", inverse.Params["source"])
+		}
+		gotInverse[inverse.TargetID] = true
+	}
+	for _, id := range []string{"m1", "m2"} {
+		if !gotInverse[id] {
+			t.Errorf("missing undo move for %s", id)
+		}
+	}
+}
+
+func TestDelete_MissingTrashReportsUnavailable(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "keep", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+	})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	undo, desc := mb.Delete(0)
+	if undo != nil {
+		t.Fatal("expected no undo when trash folder is unavailable")
+	}
+	if desc != "delete unavailable: no trash folder" {
+		t.Fatalf("desc = %q, want delete unavailable message", desc)
+	}
+	if mb.ThreadLen() != 1 {
+		t.Fatalf("rows after failed delete = %d, want 1", mb.ThreadLen())
+	}
+	cmds, _ := c.PendingCommands()
+	if len(cmds) != 0 {
+		t.Fatalf("pending commands after failed delete = %d, want 0", len(cmds))
+	}
+}
+
+func TestProcessPendingCommands_CollapsesImmediateMoveUndo(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "delete me", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}}},
+	})
+
+	mb := New(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	undo, _ := mb.Delete(0)
+	undo()
+
+	cmds, _ := c.PendingCommands()
+	if len(cmds) != 2 {
+		t.Fatalf("pending commands before compaction = %d, want 2", len(cmds))
+	}
+
+	mb.imap = nil
+	mb.ProcessPendingCommands()
+
+	cmds, _ = c.PendingCommands()
+	if len(cmds) != 0 {
+		t.Fatalf("pending commands after compaction = %d, want 0", len(cmds))
+	}
+	if mb.ThreadLen() != 1 {
+		t.Fatalf("rows after compacted undo = %d, want 1", mb.ThreadLen())
 	}
 }
 

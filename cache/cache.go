@@ -276,6 +276,20 @@ func (c *Cache) DeleteCommand(id string) error {
 	return err
 }
 
+func (c *Cache) DeleteCommands(ids ...string) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, id := range ids {
+		if _, err := tx.Exec("DELETE FROM commands WHERE id = ?", id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (c *Cache) ClearSyncedCommands() error {
 	_, err := c.db.Exec("DELETE FROM commands WHERE status = 'synced'")
 	return err

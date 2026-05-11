@@ -1086,20 +1086,20 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	dest := m.FolderIDByDisplayName("Archive")
 	if dest == "" {
 		log.Println("archive: no archive folder found")
-		return nil, ""
+		return nil, "archive unavailable: no archive folder"
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdIDs := m.queueMoveCommands(t, folder, dest)
+	m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
+	m.cache.AddThreadToLabel(t.ID, dest)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
-		for _, id := range cmdIDs {
-			m.cancelCommand(id)
-		}
 		m.cache.PutThread(thread)
+		m.cache.RemoveThreadFromLabel(thread.ID, dest)
 		m.cache.AddThreadToLabel(thread.ID, folder)
+		m.queueMoveCommands(&thread, dest, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
@@ -1113,20 +1113,20 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 	dest := m.FolderIDByDisplayName("Trash")
 	if dest == "" {
 		log.Println("delete: no trash folder found")
-		return nil, ""
+		return nil, "delete unavailable: no trash folder"
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	cmdIDs := m.queueMoveCommands(t, folder, dest)
+	m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
+	m.cache.AddThreadToLabel(t.ID, dest)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
 
 	return func() {
-		for _, id := range cmdIDs {
-			m.cancelCommand(id)
-		}
 		m.cache.PutThread(thread)
+		m.cache.RemoveThreadFromLabel(thread.ID, dest)
 		m.cache.AddThreadToLabel(thread.ID, folder)
+		m.queueMoveCommands(&thread, dest, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
@@ -1138,10 +1138,14 @@ func (m *Mailbox) queueMoveCommands(t *provider.Thread, source, dest string) []s
 		if msg.ID == "" {
 			continue
 		}
-		ids = append(ids, m.queueCommand("move", msg.ID, map[string]string{
+		params := map[string]string{
 			"folder": dest,
 			"source": source,
-		}))
+		}
+		if msg.MessageID != "" {
+			params["message_id"] = msg.MessageID
+		}
+		ids = append(ids, m.queueCommand("move", msg.ID, params))
 	}
 	if len(ids) == 0 && t.ID != "" {
 		ids = append(ids, m.queueCommand("move", t.ID, map[string]string{
@@ -1171,8 +1175,9 @@ func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
 	}
 	thread := *t
 	m.cache.PutThread(*t)
-	m.LoadThreads()
+	m.updateActiveFolderUnread()
 	m.BuildThreadDisplay()
+	m.SetSelected(sel)
 
 	return func() {
 		for _, id := range cmdIDs {
@@ -1180,10 +1185,12 @@ func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
 		}
 		for i := range thread.Messages {
 			thread.Messages[i].Starred = before[i]
+			t.Messages[i].Starred = before[i]
 		}
 		m.cache.PutThread(thread)
-		m.LoadThreads()
+		m.updateActiveFolderUnread()
 		m.BuildThreadDisplay()
+		m.SetSelected(sel)
 	}, "toggled star"
 }
 
@@ -1213,8 +1220,9 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 	}
 	thread := *t
 	m.cache.PutThread(*t)
-	m.LoadThreads()
+	m.updateActiveFolderUnread()
 	m.BuildThreadDisplay()
+	m.SetSelected(sel)
 
 	desc = "marked read"
 	if !markRead {
@@ -1225,12 +1233,15 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
+		t.Unread = beforeUnread
 		for i := range thread.Messages {
 			thread.Messages[i].Read = beforeRead[i]
+			t.Messages[i].Read = beforeRead[i]
 		}
 		m.cache.PutThread(thread)
-		m.LoadThreads()
+		m.updateActiveFolderUnread()
 		m.BuildThreadDisplay()
+		m.SetSelected(sel)
 	}, desc
 }
 
@@ -1318,11 +1329,15 @@ func draftToMessage(d cache.Draft) provider.Message {
 }
 
 func (m *Mailbox) ProcessPendingCommands() {
-	if m.cache == nil || m.imap == nil {
+	if m.cache == nil {
 		return
 	}
 	cmds, err := m.cache.PendingCommands()
 	if err != nil || len(cmds) == 0 {
+		return
+	}
+	cmds = m.compactMoveCommands(cmds)
+	if m.imap == nil || len(cmds) == 0 {
 		return
 	}
 	folder := m.ActiveFolderID()
@@ -1365,7 +1380,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 		case "move":
 			if f, ok := cmd.Params["folder"]; ok {
 				dest = f
-				cmdErr = m.imap.ApplyLabels([]string{cmd.TargetID}, []string{f}, []string{source})
+				cmdErr = m.imap.MoveMessage(source, f, cmd.TargetID, cmd.Params["message_id"])
 			}
 		case "sync_draft":
 			draftsFolder := m.FolderIDByDisplayName("Drafts")
@@ -1417,6 +1432,54 @@ func (m *Mailbox) ProcessPendingCommands() {
 		m.cache.LogWrite(cmd.Action, cmd.TargetID, folder, dest, result, errMsg)
 	}
 	m.cache.ClearSyncedCommands()
+}
+
+func (m *Mailbox) compactMoveCommands(cmds []cache.Command) []cache.Command {
+	type moveKey struct {
+		messageID string
+		targetID  string
+	}
+
+	alive := make([]bool, len(cmds))
+	for i := range alive {
+		alive[i] = true
+	}
+	open := make(map[moveKey]int)
+
+	for i, cmd := range cmds {
+		if cmd.Action != "move" {
+			continue
+		}
+		key := moveKey{
+			messageID: cmd.Params["message_id"],
+			targetID:  cmd.TargetID,
+		}
+		if key.messageID == "" {
+			key.targetID = cmd.TargetID
+		}
+
+		if prevIdx, ok := open[key]; ok && alive[prevIdx] {
+			prev := cmds[prevIdx]
+			if prev.Params["source"] == cmd.Params["folder"] && prev.Params["folder"] == cmd.Params["source"] {
+				alive[prevIdx] = false
+				alive[i] = false
+				if m.cache != nil {
+					m.cache.DeleteCommands(prev.ID, cmd.ID)
+				}
+				delete(open, key)
+				continue
+			}
+		}
+		open[key] = i
+	}
+
+	out := make([]cache.Command, 0, len(cmds))
+	for i, cmd := range cmds {
+		if alive[i] {
+			out = append(out, cmd)
+		}
+	}
+	return out
 }
 
 // canonical folder ordering

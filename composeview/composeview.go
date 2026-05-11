@@ -36,7 +36,10 @@ func cursorColor(ed *compose.Editor) Color {
 	}
 }
 
-func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.SMTP, db *cache.Cache, statusText *string, frame *int, tr *transition.Transition, palette theme.Theme) Controls {
+func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) Controls {
+	if notify == nil {
+		notify = func(string) {}
+	}
 	var to, cc, subject string
 	var replyMsg *provider.Message
 
@@ -164,7 +167,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 			showSending = false
 			if err != nil {
 				log.Printf("sendMessage: failed: %v", err)
-				*statusText = fmt.Sprintf("send failed: %v", err)
+				notify(fmt.Sprintf("send failed: %v", err))
 				app.RequestRender()
 				return
 			}
@@ -176,7 +179,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 				go mb.ProcessPendingCommands()
 			}
 			log.Printf("sendMessage: sent to %s (msgid=%s)", to, msg.MessageID)
-			*statusText = fmt.Sprintf("sent to %s", to)
+			notify(fmt.Sprintf("sent to %s", to))
 			composeActive = false
 			reset()
 			app.HideCursor()
@@ -620,7 +623,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 			}
 			d, found, err := db.GetLastDraft()
 			if err != nil || !found {
-				*statusText = "no drafts to resume"
+				notify("no drafts to resume")
 				app.RequestRender()
 				return
 			}
@@ -656,7 +659,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 			}
 			d, found, err := db.GetDraft(threadID)
 			if err != nil || !found {
-				*statusText = "draft not found"
+				notify("draft not found")
 				app.RequestRender()
 				return
 			}

@@ -246,9 +246,9 @@ func (im *IMAP) GetMessage(id string) (provider.Message, error) {
 		uidSet := imaplib.UIDSetNum(uid)
 		bodySection := &imaplib.FetchItemBodySection{Peek: true}
 		fetchOpts := &imaplib.FetchOptions{
-			Envelope: true,
-			Flags:    true,
-			UID:      true,
+			Envelope:    true,
+			Flags:       true,
+			UID:         true,
 			BodySection: []*imaplib.FetchItemBodySection{bodySection},
 		}
 
@@ -310,6 +310,60 @@ func (im *IMAP) ApplyLabels(messageIDs []string, add []string, remove []string) 
 		return struct{}{}, nil
 	})
 	return err
+}
+
+func (im *IMAP) MoveMessage(source, dest, uid, messageID string) error {
+	if dest == "" {
+		return fmt.Errorf("imap: move needs destination")
+	}
+	_, err := withRetry(im, func() (struct{}, error) {
+		if source != "" {
+			if _, err := im.client.Select(source, nil).Wait(); err != nil {
+				return struct{}{}, err
+			}
+		}
+		currentUID := uid
+		if messageID != "" {
+			found, err := im.uidForMessageID(messageID)
+			if err == nil && found != "" {
+				currentUID = found
+			}
+		}
+		if currentUID == "" {
+			return struct{}{}, fmt.Errorf("imap: move needs uid")
+		}
+		var parsed imaplib.UID
+		fmt.Sscanf(currentUID, "%d", &parsed)
+		if parsed == 0 {
+			return struct{}{}, fmt.Errorf("imap: invalid uid %q", currentUID)
+		}
+		uidSet := imaplib.UIDSetNum(parsed)
+		if _, err := im.client.Move(uidSet, dest).Wait(); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
+func (im *IMAP) uidForMessageID(messageID string) (string, error) {
+	data, err := im.client.UIDSearch(&imaplib.SearchCriteria{
+		Header: []imaplib.SearchCriteriaHeaderField{{
+			Key:   "Message-ID",
+			Value: messageID,
+		}},
+	}, nil).Wait()
+	if err != nil {
+		return "", err
+	}
+	uids := data.AllUIDs()
+	if len(uids) == 0 {
+		return "", nil
+	}
+	sort.Slice(uids, func(i, j int) bool {
+		return uids[i] > uids[j]
+	})
+	return fmt.Sprintf("%d", uids[0]), nil
 }
 
 func (im *IMAP) MarkRead(messageIDs []string, read bool) error {
@@ -409,7 +463,6 @@ func (im *IMAP) Close() error {
 
 // resolveReferences finds messages referenced by InReplyTo that aren't in the
 // current set. Searches All Mail for the missing messages and adds them.
-
 
 // threading — group messages into conversations using InReplyTo/MessageID
 

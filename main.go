@@ -5,6 +5,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -14,19 +15,24 @@ import (
 	"github.com/kungfusheep/mail/composeview"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/mailcommands"
 	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
+	"github.com/kungfusheep/mail/ui"
 	"github.com/kungfusheep/riffkey"
 )
 
-type mailCommand struct {
-	Label       string
-	Description string
-	Key         string
-	Section     string
-	Action      func()
+func undoMessage(desc string) string {
+	switch {
+	case strings.HasPrefix(desc, "deleted "):
+		return "restored " + strings.TrimPrefix(desc, "deleted ")
+	case strings.HasPrefix(desc, "archived "):
+		return "restored " + strings.TrimPrefix(desc, "archived ")
+	default:
+		return "undid " + desc
+	}
 }
 
 func main() {
@@ -42,8 +48,10 @@ func main() {
 	}
 	log.Println("starting mail")
 
+	themet := theme.Dark()
+
 	app := NewApp()
-	app.SetDefaultStyle(Style{FG: theme.Dark().FG, BG: theme.Dark().BG})
+	app.SetDefaultStyle(Style{FG: themet.FG, BG: themet.BG})
 
 	var db *cache.Cache
 	if cachePath := os.Getenv("MAIL_CACHE_PATH"); cachePath != "" {
@@ -95,9 +103,15 @@ func main() {
 	mb.SetSelected(0)
 	mb.LoadConversation(0, nil)
 
-	t := theme.Dark()
+	t := themet
 
 	// inbox view state
+	type undoItem struct {
+		run     func()
+		desc    string
+		message string
+	}
+
 	var (
 		folderSel        int
 		threadSel        int
@@ -105,9 +119,10 @@ func main() {
 		helpOpen         bool
 		helpRef          NodeRef
 		frame            int
-		statusText       = "Inbox"
+		folderTitle      = "Inbox"
 		searchQuery      string
 		threadUnreadText string
+		statusVisible    bool
 
 		// pane styles — active uses FG, inactive uses dim
 		folderStyle     = Style{FG: t.Dim}
@@ -118,8 +133,20 @@ func main() {
 		threadListStyle = Style{FG: t.FG}
 		pane            = 1
 
-		undoStack []func()
+		undoStack []undoItem
 	)
+
+	statusFeed := ui.NewFeed(time.Now)
+	updateStatusOverlay := func() {
+		statusFeed.Update()
+		items := statusFeed.Items()
+		statusVisible = len(*items) > 0
+	}
+	notify := func(text string) {
+		statusFeed.Push(text)
+		updateStatusOverlay()
+		app.RequestRender()
+	}
 
 	updateFocus := func() {
 		folderStyle = Style{FG: t.Dim}
@@ -222,7 +249,7 @@ func main() {
 	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := composeview.Setup(app, editor, mb, smtpClient, db, &statusText, &frame, composeTransition, t)
+	comp := composeview.Setup(app, editor, mb, smtpClient, db, notify, &frame, composeTransition, t)
 
 	var convView *ScrollViewC
 	var loadPreview func()
@@ -268,8 +295,16 @@ func main() {
 
 	pushUndo := func(undo func(), desc string) {
 		if undo != nil {
-			undoStack = append(undoStack, undo)
-			statusText = desc + " — u to undo"
+			undoStack = append(undoStack, undoItem{
+				run:     undo,
+				desc:    desc,
+				message: undoMessage(desc),
+			})
+			notify(desc + " — u to undo")
+			return
+		}
+		if desc != "" {
+			notify(desc)
 		}
 	}
 
@@ -302,7 +337,7 @@ func main() {
 		updateThreadHeader()
 		loadPreview()
 		undoStack = nil
-		statusText = mb.FolderName(folderSel)
+		folderTitle = mb.FolderName(folderSel)
 		if rt != nil {
 			rt.WatchActiveFolder()
 			rt.SyncActiveFolder()
@@ -319,8 +354,8 @@ func main() {
 		omniboxOpen    bool
 		omniboxEmpty   = true
 		omniboxMaxRows = 6
-		omniboxItems   []mailCommand
-		omniboxList    *FilterListC[mailCommand]
+		omniboxItems   []mailcommands.Command
+		omniboxList    *FilterListC[mailcommands.Command]
 	)
 
 	updateOmniboxLayout := func(width, height int) {
@@ -347,6 +382,7 @@ func main() {
 
 	size := app.Size()
 	updateOmniboxLayout(size.Width, size.Height)
+	updateStatusOverlay()
 
 	refreshOmniboxState := func() {
 		omniboxEmpty = omniboxList == nil || omniboxList.Filter().Len() == 0
@@ -360,6 +396,7 @@ func main() {
 
 	app.OnResize(func(width, height int) {
 		updateOmniboxLayout(width, height)
+		updateStatusOverlay()
 		if omniboxList != nil {
 			omniboxList.MaxVisible(omniboxMaxRows)
 		}
@@ -444,16 +481,16 @@ func main() {
 
 	threadAction := func(label string, fn func()) {
 		if mb.ThreadLen() == 0 {
-			statusText = label + ": no thread selected"
+			notify(label + ": no thread selected")
 			return
 		}
 		fn()
 	}
 
-	omniboxItems = []mailCommand{
-		{Label: "Compose New", Description: "start a fresh message", Key: "c", Section: "compose", Action: func() { comp.Open() }},
-		{Label: "Resume Draft", Description: "continue the latest saved draft", Key: "C", Section: "compose", Action: func() { comp.ResumeLast() }},
-		{Label: "Reply To Selected Thread", Description: "reply to the current conversation", Key: "r", Section: "compose", Action: func() {
+	omniboxItems = mailcommands.Build(mailcommands.Actions{
+		ComposeNew:  func() { comp.Open() },
+		ResumeDraft: func() { comp.ResumeLast() },
+		ReplySelected: func() {
 			threadAction("reply", func() {
 				if t := mb.SelectedThread(threadSel); t != nil {
 					if row := mb.ThreadRowAt(threadSel); row != nil && row.MsgIdx < 0 && mb.ActiveFolderCanonical() == "Drafts" {
@@ -464,14 +501,14 @@ func main() {
 					comp.SetupReply(*t)
 				}
 			})
-		}},
-		{Label: "Refresh Mail", Description: "process pending changes and sync this folder", Key: "sync", Section: "mail", Action: func() {
-			statusText = "syncing..."
+		},
+		RefreshMail: func() {
+			notify("syncing...")
 			if rt != nil {
 				rt.SyncActiveFolder()
 			}
-		}},
-		{Label: "Toggle Folders", Description: "show or hide grouped labels", Key: "enter", Section: "navigation", Action: func() {
+		},
+		ToggleFolders: func() {
 			labelsOpen = !labelsOpen
 			mb.BuildFolderDisplay(labelsOpen)
 			if folderSel >= mb.FolderLen() {
@@ -481,81 +518,70 @@ func main() {
 				folderSel = 0
 			}
 			updateThreadHeader()
-			statusText = "folders toggled"
-		}},
-		{Label: "Focus Folders", Description: "move focus to the folder pane", Key: "h", Section: "navigation", Action: func() {
+			notify("folders toggled")
+		},
+		FocusFolders: func() {
 			pane = 0
 			updateFocus()
-		}},
-		{Label: "Focus Threads", Description: "move focus to the thread list", Key: "tab", Section: "navigation", Action: func() {
+		},
+		FocusThreads: func() {
 			pane = 1
 			updateFocus()
-		}},
-		{Label: "Focus Preview", Description: "move focus to the message preview", Key: "l", Section: "navigation", Action: func() {
+		},
+		FocusPreview: func() {
 			pane = 2
 			updateFocus()
-		}},
-		{Label: "Search Mail", Description: "search cached messages", Key: "/", Section: "mail", Action: startSearch},
-		{Label: "Open Selected Thread", Description: "open, expand, or preview the selected row", Key: "enter", Section: "thread", Action: handleEnter},
-		{Label: "Archive Selected Thread", Description: "move the selected thread out of inbox", Key: "a", Section: "thread", Action: func() {
+		},
+		SearchMail:   startSearch,
+		OpenSelected: handleEnter,
+		ArchiveSelected: func() {
 			threadAction("archive", func() {
 				pushUndo(mb.Archive(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
 				loadPreview()
-				if rt != nil {
-					rt.FlushPending()
-				}
 			})
-		}},
-		{Label: "Delete Selected Thread", Description: "move the selected thread to trash", Key: "d", Section: "thread", Action: func() {
+		},
+		DeleteSelected: func() {
 			threadAction("delete", func() {
 				pushUndo(mb.Delete(threadSel))
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
 				loadPreview()
-				if rt != nil {
-					rt.FlushPending()
-				}
 			})
-		}},
-		{Label: "Toggle Star", Description: "star or unstar the selected thread", Key: "s", Section: "thread", Action: func() {
+		},
+		ToggleStar: func() {
 			threadAction("star", func() {
 				pushUndo(mb.ToggleStar(threadSel))
-				if rt != nil {
-					rt.FlushPending()
-				}
 			})
-		}},
-		{Label: "Toggle Read", Description: "mark selected thread read or unread", Key: "e", Section: "thread", Action: func() {
+		},
+		ToggleRead: func() {
 			threadAction("read", func() {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				if rt != nil {
-					rt.FlushPending()
-				}
 			})
-		}},
-		{Label: "Undo Last Thread Action", Description: "restore the latest archive/delete/read/star change", Key: "u", Section: "thread", Action: func() {
+		},
+		UndoLast: func() {
 			if len(undoStack) == 0 {
-				statusText = "nothing to undo"
+				notify("nothing to undo")
 				return
 			}
-			undoStack[len(undoStack)-1]()
+			item := undoStack[len(undoStack)-1]
+			item.run()
 			undoStack = undoStack[:len(undoStack)-1]
 			clampThreadSel()
 			mb.BuildFolderDisplay(labelsOpen)
 			updateThreadHeader()
 			loadPreview()
-			statusText = "undone"
-		}},
-		{Label: "Show Keyboard Help", Description: "open the in-app keybinding help", Key: "?", Section: "help", Action: func() { helpOpen = true }},
-		{Label: "Quit Mail", Description: "exit the app", Key: "q", Section: "system", Action: func() { app.Stop() }},
-	}
-	omniboxList = FilterList(&omniboxItems, func(cmd *mailCommand) string {
+			notify(item.message)
+		},
+		ShowKeyboardHelp: func() { helpOpen = true },
+		Quit:             func() { app.Stop() },
+	})
+	omniboxList = FilterList(&omniboxItems, func(cmd *mailcommands.Command) string {
 		return cmd.Label + " " + cmd.Description + " " + cmd.Key + " " + cmd.Section
 	}).
 		Placeholder("type a command").
@@ -563,7 +589,7 @@ func main() {
 		Marker("  ").
 		Style(Style{BG: t.BG}).
 		SelectedStyle(Style{FG: t.Bright, BG: t.SelBG}).
-		Render(func(cmd *mailCommand) Component {
+		Render(func(cmd *mailcommands.Command) Component {
 			return VBox.PaddingVH(1, 2)(
 				HBox(
 					Text(&cmd.Label).FG(t.Bright),
@@ -606,37 +632,18 @@ func main() {
 
 	app.View("main",
 		VBox.PaddingTRBL(0, 2, 0, 2)(
-			// --- wormhole family (active focus) ---
-			// If(&onWormhole).Then(ScreenEffect(ShimmerWormhole(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWStreaks).Then(ScreenEffect(ShimmerWormholeWarp(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWPulse).Then(ScreenEffect(ShimmerWormholeDrag(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWDepth).Then(ScreenEffect(ShimmerWormholeSurge(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWLayered).Then(ScreenEffect(ShimmerWormholeCore(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWShear).Then(ScreenEffect(ShimmerWormholeTurbulence(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onWLab).Then(ScreenEffect(ShimmerWormholeLab(t.BG, peakColor).Speed(&wormholeSpeed))),
-			// If(&onSilEcho).Then(ScreenEffect(ShimmerSilhouetteEcho(t.BG, peakColor))),
-			// transition: capture mailbox silhouette when idle (source) and
-			// fade the captured compose silhouette on return (target).
+
 			ScreenEffect(composeTransition.SourceEffect()),
 			ScreenEffect(composeTransition.TargetEffect()),
-			// --- other effects (paused during wormhole iteration) ---
-			// If(&onDrifting).Then(ScreenEffect(ShimmerDrifting(t.BG, peakColor))),
-			// If(&onTunnel).Then(ScreenEffect(ShimmerTunnel(t.BG, peakColor).Speed(&tunnelSpeed))),
-			// If(&onSweep).Then(ScreenEffect(ShimmerSweep(t.BG, peakColor))),
-			// If(&onPulse).Then(ScreenEffect(ShimmerPulse(t.BG, peakColor).Trigger(&pulseTrigger))),
-			// If(&onNoise).Then(ScreenEffect(ShimmerNoise(t.BG, peakColor))),
-			// If(&onRain).Then(ScreenEffect(ShimmerRain(t.BG, peakColor))),
-			// If(&onBreath).Then(ScreenEffect(ShimmerBreath(t.BG, peakColor))),
-			// If(&onSpiral).Then(ScreenEffect(ShimmerSpiral(t.BG, peakColor))),
-			// If(&onVignette).Then(ScreenEffect(ShimmerVignette(t.BG, peakColor))),
-			// If(&onScatter).Then(ScreenEffect(ShimmerScatter(t.BG, peakColor))),
+
 			HBox.Grow(1).Gap(4)(
 
+				// left folder nav
 				VBox.Grow(1).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&folderStyle)(
 					HBox(
 						Text("mail").FG(t.Bright).Bold(),
 						SpaceW(2),
-						Text(&statusText).FG(t.Subtle),
+						Text(&folderTitle).FG(t.Subtle),
 						SpaceW(2),
 						Text("·").FG(t.Muted),
 						SpaceW(2),
@@ -650,10 +657,11 @@ func main() {
 						Marker("● ").MarkerStyle(accentMarker),
 				),
 
+				// threads list
 				VBox.Grow(3).Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&threadStyle)(
 					HBox(
 						SpaceW(3),
-						Text(&statusText).FG(t.Accent).Bold(),
+						Text(&folderTitle).FG(t.Accent).Bold(),
 						SpaceW(1),
 						Text(&threadUnreadText).FG(t.Subtle),
 						Space(),
@@ -704,6 +712,7 @@ func main() {
 						}),
 				),
 
+				// preview window
 				VBox.Grow(3).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&previewStyle)(
 					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) {
 						convView = sv
@@ -728,6 +737,23 @@ func main() {
 					),
 				),
 			),
+
+			// notifications
+			If(&statusVisible).Then(
+				Overlay.BottomRight().Offset(-2, -1)(
+					VBox.Width(44).FitContent().Gap(1)(
+						ForEach(statusFeed.Items(), func(item *ui.Notification) Component {
+							return Text(&item.Text).
+								FG(t.Bright).
+								Opacity(&item.Opacity).
+								Width(44).
+								Style(Style{Align: AlignRight})
+						}),
+					),
+				),
+			),
+
+			// omnibox
 			If(&omniboxOpen).Then(
 				Overlay.Centered()(
 					VBox.
@@ -742,11 +768,11 @@ func main() {
 							Key("<Enter>", execOmnibox),
 							Key("<Esc>", closeOmnibox),
 							Key("<C-c>", closeOmnibox),
-							Key("j", func() { moveOmnibox(1) }),
+							Key("<C-j>", func() { moveOmnibox(1) }),
 							Key("<Down>", func() { moveOmnibox(1) }),
 							Key("<Tab>", func() { moveOmnibox(1) }),
 							Key("<C-n>", func() { moveOmnibox(1) }),
-							Key("k", func() { moveOmnibox(-1) }),
+							Key("<C-k>", func() { moveOmnibox(-1) }),
 							Key("<Up>", func() { moveOmnibox(-1) }),
 							Key("<S-Tab>", func() { moveOmnibox(-1) }),
 							Key("<C-p>", func() { moveOmnibox(-1) }),
@@ -854,24 +880,13 @@ func main() {
 		Handle(",", func() {
 			shimmerIdx = (shimmerIdx - 1 + len(variantNames)) % len(variantNames)
 			// applyVariant()
-			statusText = "shimmer: " + shimmerLabel
+			notify("shimmer: " + shimmerLabel)
 		}).
 		Handle(".", func() {
 			shimmerIdx = (shimmerIdx + 1) % len(variantNames)
 
-			statusText = "shimmer: " + shimmerLabel
+			notify("shimmer: " + shimmerLabel)
 		}).
-		// number keys set wormhole speed — 0 = stopped, 9 = hyperspeed
-		// Handle("0", func() { wormholeSpeed = 0; statusText = "speed: 0" }).
-		// Handle("1", func() { wormholeSpeed = 2; statusText = "speed: 2" }).
-		// Handle("2", func() { wormholeSpeed = 4; statusText = "speed: 4" }).
-		// Handle("3", func() { wormholeSpeed = 6; statusText = "speed: 6" }).
-		// Handle("4", func() { wormholeSpeed = 8; statusText = "speed: 8" }).
-		// Handle("5", func() { wormholeSpeed = 10; statusText = "speed: 10" }).
-		// Handle("6", func() { wormholeSpeed = 12; statusText = "speed: 12" }).
-		// Handle("7", func() { wormholeSpeed = 15; statusText = "speed: 15" }).
-		// Handle("8", func() { wormholeSpeed = 18; statusText = "speed: 18" }).
-		// Handle("9", func() { wormholeSpeed = 22; statusText = "speed: 22 (hyper)" }).
 		Handle("j", func() {
 			switch pane {
 			case 0:
@@ -983,9 +998,7 @@ func main() {
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				if rt != nil {
-					rt.FlushPending()
-				}
+				loadPreview()
 			}
 		}).
 		Handle("d", func() {
@@ -994,17 +1007,12 @@ func main() {
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				if rt != nil {
-					rt.FlushPending()
-				}
+				loadPreview()
 			}
 		}).
 		Handle("s", func() {
 			if pane == 1 {
 				pushUndo(mb.ToggleStar(threadSel))
-				if rt != nil {
-					rt.FlushPending()
-				}
 			}
 		}).
 		Handle("e", func() {
@@ -1012,23 +1020,21 @@ func main() {
 				pushUndo(mb.ToggleRead(threadSel))
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
-				if rt != nil {
-					rt.FlushPending()
-				}
 			}
 		}).
 		Handle("u", func() {
 			if pane == 1 && len(undoStack) > 0 {
-				undoStack[len(undoStack)-1]()
+				item := undoStack[len(undoStack)-1]
+				item.run()
 				undoStack = undoStack[:len(undoStack)-1]
 				clampThreadSel()
 				mb.BuildFolderDisplay(labelsOpen)
 				updateThreadHeader()
 				loadPreview()
 				if len(undoStack) > 0 {
-					statusText = fmt.Sprintf("%d undoable — u to undo", len(undoStack))
+					notify(fmt.Sprintf("%s — %d undoable", item.message, len(undoStack)))
 				} else {
-					statusText = "undone"
+					notify(item.message)
 				}
 			}
 		}).
@@ -1054,7 +1060,7 @@ func main() {
 			}
 			results, err := db.Search(q, 50)
 			if err != nil {
-				statusText = fmt.Sprintf("search: %v", err)
+				notify(fmt.Sprintf("search: %v", err))
 				return
 			}
 			mb.SetSearchResults(results)
@@ -1064,7 +1070,7 @@ func main() {
 			updateThreadHeader()
 			pane = 1
 			updateFocus()
-			statusText = fmt.Sprintf("search: %q (%d)", q, len(results))
+			notify(fmt.Sprintf("search: %q (%d)", q, len(results)))
 		}).
 		Handle("<Esc>", func() {
 			searchQuery = ""
@@ -1095,7 +1101,7 @@ func main() {
 		IMAP:    cfg,
 	}, mailruntime.Callbacks{
 		Status: func(text string) {
-			statusText = text
+			notify(text)
 		},
 		FoldersChanged: func() {
 			mb.BuildFolderDisplay(labelsOpen)
@@ -1122,6 +1128,7 @@ func main() {
 	go func() {
 		for range time.Tick(80 * time.Millisecond) {
 			frame++
+			updateStatusOverlay()
 			app.RequestRender()
 		}
 	}()

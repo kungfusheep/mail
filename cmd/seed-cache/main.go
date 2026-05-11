@@ -34,6 +34,8 @@ func seed(db *cache.Cache) error {
 		{ID: "INBOX", Name: "Inbox", Unread: 1, Total: 3},
 		{ID: "Sent", Name: "Sent", Total: 1},
 		{ID: "[Gmail]/Drafts", Name: "Drafts"},
+		{ID: "[Gmail]/Trash", Name: "Trash"},
+		{ID: "[Gmail]/All Mail", Name: "All Mail", Total: 3},
 	}
 	if err := db.PutFolders(folders); err != nil {
 		return err
