@@ -11,6 +11,7 @@ import (
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/composeview"
+	"github.com/kungfusheep/mail/helpdialog"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
 	"github.com/kungfusheep/mail/mailboxmodel"
@@ -140,12 +141,6 @@ func main() {
 
 	fade := Animate
 	accentMarker := Style{FG: t.Accent}
-
-	// kv backs the help modal's key→description rows; IIFEs in the template
-	// spread this into a ForEach for rendering.
-	type kv struct{ key, desc string }
-
-	// peakColor := Hex(0x242424)
 
 	app.View("main",
 		VBox.PaddingTRBL(0, 2, 0, 2)(
@@ -296,70 +291,7 @@ func main() {
 			// omnibox
 			omniBox.View(),
 
-			// help modal — ? toggles. Vignette subtly darkens the rest of
-			// the screen; the modal itself is dodged so it stays crisp.
-			If(&model.HelpOpen).Then(
-				Overlay.Centered()(
-					VBox.
-						Width(56).
-						Fill(t.BG).
-						PaddingVH(1, 2).
-						NodeRef(&model.HelpRef).
-						Opacity(
-							In(Animate(1.0)).Out(Animate(0)),
-						).
-						Gap(1)(
-						Text("keyboard").FG(t.Bright).Bold(),
-						HBox(
-							func() Component {
-								rows := []kv{
-									{"j / k", "up / down"},
-									{"h / l", "pane left / right"},
-									{"tab", "next pane"},
-									{"enter", "open"},
-									{"o", "expand thread"},
-									{"/", "search"},
-								}
-								return VBox.Grow(3)(
-									Text("navigate").FG(t.Subtle),
-									ForEach(&rows, func(r *kv) Component {
-										return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(8), Text(&r.desc).FG(t.Subtle))
-									}),
-								)
-							}(),
-							func() Component {
-								rows := []kv{
-									{"c", "compose"},
-									{"C", "resume draft"},
-									{"r", "reply"},
-									{"a", "archive"},
-									{"d", "delete"},
-									{"s", "star"},
-									{"e", "toggle read"},
-									{"u", "undo"},
-								}
-								return VBox.Grow(2)(
-									Text("actions").FG(t.Subtle),
-									ForEach(&rows, func(r *kv) Component {
-										return HBox.Gap(2)(Text(&r.key).FG(t.FG).Width(3), Text(&r.desc).FG(t.Subtle))
-									}),
-								)
-							}(),
-						),
-						ScreenEffect(
-							SEVignette().Strength(
-								In(
-									Animate.From(0)(0.55),
-								).Out(
-
-									Animate(0),
-								),
-							).Dodge(&model.HelpRef).Smooth(),
-							SEDropShadow().Focus(&model.HelpRef),
-						),
-					),
-				),
-			),
+			helpdialog.Mailbox(&model.HelpOpen, &model.HelpRef, t),
 			On(
 				Key("q", app.Stop),
 				Key("?", model.ToggleKeyboardHelp),
