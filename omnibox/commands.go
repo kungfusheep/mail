@@ -1,6 +1,6 @@
-package mailcommands
+package omnibox
 
-type Command struct {
+type command struct {
 	Label       string
 	Description string
 	Key         string
@@ -8,7 +8,7 @@ type Command struct {
 	Action      func()
 }
 
-type Actions struct {
+type commandActions struct {
 	ComposeNew       func()
 	ResumeDraft      func()
 	ReplySelected    func()
@@ -28,8 +28,8 @@ type Actions struct {
 	Quit             func()
 }
 
-func Build(actions Actions) []Command {
-	return []Command{
+func buildCommands(actions commandActions) []command {
+	return []command{
 		{Label: "Compose New", Description: "start a fresh message", Key: "c", Section: "compose", Action: actions.ComposeNew},
 		{Label: "Resume Draft", Description: "continue the latest saved draft", Key: "C", Section: "compose", Action: actions.ResumeDraft},
 		{Label: "Reply To Selected Thread", Description: "reply to the current conversation", Key: "r", Section: "compose", Action: actions.ReplySelected},

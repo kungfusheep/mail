@@ -14,7 +14,6 @@ import (
 	"github.com/kungfusheep/mail/helpdialog"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
-	"github.com/kungfusheep/mail/mailboxmodel"
 	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/omnibox"
 	"github.com/kungfusheep/mail/smtp"
@@ -67,7 +66,7 @@ func main() {
 		email = "me@example.test"
 	}
 
-	mb := mailbox.New(db, email)
+	mb := mailbox.NewState(db, email)
 	var smtpClient *smtp.SMTP
 	if !offline {
 		smtpClient = smtp.New(smtp.Config{
@@ -92,11 +91,11 @@ func main() {
 	mb.LoadConversation(0, nil)
 
 	t := themet
-	model := mailboxmodel.New(mailboxmodel.Config{
-		App:     app,
-		Cache:   db,
-		Mailbox: mb,
-		Theme:   t,
+	model := mailbox.NewUI(mailbox.UIConfig{
+		App:   app,
+		Cache: db,
+		State: mb,
+		Theme: t,
 	})
 
 	// continuous frame requests for time-based animation
@@ -163,7 +162,7 @@ func main() {
 						Style(fade(&model.FolderListStyle)).
 						SelectedStyle(fade(&model.FolderSelStyle)).
 						Marker("● ").MarkerStyle(accentMarker),
-					If(&model.Pane).Eq(mailboxmodel.FolderPane).Then(
+					If(&model.Pane).Eq(mailbox.FolderPane).Then(
 						On(
 							Key("j", model.FolderDown),
 							Key("k", model.FolderUp),
@@ -225,7 +224,7 @@ func main() {
 								),
 							)
 						}),
-					If(&model.Pane).Eq(mailboxmodel.ThreadPane).Then(
+					If(&model.Pane).Eq(mailbox.ThreadPane).Then(
 						On(
 							Key("j", model.ThreadDown),
 							Key("k", model.ThreadUp),
@@ -264,7 +263,7 @@ func main() {
 							)
 						}),
 					),
-					If(&model.Pane).Eq(mailboxmodel.PreviewPane).Then(
+					If(&model.Pane).Eq(mailbox.PreviewPane).Then(
 						On(
 							Key("j", model.PreviewDown),
 							Key("k", model.PreviewUp),
@@ -336,7 +335,7 @@ func main() {
 		ThreadsChanged: model.ThreadsChanged,
 		Render:         app.RequestRender,
 	})
-	model.SetRuntime(rt)
+	model.SetRuntime(rt.WatchActiveFolder, rt.SyncActiveFolder)
 	rt.Start()
 	defer rt.Close()
 

@@ -15,7 +15,7 @@ import (
 	"github.com/kungfusheep/mail/provider"
 )
 
-type Mailbox struct {
+type State struct {
 	cache *cache.Cache
 	imap  *imap.IMAP
 	email string
@@ -51,16 +51,16 @@ type Mailbox struct {
 }
 
 // read-only pointers for glyph view binding
-func (m *Mailbox) FolderNames() *[]string                       { return &m.folderNames }
-func (m *Mailbox) ThreadRows() *[]ThreadRow                     { return &m.threadRows }
-func (m *Mailbox) PreviewLines() *[]string                      { return &m.previewLines }
-func (m *Mailbox) CanonEnd() int                                { return m.canonEnd }
-func (m *Mailbox) FolderLen() int                               { return len(m.folderNames) }
-func (m *Mailbox) ThreadLen() int                               { return len(m.threadRows) }
-func (m *Mailbox) PreviewText() *string                         { return &m.previewText }
-func (m *Mailbox) ConversationMessages() *[]ConversationMessage { return &m.conversation }
+func (m *State) FolderNames() *[]string                       { return &m.folderNames }
+func (m *State) ThreadRows() *[]ThreadRow                     { return &m.threadRows }
+func (m *State) PreviewLines() *[]string                      { return &m.previewLines }
+func (m *State) CanonEnd() int                                { return m.canonEnd }
+func (m *State) FolderLen() int                               { return len(m.folderNames) }
+func (m *State) ThreadLen() int                               { return len(m.threadRows) }
+func (m *State) PreviewText() *string                         { return &m.previewText }
+func (m *State) ConversationMessages() *[]ConversationMessage { return &m.conversation }
 
-func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
+func (m *State) ThreadRowAt(sel int) *ThreadRow {
 	if sel >= 0 && sel < len(m.threadRows) {
 		return &m.threadRows[sel]
 	}
@@ -68,22 +68,22 @@ func (m *Mailbox) ThreadRowAt(sel int) *ThreadRow {
 }
 
 // SetSearchResults replaces threads with search results from cache
-func (m *Mailbox) SetSearchResults(results []provider.Thread) {
+func (m *State) SetSearchResults(results []provider.Thread) {
 	m.threads = results
 	m.BuildThreadDisplay()
 }
 
-func New(c *cache.Cache, email string) *Mailbox {
-	return &Mailbox{cache: c, email: email}
+func NewState(c *cache.Cache, email string) *State {
+	return &State{cache: c, email: email}
 }
 
-func (m *Mailbox) SetIMAP(imapClient *imap.IMAP) {
+func (m *State) SetIMAP(imapClient *imap.IMAP) {
 	m.imap = imapClient
 }
 
 // folders
 
-func (m *Mailbox) LoadFolders() {
+func (m *State) LoadFolders() {
 	if m.cache == nil {
 		return
 	}
@@ -93,7 +93,7 @@ func (m *Mailbox) LoadFolders() {
 	}
 }
 
-func (m *Mailbox) SyncFolders() error {
+func (m *State) SyncFolders() error {
 	if m.imap == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -115,7 +115,7 @@ func (m *Mailbox) SyncFolders() error {
 // it's rebuilt each time BuildFolderDisplay is called, without mutating the source folders.
 var displayFolders []provider.Folder
 
-func (m *Mailbox) BuildFolderDisplay(labelsOpen bool) {
+func (m *State) BuildFolderDisplay(labelsOpen bool) {
 	m.folderNames = nil
 	displayFolders = nil
 
@@ -188,27 +188,27 @@ func (m *Mailbox) BuildFolderDisplay(labelsOpen bool) {
 	}
 }
 
-func (m *Mailbox) displayFolder(idx int) *provider.Folder {
+func (m *State) displayFolder(idx int) *provider.Folder {
 	if idx < len(displayFolders) {
 		return &displayFolders[idx]
 	}
 	return nil
 }
 
-func (m *Mailbox) SelectFolder(idx int) {
+func (m *State) SelectFolder(idx int) {
 	if idx < len(displayFolders) {
 		m.active = idx
 	}
 }
 
-func (m *Mailbox) ActiveFolderID() string {
+func (m *State) ActiveFolderID() string {
 	if m.active < len(displayFolders) {
 		return displayFolders[m.active].ID
 	}
 	return ""
 }
 
-func (m *Mailbox) ActiveFolderUnread() int {
+func (m *State) ActiveFolderUnread() int {
 	id := m.ActiveFolderID()
 	if id == "" {
 		return 0
@@ -228,7 +228,7 @@ func (m *Mailbox) ActiveFolderUnread() int {
 // folder (e.g. "Inbox", "Drafts", "Trash") or "" if the folder isn't one
 // of the well-known system folders. Callers use this to special-case
 // behaviour by folder kind, without coupling to raw IMAP folder IDs.
-func (m *Mailbox) ActiveFolderCanonical() string {
+func (m *State) ActiveFolderCanonical() string {
 	return canonicalDisplayName(m.ActiveFolderID())
 }
 
@@ -241,7 +241,7 @@ func (m *Mailbox) ActiveFolderCanonical() string {
 //
 // Returned func unsubscribes. Callers hold onto it to swap watchers
 // when the active folder changes.
-func (m *Mailbox) Watch(label string, onRefresh func()) func() {
+func (m *State) Watch(label string, onRefresh func()) func() {
 	if m.cache == nil || label == "" {
 		return func() {}
 	}
@@ -258,11 +258,11 @@ func (m *Mailbox) Watch(label string, onRefresh func()) func() {
 	return unsub
 }
 
-func (m *Mailbox) FolderCount() int {
+func (m *State) FolderCount() int {
 	return len(displayFolders)
 }
 
-func (m *Mailbox) FolderName(idx int) string {
+func (m *State) FolderName(idx int) string {
 	if idx < len(displayFolders) {
 		return displayFolders[idx].Name
 	}
@@ -271,7 +271,7 @@ func (m *Mailbox) FolderName(idx int) string {
 
 // threads
 
-func (m *Mailbox) LoadThreads() {
+func (m *State) LoadThreads() {
 	if m.cache == nil || m.ActiveFolderID() == "" {
 		return
 	}
@@ -299,7 +299,7 @@ func (m *Mailbox) LoadThreads() {
 	m.updateActiveFolderUnread()
 }
 
-func (m *Mailbox) updateActiveFolderUnread() {
+func (m *State) updateActiveFolderUnread() {
 	id := m.ActiveFolderID()
 	if id == "" {
 		return
@@ -361,7 +361,7 @@ func snippet(body string) string {
 	return body[:max]
 }
 
-func (m *Mailbox) SyncSent() {
+func (m *State) SyncSent() {
 	if m.imap == nil || m.cache == nil {
 		return
 	}
@@ -390,7 +390,7 @@ func (m *Mailbox) SyncSent() {
 	}
 }
 
-func (m *Mailbox) SyncThreads() error {
+func (m *State) SyncThreads() error {
 	if m.imap == nil {
 		return fmt.Errorf("not connected")
 	}
@@ -418,7 +418,7 @@ func (m *Mailbox) SyncThreads() error {
 // switched folders — a Starred fetch landing while we're on Drafts must
 // go through the threads table, not be fed to reconcileDrafts which
 // would adopt every message as a fake "server draft".
-func (m *Mailbox) applySyncResult(folderID string, threads []provider.Thread) {
+func (m *State) applySyncResult(folderID string, threads []provider.Thread) {
 	if m.cache == nil || folderID == "" {
 		return
 	}
@@ -445,7 +445,7 @@ func (m *Mailbox) applySyncResult(folderID string, threads []provider.Thread) {
 //
 // This runs inside SyncThreads on the Drafts folder and replaces the
 // previous ReplaceThreads path for that folder.
-func (m *Mailbox) reconcileDrafts(serverThreads []provider.Thread) {
+func (m *State) reconcileDrafts(serverThreads []provider.Thread) {
 	serverUIDs := make(map[string]provider.Message)
 	for _, t := range serverThreads {
 		for _, msg := range t.Messages {
@@ -541,7 +541,7 @@ func addrsToString(addrs []provider.Address) string {
 
 // preserveCachedBodies copies previously-fetched message bodies from the
 // cache onto fresh threads so they aren't lost on re-sync.
-func (m *Mailbox) preserveCachedBodies(folder string, threads []provider.Thread) {
+func (m *State) preserveCachedBodies(folder string, threads []provider.Thread) {
 	old, err := m.cache.GetThreads(folder, 100)
 	if err != nil || len(old) == 0 {
 		return
@@ -571,7 +571,7 @@ func (m *Mailbox) preserveCachedBodies(folder string, threads []provider.Thread)
 	}
 }
 
-func (m *Mailbox) mergeWithSentMessages(threads []provider.Thread) []provider.Thread {
+func (m *State) mergeWithSentMessages(threads []provider.Thread) []provider.Thread {
 	sent, err := m.cache.GetSentMessages(50)
 	if err != nil || len(sent) == 0 {
 		return threads
@@ -644,7 +644,7 @@ func (m *Mailbox) mergeWithSentMessages(threads []provider.Thread) []provider.Th
 	return threads
 }
 
-func (m *Mailbox) BuildThreadDisplay() {
+func (m *State) BuildThreadDisplay() {
 	m.displayMu.Lock()
 	defer m.displayMu.Unlock()
 	m.threadRows = nil
@@ -703,7 +703,7 @@ func (m *Mailbox) BuildThreadDisplay() {
 	}
 }
 
-func (m *Mailbox) ToggleThread(sel int) {
+func (m *State) ToggleThread(sel int) {
 	if sel < 0 || sel >= len(m.threadRows) {
 		return
 	}
@@ -752,7 +752,7 @@ func (m *Mailbox) ToggleThread(sel int) {
 	}
 }
 
-func (m *Mailbox) SelectedMessage(sel int) *provider.Message {
+func (m *State) SelectedMessage(sel int) *provider.Message {
 	if sel < 0 || sel >= len(m.threadRows) {
 		return nil
 	}
@@ -767,7 +767,7 @@ func (m *Mailbox) SelectedMessage(sel int) *provider.Message {
 	return nil
 }
 
-func (m *Mailbox) SelectedThread(sel int) *provider.Thread {
+func (m *State) SelectedThread(sel int) *provider.Thread {
 	if sel < 0 || sel >= len(m.threadRows) {
 		return nil
 	}
@@ -778,7 +778,7 @@ func (m *Mailbox) SelectedThread(sel int) *provider.Thread {
 	return nil
 }
 
-func (m *Mailbox) LastMessage(sel int) *provider.Message {
+func (m *State) LastMessage(sel int) *provider.Message {
 	t := m.SelectedThread(sel)
 	if t == nil || len(t.Messages) == 0 {
 		return nil
@@ -799,7 +799,7 @@ func (m *Mailbox) LastMessage(sel int) *provider.Message {
 // Only the epoch bump and the final slice swap are under the mutex. The
 // convEpoch counter lets late-returning async fetch goroutines notice
 // their render was superseded and skip the writeback.
-func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
+func (m *State) LoadConversation(sel int, onUpdate func()) {
 	t := m.SelectedThread(sel)
 
 	// Claim an epoch up front so any later-returning async goroutine
@@ -927,7 +927,7 @@ func (m *Mailbox) LoadConversation(sel int, onUpdate func()) {
 	}
 }
 
-func (m *Mailbox) resolveCachedBody(msg provider.Message) provider.Message {
+func (m *State) resolveCachedBody(msg provider.Message) provider.Message {
 	if m.cache == nil || msg.MessageID == "" {
 		return msg
 	}
@@ -946,7 +946,7 @@ func (m *Mailbox) resolveCachedBody(msg provider.Message) provider.Message {
 }
 
 // cacheMessageBody writes a fetched body back to the thread in memory and cache.
-func (m *Mailbox) cacheMessageBody(msg provider.Message) {
+func (m *State) cacheMessageBody(msg provider.Message) {
 	for i := range m.threads {
 		for j := range m.threads[i].Messages {
 			if m.threads[i].Messages[j].ID == msg.ID {
@@ -961,7 +961,7 @@ func (m *Mailbox) cacheMessageBody(msg provider.Message) {
 	}
 }
 
-func (m *Mailbox) renderBody(msg provider.Message) string {
+func (m *State) renderBody(msg provider.Message) string {
 	return bodyFromSegments(m.renderSegments(msg))
 }
 
@@ -1010,7 +1010,7 @@ func segmentStyle(kind preview.SegmentKind) glyph.Style {
 	}
 }
 
-func (m *Mailbox) renderSegments(msg provider.Message) []preview.Segment {
+func (m *State) renderSegments(msg provider.Message) []preview.Segment {
 	body := msg.TextBody
 	if msg.HTMLBody != "" {
 		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, 72)
@@ -1021,7 +1021,7 @@ func (m *Mailbox) renderSegments(msg provider.Message) []preview.Segment {
 	return preview.SegmentText(strings.TrimSpace(body))
 }
 
-func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
+func (m *State) LoadPreview(msg provider.Message, width int) {
 	if msg.TextBody == "" && msg.HTMLBody == "" {
 		// check cache for sent message body first
 		if m.cache != nil && msg.MessageID != "" {
@@ -1078,7 +1078,7 @@ func (m *Mailbox) LoadPreview(msg provider.Message, width int) {
 
 // actions — each returns an undo closure + description.
 
-func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
+func (m *State) Archive(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil {
 		return nil, ""
@@ -1105,7 +1105,7 @@ func (m *Mailbox) Archive(sel int) (undo func(), desc string) {
 	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
 }
 
-func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
+func (m *State) Delete(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil {
 		return nil, ""
@@ -1132,7 +1132,7 @@ func (m *Mailbox) Delete(sel int) (undo func(), desc string) {
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
 }
 
-func (m *Mailbox) queueMoveCommands(t *provider.Thread, source, dest string) []string {
+func (m *State) queueMoveCommands(t *provider.Thread, source, dest string) []string {
 	var ids []string
 	for _, msg := range t.Messages {
 		if msg.ID == "" {
@@ -1156,7 +1156,7 @@ func (m *Mailbox) queueMoveCommands(t *provider.Thread, source, dest string) []s
 	return ids
 }
 
-func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
+func (m *State) ToggleStar(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil {
 		return nil, ""
@@ -1194,7 +1194,7 @@ func (m *Mailbox) ToggleStar(sel int) (undo func(), desc string) {
 	}, "toggled star"
 }
 
-func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
+func (m *State) ToggleRead(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil {
 		return nil, ""
@@ -1245,7 +1245,7 @@ func (m *Mailbox) ToggleRead(sel int) (undo func(), desc string) {
 	}, desc
 }
 
-func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
+func (m *State) MarkRead(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil || t.Unread == 0 {
 		return nil, ""
@@ -1281,7 +1281,7 @@ func (m *Mailbox) MarkRead(sel int) (undo func(), desc string) {
 	}, "marked read"
 }
 
-func (m *Mailbox) queueCommand(action, targetID string, params map[string]string) string {
+func (m *State) queueCommand(action, targetID string, params map[string]string) string {
 	id := fmt.Sprintf("%s-%s-%d", action, targetID, time.Now().UnixNano())
 	if m.cache == nil {
 		return id
@@ -1306,7 +1306,7 @@ func (m *Mailbox) queueCommand(action, targetID string, params map[string]string
 	return id
 }
 
-func (m *Mailbox) cancelCommand(id string) {
+func (m *State) cancelCommand(id string) {
 	if m.cache != nil {
 		m.cache.DeleteCommand(id)
 	}
@@ -1328,7 +1328,7 @@ func draftToMessage(d cache.Draft) provider.Message {
 	}
 }
 
-func (m *Mailbox) ProcessPendingCommands() {
+func (m *State) ProcessPendingCommands() {
 	if m.cache == nil {
 		return
 	}
@@ -1434,7 +1434,7 @@ func (m *Mailbox) ProcessPendingCommands() {
 	m.cache.ClearSyncedCommands()
 }
 
-func (m *Mailbox) compactMoveCommands(cmds []cache.Command) []cache.Command {
+func (m *State) compactMoveCommands(cmds []cache.Command) []cache.Command {
 	type moveKey struct {
 		messageID string
 		targetID  string
@@ -1540,7 +1540,7 @@ func canonicalRank(id string) int {
 // accounts have both "[Gmail]/Drafts" and "[Google Mail]/Drafts" — so we
 // pick the one with the most messages, matching BuildFolderDisplay's
 // dedup rule. Ties fall to the first one encountered.
-func (m *Mailbox) FolderIDByDisplayName(display string) string {
+func (m *State) FolderIDByDisplayName(display string) string {
 	var bestID string
 	bestTotal := -1
 	for _, f := range m.folders {
@@ -1652,7 +1652,7 @@ type ThreadRow struct {
 	Grouped    bool
 }
 
-func (m *Mailbox) SetSelected(sel int) {
+func (m *State) SetSelected(sel int) {
 	for i := range m.threadRows {
 		m.threadRows[i].Selected = i == sel
 	}

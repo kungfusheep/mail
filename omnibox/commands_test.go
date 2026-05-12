@@ -1,11 +1,11 @@
-package mailcommands
+package omnibox
 
 import "testing"
 
 func TestBuildKeepsOmniboxCatalogueOrder(t *testing.T) {
-	commands := Build(Actions{})
+	commands := buildCommands(commandActions{})
 
-	want := []Command{
+	want := []command{
 		{Label: "Compose New", Key: "c", Section: "compose"},
 		{Label: "Resume Draft", Key: "C", Section: "compose"},
 		{Label: "Reply To Selected Thread", Key: "r", Section: "compose"},
@@ -47,7 +47,7 @@ func TestBuildKeepsOmniboxCatalogueOrder(t *testing.T) {
 
 func TestBuildWiresActions(t *testing.T) {
 	called := false
-	commands := Build(Actions{
+	commands := buildCommands(commandActions{
 		ComposeNew: func() {
 			called = true
 		},

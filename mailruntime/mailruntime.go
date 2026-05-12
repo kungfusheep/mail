@@ -25,7 +25,7 @@ type Callbacks struct {
 
 type Runtime struct {
 	db *cache.Cache
-	mb *mailbox.Mailbox
+	mb *mailbox.State
 
 	cfg Config
 	cb  Callbacks
@@ -35,7 +35,7 @@ type Runtime struct {
 	labelUnsub func()
 }
 
-func New(db *cache.Cache, mb *mailbox.Mailbox, cfg Config, cb Callbacks) *Runtime {
+func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime {
 	return &Runtime{
 		db:  db,
 		mb:  mb,

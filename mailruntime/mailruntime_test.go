@@ -20,7 +20,7 @@ func TestRuntimeOfflineSyncRefreshesCacheProjection(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	mb := mailbox.New(db, "me@example.test")
+	mb := mailbox.NewState(db, "me@example.test")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.LoadThreads()

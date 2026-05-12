@@ -17,13 +17,6 @@ import (
 	"github.com/kungfusheep/riffkey"
 )
 
-type Controls struct {
-	Open        func()
-	SetupReply  func(provider.Thread)
-	ResumeLast  func()
-	ResumeDraft func(threadID string)
-}
-
 func cursorColor(ed *compose.Editor) Color {
 	t := ed.Theme()
 	switch ed.Mode() {
@@ -36,7 +29,7 @@ func cursorColor(ed *compose.Editor) Color {
 	}
 }
 
-func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) Controls {
+func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) mailbox.ComposeControls {
 	if notify == nil {
 		notify = func(string) {}
 	}
@@ -569,7 +562,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.Mailbox, smtpClient *smtp.S
 		})
 	}
 
-	return Controls{
+	return mailbox.ComposeControls{
 		Open: func() {
 			reset()
 			id, err := cache.NewDraftID()

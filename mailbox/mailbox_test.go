@@ -39,7 +39,7 @@ var testFolders = []provider.Folder{
 // primitives.
 type draftsHarness struct {
 	cache   *cache.Cache
-	mb      *Mailbox
+	mb      *State
 	refresh chan struct{}
 	unsub   func()
 }
@@ -53,7 +53,7 @@ func newDraftsHarness(t *testing.T) *draftsHarness {
 	})
 	c.SetDraftsLabel("[Gmail]/Drafts")
 
-	mb := New(c, "me@example.com")
+	mb := NewState(c, "me@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	for i := 0; i < mb.FolderCount(); i++ {
@@ -288,7 +288,7 @@ func TestLoadThreads_DraftsFolderProjectsFromDraftsTable(t *testing.T) {
 	// and a fresh draft in the drafts table — what should show through
 	_ = c.PutDraft(cache.Draft{ThreadID: "draft-fresh", Subject: "fresh", Body: "fresh body"})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	// Drafts is index 2 in canonical ordering (Inbox, Sent, Drafts, ...)
@@ -376,7 +376,7 @@ func TestDraftsFolder_AdoptionSurfacesInUI(t *testing.T) {
 	})
 	c.SetDraftsLabel("[Gmail]/Drafts")
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	for i := 0; i < mb.FolderCount(); i++ {
@@ -450,7 +450,7 @@ func TestDraftsFolder_EditThenExit_ListShowsNewContent(t *testing.T) {
 	// with a server-side draft already adopted)
 	_ = c.PutDraft(cache.Draft{ThreadID: "draft-abc", Subject: "hello", Body: "first pass"})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	for i := 0; i < mb.FolderCount(); i++ {
@@ -502,7 +502,7 @@ func TestLoadThreads_DraftsFolderReflectsLatestEdit(t *testing.T) {
 	c.PutFolders([]provider.Folder{{ID: "[Gmail]/Drafts", Name: "Drafts"}})
 	_ = c.PutDraft(cache.Draft{ThreadID: "draft-x", Subject: "s", Body: "first pass"})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -523,14 +523,14 @@ func TestLoadThreads_DraftsFolderReflectsLatestEdit(t *testing.T) {
 	}
 }
 
-func testMailbox(t *testing.T, folders []provider.Folder, threads []provider.Thread) *Mailbox {
+func testState(t *testing.T, folders []provider.Folder, threads []provider.Thread) *State {
 	t.Helper()
 	c := testCache(t)
 	c.PutFolders(folders)
 	if len(threads) > 0 && len(folders) > 0 {
 		c.ReplaceThreads(folders[0].ID, threads)
 	}
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	if len(folders) > 0 {
@@ -544,7 +544,7 @@ func testMailbox(t *testing.T, folders []provider.Folder, threads []provider.Thr
 // folder display tests
 
 func TestBuildFolderDisplay_CanonicalOrder(t *testing.T) {
-	mb := testMailbox(t, []provider.Folder{
+	mb := testState(t, []provider.Folder{
 		{ID: "[Gmail]/Trash", Name: "Trash"},
 		{ID: "INBOX", Name: "INBOX", Unread: 3},
 		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail"},
@@ -563,7 +563,7 @@ func TestBuildFolderDisplay_CanonicalOrder(t *testing.T) {
 }
 
 func TestBuildFolderDisplay_GoogleMailPrefix(t *testing.T) {
-	mb := testMailbox(t, []provider.Folder{
+	mb := testState(t, []provider.Folder{
 		{ID: "INBOX", Name: "INBOX"},
 		{ID: "[Google Mail]/Sent Mail", Name: "Sent Mail", Total: 3736},
 		{ID: "[Google Mail]/Bin", Name: "Bin", Unread: 50, Total: 293},
@@ -586,7 +586,7 @@ func TestBuildFolderDisplay_GoogleMailPrefix(t *testing.T) {
 }
 
 func TestBuildFolderDisplay_DedupPreferData(t *testing.T) {
-	mb := testMailbox(t, []provider.Folder{
+	mb := testState(t, []provider.Folder{
 		{ID: "INBOX", Name: "INBOX"},
 		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail", Total: 0},
 		{ID: "[Google Mail]/Sent Mail", Name: "Sent Mail", Total: 3736},
@@ -611,7 +611,7 @@ func TestBuildFolderDisplay_FiltersSystemFolders(t *testing.T) {
 		{ID: "[Google Mail]", Name: "[Google Mail]"},
 		{ID: "MyLabel", Name: "MyLabel"},
 	})
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(true)
 
@@ -634,7 +634,7 @@ func TestBuildFolderDisplay_LabelsToggle(t *testing.T) {
 		{ID: "MyLabel", Name: "MyLabel"},
 		{ID: "Work", Name: "Work"},
 	})
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 
 	mb.BuildFolderDisplay(false)
@@ -657,7 +657,7 @@ func TestBuildFolderDisplay_RepeatedCallsPreserveLabels(t *testing.T) {
 		{ID: "INBOX", Name: "INBOX"},
 		{ID: "MyLabel", Name: "MyLabel"},
 	})
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 
 	mb.BuildFolderDisplay(true)
@@ -675,7 +675,7 @@ func TestBuildFolderDisplay_RepeatedCallsPreserveLabels(t *testing.T) {
 }
 
 func TestActiveFolderID_AfterBuildDisplay(t *testing.T) {
-	mb := testMailbox(t, []provider.Folder{
+	mb := testState(t, []provider.Folder{
 		{ID: "INBOX", Name: "INBOX"},
 		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail"},
 		{ID: "MyLabel", Name: "MyLabel"},
@@ -694,7 +694,7 @@ func TestActiveFolderID_AfterBuildDisplay(t *testing.T) {
 // cache round-trip tests
 
 func TestCacheRoundTrip_Folders(t *testing.T) {
-	mb := testMailbox(t, []provider.Folder{
+	mb := testState(t, []provider.Folder{
 		{ID: "INBOX", Name: "INBOX", Unread: 5, Total: 100},
 		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail"},
 	}, nil)
@@ -710,7 +710,7 @@ func TestCacheRoundTrip_Folders(t *testing.T) {
 
 func TestCacheRoundTrip_Threads(t *testing.T) {
 	now := time.Now()
-	mb := testMailbox(t,
+	mb := testState(t,
 		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
 		[]provider.Thread{
 			{ID: "t1", Subject: "older", Date: now.Add(-2 * time.Hour)},
@@ -729,7 +729,7 @@ func TestCacheRoundTrip_Threads(t *testing.T) {
 
 func TestBuildThreadDisplay_DateGroups(t *testing.T) {
 	now := time.Now()
-	mb := testMailbox(t,
+	mb := testState(t,
 		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
 		[]provider.Thread{
 			{ID: "today", Subject: "today", Date: now},
@@ -759,7 +759,7 @@ func TestBuildThreadDisplay_DateGroups(t *testing.T) {
 
 func TestToggleThread_ExpandCollapse(t *testing.T) {
 	now := time.Now()
-	mb := testMailbox(t,
+	mb := testState(t,
 		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
 		[]provider.Thread{
 			{ID: "t1", Subject: "thread one", Date: now, Messages: []provider.Message{
@@ -789,7 +789,7 @@ func TestToggleThread_ExpandCollapse(t *testing.T) {
 
 func TestSelectedMessage_AfterExpand(t *testing.T) {
 	now := time.Now()
-	mb := testMailbox(t,
+	mb := testState(t,
 		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
 		[]provider.Thread{
 			{ID: "t1", Subject: "test", Date: now, Messages: []provider.Message{
@@ -826,7 +826,7 @@ func TestArchive_RemovesThreadAndQueuesCommand(t *testing.T) {
 		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3", MessageID: "<m3@test>"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -890,7 +890,7 @@ func TestArchive_QueuesEveryMessageInThread(t *testing.T) {
 		{ID: "m2", Subject: "grouped", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}, {ID: "m2", MessageID: "<m2@test>"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -937,7 +937,7 @@ func TestToggleRead_UpdatesDisplay(t *testing.T) {
 		}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -992,7 +992,7 @@ func TestToggleStar_PreservesSelectedRow(t *testing.T) {
 		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1029,7 +1029,7 @@ func TestToggleRead_PreservesSelectedRow(t *testing.T) {
 		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Unread: 1, Messages: []provider.Message{{ID: "m2", Read: false}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1069,7 +1069,7 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 		{ID: "t2", Subject: "other", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m3", MessageID: "<m3@test>"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1129,7 +1129,7 @@ func TestDelete_MissingTrashReportsUnavailable(t *testing.T) {
 		{ID: "t1", Subject: "keep", Date: now, Messages: []provider.Message{{ID: "m1"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1160,7 +1160,7 @@ func TestProcessPendingCommands_CollapsesImmediateMoveUndo(t *testing.T) {
 		{ID: "t1", Subject: "delete me", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1197,7 +1197,7 @@ func TestUndo_MultipleDeletes(t *testing.T) {
 		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1236,7 +1236,7 @@ func TestDelete_PersistsThroughReload(t *testing.T) {
 		{ID: "t2", Subject: "delete me", Date: now.Add(-time.Hour)},
 	})
 
-	mb := New(c, "test@example.com")
+	mb := NewState(c, "test@example.com")
 	mb.LoadFolders()
 	mb.BuildFolderDisplay(false)
 	mb.SelectFolder(0)
@@ -1246,7 +1246,7 @@ func TestDelete_PersistsThroughReload(t *testing.T) {
 	mb.Delete(1) // undo not used — committed
 
 	// simulate restart
-	mb2 := New(c, "test@example.com")
+	mb2 := NewState(c, "test@example.com")
 	mb2.LoadFolders()
 	mb2.BuildFolderDisplay(false)
 	mb2.SelectFolder(0)

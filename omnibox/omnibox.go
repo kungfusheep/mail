@@ -4,15 +4,14 @@ import (
 	"time"
 
 	. "github.com/kungfusheep/glyph"
-	"github.com/kungfusheep/mail/mailboxmodel"
-	"github.com/kungfusheep/mail/mailcommands"
+	"github.com/kungfusheep/mail/mailbox"
 	"github.com/kungfusheep/mail/theme"
 )
 
 type Config struct {
 	App   *App
 	Theme theme.Theme
-	Model *mailboxmodel.MailboxModel
+	Model *mailbox.UI
 }
 
 type OmniBox struct {
@@ -23,8 +22,8 @@ type OmniBox struct {
 	open    bool
 	empty   bool
 	maxRows int
-	items   []mailcommands.Command
-	list    *FilterListC[mailcommands.Command]
+	items   []command
+	list    *FilterListC[command]
 	ref     NodeRef
 }
 
@@ -35,7 +34,7 @@ func New(cfg Config) *OmniBox {
 		cfg:   cfg,
 		empty: true,
 	}
-	box.items = mailcommands.Build(box.actions())
+	box.items = buildCommands(box.actions())
 
 	size := cfg.App.Size()
 	box.Resize(size.Width, size.Height)
@@ -91,7 +90,7 @@ func (b *OmniBox) View() Component {
 		Marker("  ").
 		Style(Style{BG: b.t.BG}).
 		SelectedStyle(Style{FG: b.t.Bright, BG: b.t.SelBG}).
-		Render(func(cmd *mailcommands.Command) Component {
+		Render(func(cmd *command) Component {
 			return VBox.PaddingVH(1, 2)(
 				HBox(
 					Text(&cmd.Label).FG(b.t.Bright),
@@ -230,9 +229,9 @@ func (b *OmniBox) last() {
 	}
 }
 
-func (b *OmniBox) actions() mailcommands.Actions {
+func (b *OmniBox) actions() commandActions {
 	model := b.cfg.Model
-	return mailcommands.Actions{
+	return commandActions{
 		ComposeNew:    model.ComposeNew,
 		ResumeDraft:   model.ResumeDraft,
 		ReplySelected: model.ReplySelected,
@@ -261,7 +260,7 @@ func (b *OmniBox) actions() mailcommands.Actions {
 	}
 }
 
-func commandSearchText(cmd *mailcommands.Command) string {
+func commandSearchText(cmd *command) string {
 	return cmd.Label + " " + cmd.Description + " " + cmd.Key + " " + cmd.Section
 }
 

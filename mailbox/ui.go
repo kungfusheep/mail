@@ -1,4 +1,4 @@
-package mailboxmodel
+package mailbox
 
 import (
 	"fmt"
@@ -7,9 +7,7 @@ import (
 
 	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
-	"github.com/kungfusheep/mail/composeview"
-	"github.com/kungfusheep/mail/mailbox"
-	"github.com/kungfusheep/mail/mailruntime"
+	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/ui"
 	"github.com/kungfusheep/riffkey"
@@ -21,11 +19,18 @@ const (
 	PreviewPane
 )
 
-type Config struct {
-	App     *glyph.App
-	Cache   *cache.Cache
-	Mailbox *mailbox.Mailbox
-	Theme   theme.Theme
+type UIConfig struct {
+	App   *glyph.App
+	Cache *cache.Cache
+	State *State
+	Theme theme.Theme
+}
+
+type ComposeControls struct {
+	Open        func()
+	SetupReply  func(provider.Thread)
+	ResumeLast  func()
+	ResumeDraft func(threadID string)
 }
 
 type undoItem struct {
@@ -33,13 +38,15 @@ type undoItem struct {
 	message string
 }
 
-type MailboxModel struct {
+type UI struct {
 	App     *glyph.App
 	Cache   *cache.Cache
-	Mailbox *mailbox.Mailbox
+	State   *State
 	Theme   theme.Theme
-	Compose composeview.Controls
-	Runtime *mailruntime.Runtime
+	Compose ComposeControls
+
+	WatchActiveFolder func()
+	SyncActiveFolder  func()
 
 	FolderSel        int
 	ThreadSel        int
@@ -66,11 +73,11 @@ type MailboxModel struct {
 	undoStack  []undoItem
 }
 
-func New(cfg Config) *MailboxModel {
-	m := &MailboxModel{
+func NewUI(cfg UIConfig) *UI {
+	m := &UI{
 		App:             cfg.App,
 		Cache:           cfg.Cache,
-		Mailbox:         cfg.Mailbox,
+		State:           cfg.State,
 		Theme:           cfg.Theme,
 		FolderTitle:     "Inbox",
 		Pane:            ThreadPane,
@@ -87,34 +94,35 @@ func New(cfg Config) *MailboxModel {
 	return m
 }
 
-func (m *MailboxModel) SetCompose(comp composeview.Controls) {
+func (m *UI) SetCompose(comp ComposeControls) {
 	m.Compose = comp
 }
 
-func (m *MailboxModel) SetRuntime(rt *mailruntime.Runtime) {
-	m.Runtime = rt
+func (m *UI) SetRuntime(watchActiveFolder, syncActiveFolder func()) {
+	m.WatchActiveFolder = watchActiveFolder
+	m.SyncActiveFolder = syncActiveFolder
 }
 
-func (m *MailboxModel) SetConversationView(sv *glyph.ScrollViewC) {
+func (m *UI) SetConversationView(sv *glyph.ScrollViewC) {
 	m.ConvView = sv
 }
 
-func (m *MailboxModel) StatusItems() *[]ui.Notification {
+func (m *UI) StatusItems() *[]ui.Notification {
 	return m.statusFeed.Items()
 }
 
-func (m *MailboxModel) UpdateStatusOverlay() {
+func (m *UI) UpdateStatusOverlay() {
 	m.statusFeed.Update()
 	m.StatusVisible = len(*m.statusFeed.Items()) > 0
 }
 
-func (m *MailboxModel) Notify(text string) {
+func (m *UI) Notify(text string) {
 	m.statusFeed.Push(text)
 	m.UpdateStatusOverlay()
 	m.App.RequestRender()
 }
 
-func (m *MailboxModel) UpdateFocus() {
+func (m *UI) UpdateFocus() {
 	t := m.Theme
 	m.FolderStyle = glyph.Style{FG: t.Dim}
 	m.ThreadStyle = glyph.Style{FG: t.Dim}
@@ -135,8 +143,8 @@ func (m *MailboxModel) UpdateFocus() {
 	}
 }
 
-func (m *MailboxModel) UpdateThreadHeader() {
-	unread := m.Mailbox.ActiveFolderUnread()
+func (m *UI) UpdateThreadHeader() {
+	unread := m.State.ActiveFolderUnread()
 	if unread <= 0 {
 		m.ThreadUnreadText = ""
 		return
@@ -144,8 +152,8 @@ func (m *MailboxModel) UpdateThreadHeader() {
 	m.ThreadUnreadText = fmt.Sprintf("%d unread", unread)
 }
 
-func (m *MailboxModel) LoadPreview() {
-	m.Mailbox.LoadConversation(m.ThreadSel, func() {
+func (m *UI) LoadPreview() {
+	m.State.LoadConversation(m.ThreadSel, func() {
 		if m.ConvView != nil {
 			m.ConvView.Refresh()
 		}
@@ -157,29 +165,29 @@ func (m *MailboxModel) LoadPreview() {
 	m.App.RequestRender()
 }
 
-func (m *MailboxModel) Enter() {
-	if m.Mailbox.ActiveFolderCanonical() == "Drafts" {
-		if t := m.Mailbox.SelectedThread(m.ThreadSel); t != nil {
+func (m *UI) Enter() {
+	if m.State.ActiveFolderCanonical() == "Drafts" {
+		if t := m.State.SelectedThread(m.ThreadSel); t != nil {
 			m.Compose.ResumeDraft(t.ID)
 		}
 		return
 	}
-	if msg := m.Mailbox.SelectedMessage(m.ThreadSel); msg != nil {
-		m.Mailbox.LoadPreview(*msg, m.App.Size().Width)
-		m.Mailbox.MarkRead(m.ThreadSel)
+	if msg := m.State.SelectedMessage(m.ThreadSel); msg != nil {
+		m.State.LoadPreview(*msg, m.App.Size().Width)
+		m.State.MarkRead(m.ThreadSel)
 		m.UpdateThreadHeader()
 		m.Pane = PreviewPane
 		m.UpdateFocus()
 		return
 	}
-	m.Mailbox.ToggleThread(m.ThreadSel)
-	m.Mailbox.MarkRead(m.ThreadSel)
+	m.State.ToggleThread(m.ThreadSel)
+	m.State.MarkRead(m.ThreadSel)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 }
 
-func (m *MailboxModel) EnterFolder() {
-	if m.FolderSel == m.Mailbox.CanonEnd() {
+func (m *UI) EnterFolder() {
+	if m.FolderSel == m.State.CanonEnd() {
 		m.ToggleFolders()
 		return
 	}
@@ -187,7 +195,7 @@ func (m *MailboxModel) EnterFolder() {
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) PushUndo(undo func(), desc string) {
+func (m *UI) PushUndo(undo func(), desc string) {
 	if undo != nil {
 		m.undoStack = append(m.undoStack, undoItem{
 			run:     undo,
@@ -201,49 +209,51 @@ func (m *MailboxModel) PushUndo(undo func(), desc string) {
 	}
 }
 
-func (m *MailboxModel) ClampThreadSel() {
-	if m.ThreadSel >= m.Mailbox.ThreadLen() {
-		m.ThreadSel = m.Mailbox.ThreadLen() - 1
+func (m *UI) ClampThreadSel() {
+	if m.ThreadSel >= m.State.ThreadLen() {
+		m.ThreadSel = m.State.ThreadLen() - 1
 	}
 	if m.ThreadSel < 0 {
 		m.ThreadSel = 0
 	}
-	m.Mailbox.SetSelected(m.ThreadSel)
+	m.State.SetSelected(m.ThreadSel)
 }
 
-func (m *MailboxModel) LoadFolder() {
-	if m.FolderSel == m.Mailbox.CanonEnd() {
+func (m *UI) LoadFolder() {
+	if m.FolderSel == m.State.CanonEnd() {
 		return
 	}
 	actualIdx := m.FolderSel
-	if m.FolderSel > m.Mailbox.CanonEnd() {
+	if m.FolderSel > m.State.CanonEnd() {
 		actualIdx = m.FolderSel - 2
 	}
-	if actualIdx >= m.Mailbox.FolderCount() {
+	if actualIdx >= m.State.FolderCount() {
 		return
 	}
-	m.Mailbox.SelectFolder(actualIdx)
-	m.Mailbox.LoadThreads()
-	m.Mailbox.BuildThreadDisplay()
+	m.State.SelectFolder(actualIdx)
+	m.State.LoadThreads()
+	m.State.BuildThreadDisplay()
 	m.ThreadSel = 0
-	m.Mailbox.SetSelected(0)
+	m.State.SetSelected(0)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 	m.undoStack = nil
-	m.FolderTitle = m.Mailbox.FolderName(m.FolderSel)
-	if m.Runtime != nil {
-		m.Runtime.WatchActiveFolder()
-		m.Runtime.SyncActiveFolder()
+	m.FolderTitle = m.State.FolderName(m.FolderSel)
+	if m.WatchActiveFolder != nil {
+		m.WatchActiveFolder()
+	}
+	if m.SyncActiveFolder != nil {
+		m.SyncActiveFolder()
 	}
 }
 
-func (m *MailboxModel) StartSearch() {
+func (m *UI) StartSearch() {
 	m.SearchQuery = ""
 	m.App.HideCursor()
 	m.App.PushView("search")
 }
 
-func (m *MailboxModel) SubmitSearch() {
+func (m *UI) SubmitSearch() {
 	q := m.SearchQuery
 	m.SearchQuery = ""
 	m.App.ShowCursor()
@@ -256,23 +266,23 @@ func (m *MailboxModel) SubmitSearch() {
 		m.Notify(fmt.Sprintf("search: %v", err))
 		return
 	}
-	m.Mailbox.SetSearchResults(results)
-	m.Mailbox.BuildThreadDisplay()
+	m.State.SetSearchResults(results)
+	m.State.BuildThreadDisplay()
 	m.ThreadSel = 0
-	m.Mailbox.SetSelected(0)
+	m.State.SetSelected(0)
 	m.UpdateThreadHeader()
 	m.Pane = ThreadPane
 	m.UpdateFocus()
 	m.Notify(fmt.Sprintf("search: %q (%d)", q, len(results)))
 }
 
-func (m *MailboxModel) CancelSearch() {
+func (m *UI) CancelSearch() {
 	m.SearchQuery = ""
 	m.App.ShowCursor()
 	m.App.PopView()
 }
 
-func (m *MailboxModel) BackspaceSearch() {
+func (m *UI) BackspaceSearch() {
 	if len(m.SearchQuery) == 0 {
 		return
 	}
@@ -280,7 +290,7 @@ func (m *MailboxModel) BackspaceSearch() {
 	m.SearchQuery = string(runes[:len(runes)-1])
 }
 
-func (m *MailboxModel) AppendSearchKey(k riffkey.Key) bool {
+func (m *UI) AppendSearchKey(k riffkey.Key) bool {
 	if k.Rune != 0 && k.Mod == 0 {
 		m.SearchQuery += string(k.Rune)
 		m.App.RequestRender()
@@ -289,7 +299,7 @@ func (m *MailboxModel) AppendSearchKey(k riffkey.Key) bool {
 	return false
 }
 
-func (m *MailboxModel) UndoLast() {
+func (m *UI) UndoLast() {
 	if len(m.undoStack) == 0 {
 		m.Notify("nothing to undo")
 		return
@@ -298,7 +308,7 @@ func (m *MailboxModel) UndoLast() {
 	item.run()
 	m.undoStack = m.undoStack[:len(m.undoStack)-1]
 	m.ClampThreadSel()
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
+	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 	if len(m.undoStack) > 0 {
@@ -308,104 +318,104 @@ func (m *MailboxModel) UndoLast() {
 	m.Notify(item.message)
 }
 
-func (m *MailboxModel) FoldersChanged() {
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
-	if draftsID := m.Mailbox.FolderIDByDisplayName("Drafts"); draftsID != "" {
+func (m *UI) FoldersChanged() {
+	m.State.BuildFolderDisplay(m.LabelsOpen)
+	if draftsID := m.State.FolderIDByDisplayName("Drafts"); draftsID != "" {
 		m.Cache.SetDraftsLabel(draftsID)
 	}
 	m.UpdateThreadHeader()
 }
 
-func (m *MailboxModel) ThreadsChanged() {
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
-	m.Mailbox.BuildThreadDisplay()
+func (m *UI) ThreadsChanged() {
+	m.State.BuildFolderDisplay(m.LabelsOpen)
+	m.State.BuildThreadDisplay()
 	m.ClampThreadSel()
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 }
 
-func (m *MailboxModel) FolderDown() {
-	if m.FolderSel < m.Mailbox.FolderLen()-1 {
+func (m *UI) FolderDown() {
+	if m.FolderSel < m.State.FolderLen()-1 {
 		m.FolderSel++
 		m.LoadFolder()
 	}
 }
 
-func (m *MailboxModel) FolderUp() {
+func (m *UI) FolderUp() {
 	if m.FolderSel > 0 {
 		m.FolderSel--
 		m.LoadFolder()
 	}
 }
 
-func (m *MailboxModel) ThreadDown() {
-	if m.ThreadSel < m.Mailbox.ThreadLen()-1 {
+func (m *UI) ThreadDown() {
+	if m.ThreadSel < m.State.ThreadLen()-1 {
 		m.ThreadSel++
-		m.Mailbox.SetSelected(m.ThreadSel)
+		m.State.SetSelected(m.ThreadSel)
 		m.LoadPreview()
 	}
 }
 
-func (m *MailboxModel) ThreadUp() {
+func (m *UI) ThreadUp() {
 	if m.ThreadSel > 0 {
 		m.ThreadSel--
-		m.Mailbox.SetSelected(m.ThreadSel)
+		m.State.SetSelected(m.ThreadSel)
 		m.LoadPreview()
 	}
 }
 
-func (m *MailboxModel) PreviewDown() {
+func (m *UI) PreviewDown() {
 	if m.ConvView != nil {
 		m.ConvView.Layer().ScrollDown(1)
 	}
 }
 
-func (m *MailboxModel) PreviewUp() {
+func (m *UI) PreviewUp() {
 	if m.ConvView != nil {
 		m.ConvView.Layer().ScrollUp(1)
 	}
 }
 
-func (m *MailboxModel) FocusRight() {
+func (m *UI) FocusRight() {
 	if m.Pane < PreviewPane {
 		m.Pane++
 		m.UpdateFocus()
 	}
 }
 
-func (m *MailboxModel) FocusFolders() {
+func (m *UI) FocusFolders() {
 	m.Pane = FolderPane
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) FocusThreads() {
+func (m *UI) FocusThreads() {
 	m.Pane = ThreadPane
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) FocusPreview() {
+func (m *UI) FocusPreview() {
 	m.Pane = PreviewPane
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) FocusLeft() {
+func (m *UI) FocusLeft() {
 	if m.Pane > FolderPane {
 		m.Pane--
 		m.UpdateFocus()
 	}
 }
 
-func (m *MailboxModel) FocusNext() {
+func (m *UI) FocusNext() {
 	m.Pane = (m.Pane + 1) % 3
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) FocusPrev() {
+func (m *UI) FocusPrev() {
 	m.Pane = (m.Pane + 2) % 3
 	m.UpdateFocus()
 }
 
-func (m *MailboxModel) Escape() {
+func (m *UI) Escape() {
 	if m.HelpOpen {
 		m.HelpOpen = false
 		return
@@ -413,30 +423,30 @@ func (m *MailboxModel) Escape() {
 	m.FocusLeft()
 }
 
-func (m *MailboxModel) ToggleThread() {
-	m.Mailbox.ToggleThread(m.ThreadSel)
+func (m *UI) ToggleThread() {
+	m.State.ToggleThread(m.ThreadSel)
 }
 
-func (m *MailboxModel) ThreadAction(label string, fn func()) {
-	if m.Mailbox.ThreadLen() == 0 {
+func (m *UI) ThreadAction(label string, fn func()) {
+	if m.State.ThreadLen() == 0 {
 		m.Notify(label + ": no thread selected")
 		return
 	}
 	fn()
 }
 
-func (m *MailboxModel) ComposeNew() {
+func (m *UI) ComposeNew() {
 	m.Compose.Open()
 }
 
-func (m *MailboxModel) ResumeDraft() {
+func (m *UI) ResumeDraft() {
 	m.Compose.ResumeLast()
 }
 
-func (m *MailboxModel) ReplySelected() {
-	if t := m.Mailbox.SelectedThread(m.ThreadSel); t != nil {
-		if row := m.Mailbox.ThreadRowAt(m.ThreadSel); row != nil && row.MsgIdx < 0 {
-			if m.Mailbox.ActiveFolderCanonical() == "Drafts" {
+func (m *UI) ReplySelected() {
+	if t := m.State.SelectedThread(m.ThreadSel); t != nil {
+		if row := m.State.ThreadRowAt(m.ThreadSel); row != nil && row.MsgIdx < 0 {
+			if m.State.ActiveFolderCanonical() == "Drafts" {
 				m.Compose.ResumeDraft(t.ID)
 				return
 			}
@@ -446,47 +456,47 @@ func (m *MailboxModel) ReplySelected() {
 	}
 }
 
-func (m *MailboxModel) Archive() {
-	m.PushUndo(m.Mailbox.Archive(m.ThreadSel))
+func (m *UI) Archive() {
+	m.PushUndo(m.State.Archive(m.ThreadSel))
 	m.afterThreadAction()
 }
 
-func (m *MailboxModel) ArchiveSelected() {
+func (m *UI) ArchiveSelected() {
 	m.ThreadAction("archive", m.Archive)
 }
 
-func (m *MailboxModel) Delete() {
-	m.PushUndo(m.Mailbox.Delete(m.ThreadSel))
+func (m *UI) Delete() {
+	m.PushUndo(m.State.Delete(m.ThreadSel))
 	m.afterThreadAction()
 }
 
-func (m *MailboxModel) DeleteSelected() {
+func (m *UI) DeleteSelected() {
 	m.ThreadAction("delete", m.Delete)
 }
 
-func (m *MailboxModel) ToggleStar() {
-	m.PushUndo(m.Mailbox.ToggleStar(m.ThreadSel))
+func (m *UI) ToggleStar() {
+	m.PushUndo(m.State.ToggleStar(m.ThreadSel))
 }
 
-func (m *MailboxModel) ToggleStarSelected() {
+func (m *UI) ToggleStarSelected() {
 	m.ThreadAction("star", m.ToggleStar)
 }
 
-func (m *MailboxModel) ToggleRead() {
-	m.PushUndo(m.Mailbox.ToggleRead(m.ThreadSel))
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
+func (m *UI) ToggleRead() {
+	m.PushUndo(m.State.ToggleRead(m.ThreadSel))
+	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.UpdateThreadHeader()
 }
 
-func (m *MailboxModel) ToggleReadSelected() {
+func (m *UI) ToggleReadSelected() {
 	m.ThreadAction("read", m.ToggleRead)
 }
 
-func (m *MailboxModel) ToggleFolders() {
+func (m *UI) ToggleFolders() {
 	m.LabelsOpen = !m.LabelsOpen
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
-	if m.FolderSel >= m.Mailbox.FolderLen() {
-		m.FolderSel = m.Mailbox.FolderLen() - 1
+	m.State.BuildFolderDisplay(m.LabelsOpen)
+	if m.FolderSel >= m.State.FolderLen() {
+		m.FolderSel = m.State.FolderLen() - 1
 	}
 	if m.FolderSel < 0 {
 		m.FolderSel = 0
@@ -495,30 +505,30 @@ func (m *MailboxModel) ToggleFolders() {
 	m.Notify("folders toggled")
 }
 
-func (m *MailboxModel) RefreshMail() {
+func (m *UI) RefreshMail() {
 	m.Notify("syncing...")
-	if m.Runtime != nil {
-		m.Runtime.SyncActiveFolder()
+	if m.SyncActiveFolder != nil {
+		m.SyncActiveFolder()
 	}
 }
 
-func (m *MailboxModel) ShowKeyboardHelp() {
+func (m *UI) ShowKeyboardHelp() {
 	m.HelpOpen = true
 }
 
-func (m *MailboxModel) ToggleKeyboardHelp() {
+func (m *UI) ToggleKeyboardHelp() {
 	m.HelpOpen = !m.HelpOpen
 }
 
-func (m *MailboxModel) TickFrame() {
+func (m *UI) TickFrame() {
 	m.Frame++
 	m.UpdateStatusOverlay()
 	m.App.RequestRender()
 }
 
-func (m *MailboxModel) afterThreadAction() {
+func (m *UI) afterThreadAction() {
 	m.ClampThreadSel()
-	m.Mailbox.BuildFolderDisplay(m.LabelsOpen)
+	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 }
