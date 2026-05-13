@@ -842,13 +842,13 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			from = "You"
 		}
 
-		segments := m.renderSegments(msg)
+		doc := m.renderDocument(msg)
 		local = append(local, ConversationMessage{
 			Sender:    from,
 			Date:      msg.Date.Format("2 Jan 15:04"),
-			Body:      bodyFromSegments(segments),
-			BodySpans: bodySpansFromSegments(segments),
-			Segments:  segments,
+			Body:      doc.PlainText(),
+			BodySpans: doc.GlyphSpans(),
+			Segments:  doc.Segments(),
 			IsMe:      isMe,
 		})
 
@@ -916,10 +916,10 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 				if i >= len(m.conversation) {
 					continue
 				}
-				segments := m.renderSegments(thread.Messages[i])
-				m.conversation[i].Body = bodyFromSegments(segments)
-				m.conversation[i].BodySpans = bodySpansFromSegments(segments)
-				m.conversation[i].Segments = segments
+				doc := m.renderDocument(thread.Messages[i])
+				m.conversation[i].Body = doc.PlainText()
+				m.conversation[i].BodySpans = doc.GlyphSpans()
+				m.conversation[i].Segments = doc.Segments()
 			}
 			m.convMu.Unlock()
 			onUpdate()
@@ -962,63 +962,21 @@ func (m *State) cacheMessageBody(msg provider.Message) {
 }
 
 func (m *State) renderBody(msg provider.Message) string {
-	return bodyFromSegments(m.renderSegments(msg))
+	return m.renderDocument(msg).PlainText()
 }
 
-func bodyFromSegments(segments []preview.Segment) string {
-	if len(segments) == 0 {
-		return ""
-	}
-	var parts []string
-	for _, segment := range segments {
-		if segment.Kind != preview.SegmentMain {
-			break
-		}
-		parts = append(parts, segment.Text)
-	}
-	return strings.TrimSpace(strings.Join(parts, "\n"))
-}
-
-func bodySpansFromSegments(segments []preview.Segment) []glyph.Span {
-	if len(segments) == 0 {
-		return nil
-	}
-	spans := make([]glyph.Span, 0, len(segments)*2)
-	for _, segment := range segments {
-		text := strings.TrimSpace(segment.Text)
-		if text == "" {
-			continue
-		}
-		if len(spans) > 0 {
-			spans = append(spans, glyph.Span{Text: "\n"})
-		}
-		spans = append(spans, glyph.Span{Text: text, Style: segmentStyle(segment.Kind)})
-	}
-	return spans
-}
-
-func segmentStyle(kind preview.SegmentKind) glyph.Style {
-	switch kind {
-	case preview.SegmentQuote:
-		return glyph.Style{Attr: glyph.AttrDim | glyph.AttrItalic}
-	case preview.SegmentSignature, preview.SegmentFooter:
-		return glyph.Style{Attr: glyph.AttrDim}
-	case preview.SegmentForwarded:
-		return glyph.Style{Attr: glyph.AttrDim}
-	default:
-		return glyph.Style{}
-	}
-}
-
-func (m *State) renderSegments(msg provider.Message) []preview.Segment {
+func (m *State) renderDocument(msg provider.Message) preview.Document {
 	body := msg.TextBody
 	if msg.HTMLBody != "" {
-		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, 72)
+		return preview.ParseHTML(msg.HTMLBody, msg.TextBody)
 	} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
+		doc := preview.ParseHTML(body, "")
+		if len(doc.Blocks) > 0 {
+			return doc
+		}
 		body = preview.RenderHTML(body, "", 72)
 	}
-	body = preview.Sanitize(body)
-	return preview.SegmentText(strings.TrimSpace(body))
+	return preview.ParseText(body)
 }
 
 func (m *State) LoadPreview(msg provider.Message, width int) {
@@ -1063,17 +1021,48 @@ func (m *State) LoadPreview(msg provider.Message, width int) {
 		"",
 	)
 
-	body := msg.TextBody
-	if msg.HTMLBody != "" {
-		body = preview.RenderHTML(msg.HTMLBody, msg.TextBody, cols)
-	} else if strings.Contains(body, "<p>") || strings.Contains(body, "<br") || strings.Contains(body, "<div") {
-		body = preview.RenderHTML(body, "", cols)
-	}
-	body = preview.Sanitize(body)
-	for _, line := range strings.Split(body, "\n") {
+	for _, line := range wrapPreviewLines(m.renderDocument(msg).PlainText(), cols) {
 		m.previewLines = append(m.previewLines, line)
 	}
 	m.previewText = strings.Join(m.previewLines, "\n")
+}
+
+func wrapPreviewLines(body string, cols int) []string {
+	if cols <= 0 {
+		cols = 72
+	}
+	lines := strings.Split(body, "\n")
+	out := make([]string, 0, len(lines))
+	for _, line := range lines {
+		out = append(out, wrapPreviewLine(line, cols)...)
+	}
+	return out
+}
+
+func wrapPreviewLine(line string, cols int) []string {
+	words := strings.Fields(line)
+	if len(words) == 0 {
+		return []string{""}
+	}
+
+	var out []string
+	var current strings.Builder
+	for _, word := range words {
+		if current.Len() == 0 {
+			current.WriteString(word)
+			continue
+		}
+		if current.Len()+1+len(word) > cols {
+			out = append(out, current.String())
+			current.Reset()
+			current.WriteString(word)
+			continue
+		}
+		current.WriteByte(' ')
+		current.WriteString(word)
+	}
+	out = append(out, current.String())
+	return out
 }
 
 // actions — each returns an undo closure + description.

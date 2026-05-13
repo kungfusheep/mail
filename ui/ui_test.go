@@ -9,16 +9,16 @@ func TestFeedPushesNewestAndCapsItems(t *testing.T) {
 	now := time.Unix(0, 0)
 	feed := NewFeed(func() time.Time { return now })
 
-	for _, text := range []string{"one", "two", "three", "four", "five"} {
+	for _, text := range []string{"one", "two", "three", "four", "five", "six", "seven"} {
 		feed.Push(text)
 	}
 
 	items := *feed.Items()
-	if len(items) != 4 {
-		t.Fatalf("items = %d, want 4", len(items))
+	if len(items) != 6 {
+		t.Fatalf("items = %d, want 6", len(items))
 	}
-	if items[0].Text != "two" || items[3].Text != "five" {
-		t.Fatalf("items = %#v, want fifo capped to two..five", items)
+	if items[0].Text != "two" || items[5].Text != "seven" {
+		t.Fatalf("items = %#v, want fifo capped to two..seven", items)
 	}
 }
 

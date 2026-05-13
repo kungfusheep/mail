@@ -364,6 +364,18 @@ func (m *UI) ThreadUp() {
 	}
 }
 
+func (m *UI) ThreadTop() {
+	m.ThreadSel = 0
+	m.State.SetSelected(m.ThreadSel)
+	m.LoadPreview()
+}
+
+func (m *UI) ThreadBottom() {
+	m.ThreadSel = len(*m.State.ThreadRows()) - 1
+	m.State.SetSelected(m.ThreadSel)
+	m.LoadPreview()
+}
+
 func (m *UI) PreviewDown() {
 	if m.ConvView != nil {
 		m.ConvView.Layer().ScrollDown(1)

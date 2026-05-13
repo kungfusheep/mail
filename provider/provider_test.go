@@ -21,9 +21,9 @@ func TestAddressString(t *testing.T) {
 }
 
 func TestParseAddressList(t *testing.T) {
-	got := ParseAddressList("Pete <pete@example.com>, test@example.com, , Support <help@example.com>")
+	got := ParseAddressList("Alex <alex@example.com>, test@example.com, , Support <help@example.com>")
 	want := []Address{
-		{Name: "Pete", Email: "pete@example.com"},
+		{Name: "Alex", Email: "alex@example.com"},
 		{Email: "test@example.com"},
 		{Name: "Support", Email: "help@example.com"},
 	}

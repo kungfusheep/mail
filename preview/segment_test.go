@@ -18,7 +18,7 @@ func TestSegmentText_PreservesQuotedReply(t *testing.T) {
 }
 
 func TestSegmentText_ClassifiesSignatureAndFooter(t *testing.T) {
-	body := "Please see attached.\n-- \nPete\n\nPrivacy policy: example.com/privacy"
+	body := "Please see attached.\n-- \nAlex\n\nPrivacy policy: example.com/privacy"
 
 	got := SegmentText(body)
 	if len(got) != 2 {

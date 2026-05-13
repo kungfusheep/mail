@@ -7,7 +7,6 @@ import (
 
 	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
-	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/provider"
 )
 
@@ -164,29 +163,46 @@ func TestDraftsPipeline_RowDatesAndPreview(t *testing.T) {
 	if len(msgs[0].BodySpans) == 0 {
 		t.Fatal("conversation body spans are empty — rich preview pane will be empty")
 	}
-	if !strings.Contains(msgs[0].BodySpans[0].Text, "body-c") {
-		t.Errorf("conversation body span = %q, want to contain \"body-c\" — rich preview pane will be empty", msgs[0].BodySpans[0].Text)
+	if !spansContain(msgs[0].BodySpans, "body-c") {
+		t.Errorf("conversation body spans = %#v, want to contain \"body-c\" — rich preview pane will be empty", msgs[0].BodySpans)
 	}
 }
 
-func TestBodySpansFromSegments_StylesNonMainSegments(t *testing.T) {
-	spans := bodySpansFromSegments([]preview.Segment{
-		{Kind: preview.SegmentMain, Text: "Main body"},
-		{Kind: preview.SegmentQuote, Text: "> old reply"},
-		{Kind: preview.SegmentSignature, Text: "Thanks"},
-	})
+func spansContain(spans []glyph.Span, text string) bool {
+	for _, span := range spans {
+		if strings.Contains(span.Text, text) {
+			return true
+		}
+	}
+	return false
+}
 
-	if len(spans) != 5 {
-		t.Fatalf("body spans = %d, want 5 including separators", len(spans))
+func TestLoadPreviewUsesDocumentModelForHTML(t *testing.T) {
+	mb := NewState(nil, "test@example.com")
+	msg := provider.Message{
+		From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+		To:      []provider.Address{{Email: "test@example.com"}},
+		Date:    time.Date(2026, 5, 13, 9, 30, 0, 0, time.UTC),
+		Subject: "html preview",
+		HTMLBody: `<html><body>
+			<h1>Receipt</h1>
+			<p>Hello <strong>Alex</strong>, see <a href="https://example.test">details</a>.</p>
+			<blockquote><p>older reply</p></blockquote>
+		</body></html>`,
 	}
-	if spans[0].Text != "Main body" || spans[0].Style.Attr != glyph.AttrNone {
-		t.Fatalf("main span = %#v, want unstyled main body", spans[0])
-	}
-	if spans[2].Text != "> old reply" || !spans[2].Style.Attr.Has(glyph.AttrDim) || !spans[2].Style.Attr.Has(glyph.AttrItalic) {
-		t.Fatalf("quote span = %#v, want dim italic quoted text", spans[2])
-	}
-	if spans[4].Text != "Thanks" || !spans[4].Style.Attr.Has(glyph.AttrDim) {
-		t.Fatalf("signature span = %#v, want dim signature text", spans[4])
+
+	mb.LoadPreview(msg, 120)
+
+	got := *mb.PreviewText()
+	for _, want := range []string{
+		"Subject: html preview",
+		"Receipt",
+		"Hello Alex, see details.",
+		"older reply",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("preview text = %q, want to contain %q", got, want)
+		}
 	}
 }
 

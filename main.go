@@ -236,6 +236,8 @@ func main() {
 							Key("s", model.ToggleStarSelected),
 							Key("e", model.ToggleReadSelected),
 							Key("u", model.UndoLast),
+							Key("g", model.ThreadTop),
+							Key("G", model.ThreadBottom),
 						),
 					),
 				),
@@ -267,6 +269,8 @@ func main() {
 						On(
 							Key("j", model.PreviewDown),
 							Key("k", model.PreviewUp),
+							Key("<C-d>", model.ConvView.Layer().PageDown),
+							Key("<C-u>", model.ConvView.Layer().PageUp),
 						),
 					),
 				),

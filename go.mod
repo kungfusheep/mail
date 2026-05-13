@@ -9,6 +9,7 @@ require (
 	github.com/kungfusheep/riffkey v0.0.0-20260424163050-c13d19def76f
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/mattn/go-sqlite3 v1.14.37
+	golang.org/x/net v0.6.0
 )
 
 require (

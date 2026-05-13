@@ -7,6 +7,8 @@ type Notification struct {
 	Opacity float64
 }
 
+// Feed is used to display the notification feed we show in the bottom
+// right corner
 type Feed struct {
 	items []entry
 	view  []Notification
@@ -29,7 +31,7 @@ func NewFeed(now func() time.Time) *Feed {
 		now:   now,
 		ttl:   2800 * time.Millisecond,
 		fade:  700 * time.Millisecond,
-		limit: 4,
+		limit: 6,
 	}
 }
 

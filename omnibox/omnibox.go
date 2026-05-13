@@ -129,8 +129,8 @@ func (b *OmniBox) View() Component {
 					Key("<C-p>", func() { b.move(-1) }),
 					Key("<C-d>", func() { b.page(1) }),
 					Key("<C-u>", func() { b.page(-1) }),
-					Key("g", b.first),
-					Key("G", b.last),
+					Key("<C-g>", b.first),
+					Key("<C-G>", b.last),
 				),
 				HBox(
 					Text("mail").FG(b.t.Bright).Bold(),
