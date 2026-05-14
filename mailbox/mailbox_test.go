@@ -206,6 +206,86 @@ func TestLoadPreviewUsesDocumentModelForHTML(t *testing.T) {
 	}
 }
 
+func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "attachments",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:       "m1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject:  "attachments",
+			Date:     now,
+			TextBody: "see attached",
+			Attachments: []provider.Attachment{{
+				Filename:    "brief.pdf",
+				ContentType: "application/pdf",
+			}},
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation messages = %d, want 1", len(msgs))
+	}
+	if len(msgs[0].Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(msgs[0].Attachments))
+	}
+	if got := msgs[0].Attachments[0].Filename; got != "brief.pdf" {
+		t.Fatalf("attachment filename = %q, want brief.pdf", got)
+	}
+}
+
+func TestPreserveCachedBodiesAlsoPreservesAttachments(t *testing.T) {
+	c := testCache(t)
+	folder := "INBOX"
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	mb := NewState(c, "me@example.com")
+	c.ReplaceThreads(folder, []provider.Thread{{
+		ID:      "old",
+		Subject: "cached",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:          "old-msg",
+			MessageID:   "<same@example.com>",
+			TextBody:    "cached body",
+			Attachments: []provider.Attachment{{Filename: "brief.pdf", ContentType: "application/pdf"}},
+		}},
+	}})
+
+	threads := []provider.Thread{{
+		ID:      "new",
+		Subject: "fresh",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:        "new-msg",
+			MessageID: "<same@example.com>",
+		}},
+	}}
+	mb.preserveCachedBodies(folder, threads)
+
+	msg := threads[0].Messages[0]
+	if msg.TextBody != "cached body" {
+		t.Fatalf("text body = %q, want cached body", msg.TextBody)
+	}
+	if len(msg.Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(msg.Attachments))
+	}
+	if got := msg.Attachments[0].Filename; got != "brief.pdf" {
+		t.Fatalf("attachment filename = %q, want brief.pdf", got)
+	}
+}
+
 // Regression: when a sync for a non-Drafts folder (Inbox / Starred /
 // etc) is in flight and the user switches to Drafts before it resolves,
 // the stale result MUST NOT be routed through reconcileDrafts — every

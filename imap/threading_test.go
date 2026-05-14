@@ -1,11 +1,83 @@
 package imap
 
 import (
+	"strings"
 	"testing"
 	"time"
 
+	imaplib "github.com/emersion/go-imap/v2"
 	"github.com/kungfusheep/mail/provider"
 )
+
+func TestParseBodyCapturesAttachmentMetadata(t *testing.T) {
+	raw := strings.Join([]string{
+		"Content-Type: multipart/mixed; boundary=mailtest",
+		"",
+		"--mailtest",
+		"Content-Type: text/plain; charset=utf-8",
+		"",
+		"hello",
+		"--mailtest",
+		"Content-Type: application/pdf",
+		"Content-Disposition: attachment; filename=\"brief.pdf\"",
+		"",
+		"%PDF-1.4",
+		"--mailtest--",
+		"",
+	}, "\r\n")
+
+	text, _, attachments := parseBody([]byte(raw))
+	if text != "hello" {
+		t.Fatalf("text = %q, want hello", text)
+	}
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "brief.pdf" {
+		t.Fatalf("filename = %q, want brief.pdf", attachments[0].Filename)
+	}
+	if attachments[0].ContentType != "application/pdf" {
+		t.Fatalf("content type = %q, want application/pdf", attachments[0].ContentType)
+	}
+}
+
+func TestAttachmentsFromBodyStructure(t *testing.T) {
+	body := &imaplib.BodyStructureMultiPart{
+		Subtype: "mixed",
+		Children: []imaplib.BodyStructure{
+			&imaplib.BodyStructureSinglePart{
+				Type:    "text",
+				Subtype: "plain",
+				Size:    5,
+			},
+			&imaplib.BodyStructureSinglePart{
+				Type:    "application",
+				Subtype: "pdf",
+				Size:    1234,
+				Extended: &imaplib.BodyStructureSinglePartExt{
+					Disposition: &imaplib.BodyStructureDisposition{
+						Value:  "attachment",
+						Params: map[string]string{"filename": "brief.pdf"},
+					},
+				},
+			},
+		},
+	}
+
+	attachments := attachmentsFromBodyStructure(body)
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "brief.pdf" {
+		t.Fatalf("filename = %q, want brief.pdf", attachments[0].Filename)
+	}
+	if attachments[0].ContentType != "application/pdf" {
+		t.Fatalf("content type = %q, want application/pdf", attachments[0].ContentType)
+	}
+	if attachments[0].Size != 1234 {
+		t.Fatalf("size = %d, want 1234", attachments[0].Size)
+	}
+}
 
 func TestGroupByInReplyTo(t *testing.T) {
 	now := time.Now()

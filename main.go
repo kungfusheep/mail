@@ -260,18 +260,32 @@ func main() {
 									SpaceW(1),
 									Text(&msg.Date).Dim(),
 								),
+								If(&msg.HasAttachments).Then(
+									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
+										ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
+											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(t.GroupBG).PaddingVH(0, 1)(
+												Text(&attachment.Icon).FG(t.Subtle),
+												SpaceW(1),
+												Text(&attachment.Filename).FG(t.Bright).Bold(),
+											)
+										}),
+									),
+								),
 								SpaceH(1),
 								Rich(&msg.BodySpans),
 								SpaceH(1),
 							)
 						}),
 					),
+
 					If(&model.Pane).Eq(mailbox.PreviewPane).Then(
 						On(
 							Key("j", model.PreviewDown),
 							Key("k", model.PreviewUp),
-							Key("<C-d>", model.ConvView.Layer().PageDown),
-							Key("<C-u>", model.ConvView.Layer().PageUp),
+							Key("d", model.PreviewHalfPageDown),
+							Key("u", model.PreviewHalfPageUp),
+							Key("g", model.PreviewTop),
+							Key("G", model.PreviewBottom),
 						),
 					),
 				),
@@ -354,17 +368,16 @@ func main() {
 }
 
 func notificationRow(item *ui.Notification, t theme.Theme) Component {
-	bulletColor := Match(&item.Kind,
-		Eq(ui.NotificationSuccess, t.Success),
-		Eq(ui.NotificationWarning, t.Warning),
-		Eq(ui.NotificationError, t.Error),
-		Eq(ui.NotificationAction, t.Accent),
-	).Default(t.Info)
-
 	return HBox.Width(49).Opacity(&item.Opacity)(
 		Space(),
-		Text("● ").FG(bulletColor),
-		Text(&item.Text).
-			FG(t.Bright),
+		Text("● ").FG(
+			Match(&item.Kind,
+				Eq(ui.NotificationSuccess, t.Success),
+				Eq(ui.NotificationWarning, t.Warning),
+				Eq(ui.NotificationError, t.Error),
+				Eq(ui.NotificationAction, t.Accent),
+			).Default(t.Info),
+		),
+		Text(&item.Text).FG(t.Bright),
 	)
 }

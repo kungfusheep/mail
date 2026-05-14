@@ -195,9 +195,10 @@ func (im *IMAP) ListThreads(opts provider.ListOptions) (provider.ListResult, err
 		seqSet.AddRange(from, mbox.NumMessages)
 
 		fetchOpts := &imaplib.FetchOptions{
-			Envelope: true,
-			Flags:    true,
-			UID:      true,
+			BodyStructure: &imaplib.FetchItemBodyStructure{Extended: true},
+			Envelope:      true,
+			Flags:         true,
+			UID:           true,
 		}
 
 		messages, err := im.client.Fetch(seqSet, fetchOpts).Collect()
@@ -265,9 +266,10 @@ func (im *IMAP) GetMessage(id string) (provider.Message, error) {
 
 		bodyBytes := msg.FindBodySection(bodySection)
 		if bodyBytes != nil {
-			text, html := parseBody(bodyBytes)
+			text, html, attachments := parseBody(bodyBytes)
 			pm.TextBody = text
 			pm.HTMLBody = html
+			pm.Attachments = attachments
 		}
 
 		return pm, nil
@@ -671,12 +673,13 @@ func envelopeToMessage(msg *imapclient.FetchMessageBuffer) provider.Message {
 	env := msg.Envelope
 
 	pm := provider.Message{
-		ID:        fmt.Sprintf("%d", msg.UID),
-		Subject:   env.Subject,
-		Date:      env.Date,
-		MessageID: env.MessageID,
-		Read:      hasFlag(msg.Flags, imaplib.FlagSeen),
-		Starred:   hasFlag(msg.Flags, imaplib.FlagFlagged),
+		ID:          fmt.Sprintf("%d", msg.UID),
+		Subject:     env.Subject,
+		Date:        env.Date,
+		MessageID:   env.MessageID,
+		Attachments: attachmentsFromBodyStructure(msg.BodyStructure),
+		Read:        hasFlag(msg.Flags, imaplib.FlagSeen),
+		Starred:     hasFlag(msg.Flags, imaplib.FlagFlagged),
 	}
 
 	if len(env.From) > 0 {
@@ -695,6 +698,34 @@ func envelopeToMessage(msg *imapclient.FetchMessageBuffer) provider.Message {
 	return pm
 }
 
+func attachmentsFromBodyStructure(body imaplib.BodyStructure) []provider.Attachment {
+	if body == nil {
+		return nil
+	}
+	var attachments []provider.Attachment
+	body.Walk(func(_ []int, part imaplib.BodyStructure) bool {
+		single, ok := part.(*imaplib.BodyStructureSinglePart)
+		if !ok {
+			return true
+		}
+		filename := single.Filename()
+		disp := single.Disposition()
+		if filename == "" && (disp == nil || !strings.EqualFold(disp.Value, "attachment")) {
+			return true
+		}
+		if filename == "" {
+			filename = "attachment"
+		}
+		attachments = append(attachments, provider.Attachment{
+			Filename:    filename,
+			ContentType: single.MediaType(),
+			Size:        int64(single.Size),
+		})
+		return true
+	})
+	return attachments
+}
+
 func convertAddress(a imaplib.Address) provider.Address {
 	return provider.Address{
 		Name:  a.Name,
@@ -711,10 +742,10 @@ func hasFlag(flags []imaplib.Flag, target imaplib.Flag) bool {
 	return false
 }
 
-func parseBody(data []byte) (text, html string) {
+func parseBody(data []byte) (text, html string, attachments []provider.Attachment) {
 	mr, err := mail.CreateReader(bytes.NewReader(data))
 	if err != nil {
-		return string(data), ""
+		return string(data), "", nil
 	}
 
 	for {
@@ -726,9 +757,9 @@ func parseBody(data []byte) (text, html string) {
 			break
 		}
 
-		switch p.Header.(type) {
+		switch h := p.Header.(type) {
 		case *mail.InlineHeader:
-			ct, _, _ := p.Header.(*mail.InlineHeader).ContentType()
+			ct, _, _ := h.ContentType()
 			body, err := io.ReadAll(p.Body)
 			if err != nil {
 				continue
@@ -743,8 +774,15 @@ func parseBody(data []byte) (text, html string) {
 					html = string(body)
 				}
 			}
+		case *mail.AttachmentHeader:
+			filename, _ := h.Filename()
+			contentType, _, _ := h.ContentType()
+			attachments = append(attachments, provider.Attachment{
+				Filename:    filename,
+				ContentType: contentType,
+			})
 		}
 	}
 
-	return text, html
+	return text, html, attachments
 }

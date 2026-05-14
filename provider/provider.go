@@ -61,13 +61,53 @@ type Message struct {
 	TextBody string
 	// html body
 	HTMLBody string
-	Read     bool
-	Starred  bool
-	Labels   []string
+	// attachment metadata; file content is fetched separately when supported
+	Attachments []Attachment
+	Read        bool
+	Starred     bool
+	Labels      []string
 	// headers needed for reply threading
 	MessageID  string
 	InReplyTo  string
 	References []string
+}
+
+type Attachment struct {
+	Filename    string
+	ContentType string
+	Size        int64
+}
+
+func AttachmentIcon(filename, contentType string) string {
+	name := strings.ToLower(filename)
+	contentType = strings.ToLower(contentType)
+	switch {
+	case strings.HasPrefix(contentType, "image/") ||
+		strings.HasSuffix(name, ".png") ||
+		strings.HasSuffix(name, ".jpg") ||
+		strings.HasSuffix(name, ".jpeg") ||
+		strings.HasSuffix(name, ".gif") ||
+		strings.HasSuffix(name, ".webp"):
+		return "󰋩"
+	case strings.HasPrefix(contentType, "audio/") ||
+		strings.HasSuffix(name, ".mp3") ||
+		strings.HasSuffix(name, ".wav") ||
+		strings.HasSuffix(name, ".m4a"):
+		return "󰎆"
+	case strings.HasPrefix(contentType, "video/") ||
+		strings.HasSuffix(name, ".mov") ||
+		strings.HasSuffix(name, ".mp4") ||
+		strings.HasSuffix(name, ".mkv"):
+		return "󰈫"
+	case strings.Contains(contentType, "pdf") || strings.HasSuffix(name, ".pdf"):
+		return "󰈦"
+	case strings.HasSuffix(name, ".zip") ||
+		strings.HasSuffix(name, ".tar") ||
+		strings.HasSuffix(name, ".gz"):
+		return "󰛫"
+	default:
+		return "󰈔"
+	}
 }
 
 type Thread struct {

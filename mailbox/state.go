@@ -568,10 +568,14 @@ func (m *State) preserveCachedBodies(folder string, threads []provider.Thread) {
 	// build lookup: message ID → cached body
 	type body struct{ text, html string }
 	bodies := make(map[string]body)
+	attachments := make(map[string][]provider.Attachment)
 	for _, t := range old {
 		for _, msg := range t.Messages {
 			if msg.MessageID != "" && (msg.TextBody != "" || msg.HTMLBody != "") {
 				bodies[msg.MessageID] = body{msg.TextBody, msg.HTMLBody}
+			}
+			if msg.MessageID != "" && len(msg.Attachments) > 0 {
+				attachments[msg.MessageID] = msg.Attachments
 			}
 		}
 	}
@@ -583,6 +587,11 @@ func (m *State) preserveCachedBodies(folder string, threads []provider.Thread) {
 				if b, ok := bodies[msg.MessageID]; ok {
 					msg.TextBody = b.text
 					msg.HTMLBody = b.html
+				}
+			}
+			if len(msg.Attachments) == 0 && msg.MessageID != "" {
+				if a, ok := attachments[msg.MessageID]; ok {
+					msg.Attachments = a
 				}
 			}
 		}
@@ -863,12 +872,14 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 
 		doc := m.renderDocument(msg)
 		local = append(local, ConversationMessage{
-			Sender:    from,
-			Date:      msg.Date.Format("2 Jan 15:04"),
-			Body:      doc.PlainText(),
-			BodySpans: doc.GlyphSpansWithLinks(m.OpenLink),
-			Segments:  doc.Segments(),
-			IsMe:      isMe,
+			Sender:         from,
+			Date:           msg.Date.Format("2 Jan 15:04"),
+			Attachments:    attachmentRows(msg.Attachments),
+			HasAttachments: len(msg.Attachments) > 0,
+			Body:           doc.PlainText(),
+			BodySpans:      doc.GlyphSpansWithLinks(m.OpenLink),
+			Segments:       doc.Segments(),
+			IsMe:           isMe,
 		})
 
 		if msg.TextBody == "" && msg.HTMLBody == "" {
@@ -936,6 +947,8 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 					continue
 				}
 				doc := m.renderDocument(thread.Messages[i])
+				m.conversation[i].Attachments = attachmentRows(thread.Messages[i].Attachments)
+				m.conversation[i].HasAttachments = len(thread.Messages[i].Attachments) > 0
 				m.conversation[i].Body = doc.PlainText()
 				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
 				m.conversation[i].Segments = doc.Segments()
@@ -1640,12 +1653,34 @@ func formatAddresses(addrs []provider.Address) string {
 
 // ThreadRow is a display row — either a thread header or an expanded message
 type ConversationMessage struct {
-	Sender    string
-	Date      string
-	Body      string
-	BodySpans []glyph.Span
-	Segments  []preview.Segment
-	IsMe      bool
+	Sender         string
+	Date           string
+	Attachments    []AttachmentRow
+	HasAttachments bool
+	Body           string
+	BodySpans      []glyph.Span
+	Segments       []preview.Segment
+	IsMe           bool
+}
+
+type AttachmentRow struct {
+	Icon     string
+	Filename string
+}
+
+func attachmentRows(attachments []provider.Attachment) []AttachmentRow {
+	rows := make([]AttachmentRow, 0, len(attachments))
+	for _, a := range attachments {
+		name := a.Filename
+		if name == "" {
+			name = "attachment"
+		}
+		rows = append(rows, AttachmentRow{
+			Icon:     provider.AttachmentIcon(name, a.ContentType),
+			Filename: name,
+		})
+	}
+	return rows
 }
 
 type ThreadRow struct {

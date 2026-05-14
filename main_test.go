@@ -53,6 +53,55 @@ func TestPreviewTemplateRendersConversationSpans(t *testing.T) {
 	}
 }
 
+func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
+	palette := theme.Dark()
+	messages := []mailbox.ConversationMessage{{
+		Sender:         "Alice",
+		Date:           "13 May 09:30",
+		Attachments:    []mailbox.AttachmentRow{{Icon: "󰈦", Filename: "brief.pdf"}},
+		HasAttachments: true,
+		BodySpans:      []Span{{Text: "Body starts here"}},
+	}}
+	view := VBox(
+		ForEach(&messages, func(msg *mailbox.ConversationMessage) Component {
+			return VBox(
+				HBox(
+					Text(&msg.Sender),
+					SpaceW(1),
+					Text(&msg.Date),
+				),
+				If(&msg.HasAttachments).Then(
+					VBox.Gap(1)(
+						SpaceH(1),
+						ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
+							return HBox.Border(BorderSoft).BorderFG(palette.GroupBG).Fill(palette.GroupBG).PaddingVH(0, 2)(
+								Text(&attachment.Icon),
+								SpaceW(1),
+								Text(&attachment.Filename).Bold(),
+							)
+						}),
+					),
+				),
+				SpaceH(1),
+				Rich(&msg.BodySpans),
+			)
+		}),
+	)
+
+	buf := NewBuffer(40, 10)
+	Build(view).Execute(buf, 40, 10)
+
+	rendered := buf.String()
+	for _, want := range []string{"brief.pdf", "Body starts here"} {
+		if !strings.Contains(rendered, want) {
+			t.Fatalf("rendered preview = %q, want to contain %q", rendered, want)
+		}
+	}
+	if strings.Index(rendered, "brief.pdf") >= strings.Index(rendered, "Body starts here") {
+		t.Fatalf("rendered preview = %q, want attachment before body", rendered)
+	}
+}
+
 func TestNotificationRowsRightAlignText(t *testing.T) {
 	notifications := []ui.Notification{
 		{Text: "short", Kind: ui.NotificationInfo, Opacity: 1},

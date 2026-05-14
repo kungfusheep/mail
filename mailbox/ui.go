@@ -428,6 +428,34 @@ func (m *UI) PreviewUp() {
 	}
 }
 
+func (m *UI) PreviewHalfPageUp() {
+	if m.ConvView == nil {
+		return
+	}
+	m.ConvView.Layer().HalfPageUp()
+}
+
+func (m *UI) PreviewHalfPageDown() {
+	if m.ConvView == nil {
+		return
+	}
+	m.ConvView.Layer().HalfPageDown()
+}
+
+func (m *UI) PreviewTop() {
+	if m.ConvView == nil {
+		return
+	}
+	m.ConvView.Layer().ScrollToTop()
+}
+
+func (m *UI) PreviewBottom() {
+	if m.ConvView == nil {
+		return
+	}
+	m.ConvView.Layer().ScrollToEnd()
+}
+
 func (m *UI) FocusRight() {
 	if m.Pane < PreviewPane {
 		m.Pane++
