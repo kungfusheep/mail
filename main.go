@@ -121,7 +121,7 @@ func main() {
 	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := composeview.Setup(app, editor, mb, smtpClient, db, model.Notify, &model.Frame, composeTransition, t)
+	comp := composeview.Setup(app, editor, mb, smtpClient, db, model.NotifyCompose, &model.Frame, composeTransition, t)
 	model.SetCompose(comp)
 
 	var rt *mailruntime.Runtime
@@ -280,13 +280,9 @@ func main() {
 			// notifications
 			If(&model.StatusVisible).Then(
 				Overlay.BottomRight().Offset(-2, -1)(
-					VBox.Width(44).FitContent().Gap(1)(
+					VBox.Width(49).Gap(1)(
 						ForEach(model.StatusItems(), func(item *ui.Notification) Component {
-							return Text(&item.Text).
-								FG(t.Bright).
-								Opacity(&item.Opacity).
-								Width(44).
-								Style(Style{Align: AlignRight})
+							return notificationRow(item, t)
 						}),
 					),
 				),
@@ -336,7 +332,7 @@ func main() {
 		Backend: !offline,
 		IMAP:    cfg,
 	}, mailruntime.Callbacks{
-		Status:         model.Notify,
+		Status:         model.NotifyRuntime,
 		FoldersChanged: model.FoldersChanged,
 		ThreadsChanged: model.ThreadsChanged,
 		Render:         app.RequestRender,
@@ -355,4 +351,20 @@ func main() {
 	if err := app.RunFrom("main"); err != nil {
 		log.Fatal(err)
 	}
+}
+
+func notificationRow(item *ui.Notification, t theme.Theme) Component {
+	bulletColor := Match(&item.Kind,
+		Eq(ui.NotificationSuccess, t.Success),
+		Eq(ui.NotificationWarning, t.Warning),
+		Eq(ui.NotificationError, t.Error),
+		Eq(ui.NotificationAction, t.Accent),
+	).Default(t.Info)
+
+	return HBox.Width(49).Opacity(&item.Opacity)(
+		Space(),
+		Text("● ").FG(bulletColor),
+		Text(&item.Text).
+			FG(t.Bright),
+	)
 }

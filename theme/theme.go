@@ -13,6 +13,10 @@ type Theme struct {
 	Dim      glyph.Color
 	Muted    glyph.Color
 	Accent   glyph.Color
+	Info     glyph.Color
+	Success  glyph.Color
+	Warning  glyph.Color
+	Error    glyph.Color
 	SelBG    glyph.Color
 	GroupBG  glyph.Color
 	ThreadBG glyph.Color
@@ -26,6 +30,10 @@ var dark = Theme{
 	Dim:      glyph.Hex(0x5f5b55),
 	Muted:    glyph.Hex(0x3f3c38),
 	Accent:   glyph.Hex(0xe8e6e3),
+	Info:     glyph.Hex(0x7aa2f7),
+	Success:  glyph.Hex(0x9ece6a),
+	Warning:  glyph.Hex(0xe0af68),
+	Error:    glyph.Hex(0xf7768e),
 	SelBG:    glyph.Hex(0x302f2c),
 	GroupBG:  glyph.Hex(0x252421),
 	ThreadBG: glyph.Hex(0x191918),
@@ -39,6 +47,10 @@ var light = Theme{
 	Dim:      glyph.Hex(0xaaaaaa),
 	Muted:    glyph.Hex(0xcccccc),
 	Accent:   glyph.Hex(0xe60012),
+	Info:     glyph.Hex(0x2563eb),
+	Success:  glyph.Hex(0x16803c),
+	Warning:  glyph.Hex(0xb45309),
+	Error:    glyph.Hex(0xc2410c),
 	SelBG:    glyph.Hex(0xe8e8e8),
 	GroupBG:  glyph.Hex(0xeeeeee),
 	ThreadBG: glyph.Hex(0xf1f3f1),

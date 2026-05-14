@@ -2,8 +2,19 @@ package ui
 
 import "time"
 
+type NotificationKind int
+
+const (
+	NotificationInfo NotificationKind = iota
+	NotificationSuccess
+	NotificationWarning
+	NotificationError
+	NotificationAction
+)
+
 type Notification struct {
 	Text    string
+	Kind    NotificationKind
 	Opacity float64
 }
 
@@ -20,6 +31,7 @@ type Feed struct {
 
 type entry struct {
 	text string
+	kind NotificationKind
 	at   time.Time
 }
 
@@ -36,10 +48,14 @@ func NewFeed(now func() time.Time) *Feed {
 }
 
 func (f *Feed) Push(text string) {
+	f.PushKind(NotificationInfo, text)
+}
+
+func (f *Feed) PushKind(kind NotificationKind, text string) {
 	if text == "" {
 		return
 	}
-	f.items = append(f.items, entry{text: text, at: f.now()})
+	f.items = append(f.items, entry{text: text, kind: kind, at: f.now()})
 	if len(f.items) > f.limit {
 		copy(f.items, f.items[len(f.items)-f.limit:])
 		f.items = f.items[:f.limit]
@@ -59,6 +75,7 @@ func (f *Feed) Update() {
 		keep = append(keep, item)
 		f.view = append(f.view, Notification{
 			Text:    item.text,
+			Kind:    item.kind,
 			Opacity: f.opacity(age),
 		})
 	}

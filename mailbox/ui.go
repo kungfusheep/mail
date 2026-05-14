@@ -117,9 +117,53 @@ func (m *UI) UpdateStatusOverlay() {
 }
 
 func (m *UI) Notify(text string) {
-	m.statusFeed.Push(text)
+	m.NotifyKind(ui.NotificationInfo, text)
+}
+
+func (m *UI) NotifyKind(kind ui.NotificationKind, text string) {
+	m.statusFeed.PushKind(kind, text)
 	m.UpdateStatusOverlay()
 	m.App.RequestRender()
+}
+
+func (m *UI) NotifySuccess(text string) {
+	m.NotifyKind(ui.NotificationSuccess, text)
+}
+
+func (m *UI) NotifyWarning(text string) {
+	m.NotifyKind(ui.NotificationWarning, text)
+}
+
+func (m *UI) NotifyError(text string) {
+	m.NotifyKind(ui.NotificationError, text)
+}
+
+func (m *UI) NotifyAction(text string) {
+	m.NotifyKind(ui.NotificationAction, text)
+}
+
+func (m *UI) NotifyRuntime(text string) {
+	switch {
+	case strings.HasPrefix(text, "imap: "), strings.HasPrefix(text, "sync: "):
+		m.NotifyError(text)
+	case text == "synced", text == "cache refreshed":
+		m.NotifySuccess(text)
+	default:
+		m.Notify(text)
+	}
+}
+
+func (m *UI) NotifyCompose(text string) {
+	switch {
+	case strings.HasPrefix(text, "send failed: "):
+		m.NotifyError(text)
+	case strings.HasPrefix(text, "sent to "):
+		m.NotifySuccess(text)
+	case text == "no drafts to resume", text == "draft not found":
+		m.NotifyWarning(text)
+	default:
+		m.Notify(text)
+	}
 }
 
 func (m *UI) UpdateFocus() {
@@ -201,11 +245,11 @@ func (m *UI) PushUndo(undo func(), desc string) {
 			run:     undo,
 			message: undoMessage(desc),
 		})
-		m.Notify(desc + " — u to undo")
+		m.NotifyAction(desc + " — u to undo")
 		return
 	}
 	if desc != "" {
-		m.Notify(desc)
+		m.NotifyAction(desc)
 	}
 }
 
@@ -258,7 +302,7 @@ func (m *UI) SubmitSearch() {
 	}
 	results, err := m.Cache.Search(q, 50)
 	if err != nil {
-		m.Notify(fmt.Sprintf("search: %v", err))
+		m.NotifyError(fmt.Sprintf("search: %v", err))
 		return
 	}
 	m.State.SetSearchResults(results)
@@ -296,7 +340,7 @@ func (m *UI) AppendSearchKey(k riffkey.Key) bool {
 
 func (m *UI) UndoLast() {
 	if len(m.undoStack) == 0 {
-		m.Notify("nothing to undo")
+		m.NotifyWarning("nothing to undo")
 		return
 	}
 	item := m.undoStack[len(m.undoStack)-1]
@@ -307,10 +351,10 @@ func (m *UI) UndoLast() {
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 	if len(m.undoStack) > 0 {
-		m.Notify(fmt.Sprintf("%s — %d undoable", item.message, len(m.undoStack)))
+		m.NotifyAction(fmt.Sprintf("%s — %d undoable", item.message, len(m.undoStack)))
 		return
 	}
-	m.Notify(item.message)
+	m.NotifyAction(item.message)
 }
 
 func (m *UI) FoldersChanged() {
@@ -437,7 +481,7 @@ func (m *UI) ToggleThread() {
 
 func (m *UI) ThreadAction(label string, fn func()) {
 	if m.State.ThreadLen() == 0 {
-		m.Notify(label + ": no thread selected")
+		m.NotifyWarning(label + ": no thread selected")
 		return
 	}
 	fn()
