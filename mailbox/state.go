@@ -33,6 +33,7 @@ type State struct {
 	displayMu  sync.Mutex
 	threads    []provider.Thread
 	threadRows []ThreadRow
+	selected   int
 
 	previewLines []string
 	previewText  string
@@ -57,6 +58,7 @@ func (m *State) PreviewLines() *[]string                      { return &m.previe
 func (m *State) CanonEnd() int                                { return m.canonEnd }
 func (m *State) FolderLen() int                               { return len(m.folderNames) }
 func (m *State) ThreadLen() int                               { return len(m.threadRows) }
+func (m *State) Selected() int                                { return m.ClampSelection(m.selected) }
 func (m *State) PreviewText() *string                         { return &m.previewText }
 func (m *State) ConversationMessages() *[]ConversationMessage { return &m.conversation }
 
@@ -701,6 +703,7 @@ func (m *State) BuildThreadDisplay() {
 			HasDraft:   hasDraft,
 		})
 	}
+	m.applySelected()
 }
 
 func (m *State) ToggleThread(sel int) {
@@ -1083,6 +1086,7 @@ func (m *State) Archive(sel int) (undo func(), desc string) {
 	m.cache.AddThreadToLabel(t.ID, dest)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
+	m.SetSelected(sel)
 
 	return func() {
 		m.cache.PutThread(thread)
@@ -1091,6 +1095,7 @@ func (m *State) Archive(sel int) (undo func(), desc string) {
 		m.queueMoveCommands(&thread, dest, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
+		m.SetSelected(sel)
 	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
 }
 
@@ -1110,6 +1115,7 @@ func (m *State) Delete(sel int) (undo func(), desc string) {
 	m.cache.AddThreadToLabel(t.ID, dest)
 	m.LoadThreads()
 	m.BuildThreadDisplay()
+	m.SetSelected(sel)
 
 	return func() {
 		m.cache.PutThread(thread)
@@ -1118,6 +1124,7 @@ func (m *State) Delete(sel int) (undo func(), desc string) {
 		m.queueMoveCommands(&thread, dest, folder)
 		m.LoadThreads()
 		m.BuildThreadDisplay()
+		m.SetSelected(sel)
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
 }
 
@@ -1642,7 +1649,26 @@ type ThreadRow struct {
 }
 
 func (m *State) SetSelected(sel int) {
+	m.selected = m.ClampSelection(sel)
+	m.applySelected()
+}
+
+func (m *State) applySelected() {
+	sel := m.ClampSelection(m.selected)
 	for i := range m.threadRows {
 		m.threadRows[i].Selected = i == sel
 	}
+}
+
+func (m *State) ClampSelection(sel int) int {
+	if len(m.threadRows) == 0 {
+		return 0
+	}
+	if sel >= len(m.threadRows) {
+		return len(m.threadRows) - 1
+	}
+	if sel < 0 {
+		return 0
+	}
+	return sel
 }

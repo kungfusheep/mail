@@ -210,12 +210,7 @@ func (m *UI) PushUndo(undo func(), desc string) {
 }
 
 func (m *UI) ClampThreadSel() {
-	if m.ThreadSel >= m.State.ThreadLen() {
-		m.ThreadSel = m.State.ThreadLen() - 1
-	}
-	if m.ThreadSel < 0 {
-		m.ThreadSel = 0
-	}
+	m.ThreadSel = m.State.ClampSelection(m.ThreadSel)
 	m.State.SetSelected(m.ThreadSel)
 }
 
@@ -329,7 +324,8 @@ func (m *UI) FoldersChanged() {
 func (m *UI) ThreadsChanged() {
 	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.State.BuildThreadDisplay()
-	m.ClampThreadSel()
+	m.ThreadSel = m.State.Selected()
+	m.State.SetSelected(m.ThreadSel)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
 }
@@ -469,8 +465,9 @@ func (m *UI) ReplySelected() {
 }
 
 func (m *UI) Archive() {
+	sel := m.ThreadSel
 	m.PushUndo(m.State.Archive(m.ThreadSel))
-	m.afterThreadAction()
+	m.afterThreadAction(sel)
 }
 
 func (m *UI) ArchiveSelected() {
@@ -478,8 +475,9 @@ func (m *UI) ArchiveSelected() {
 }
 
 func (m *UI) Delete() {
+	sel := m.ThreadSel
 	m.PushUndo(m.State.Delete(m.ThreadSel))
-	m.afterThreadAction()
+	m.afterThreadAction(sel)
 }
 
 func (m *UI) DeleteSelected() {
@@ -538,7 +536,8 @@ func (m *UI) TickFrame() {
 	m.App.RequestRender()
 }
 
-func (m *UI) afterThreadAction() {
+func (m *UI) afterThreadAction(sel int) {
+	m.ThreadSel = m.State.ClampSelection(sel)
 	m.ClampThreadSel()
 	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.UpdateThreadHeader()

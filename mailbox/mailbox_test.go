@@ -1073,6 +1073,47 @@ func TestToggleRead_PreservesSelectedRow(t *testing.T) {
 	}
 }
 
+func TestArchive_KeepsSelectionOnSameVisibleIndex(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	mb.SetSelected(1)
+	mb.Archive(1)
+
+	rows := *mb.ThreadRows()
+	if len(rows) != 2 {
+		t.Fatalf("rows after archive = %d, want 2", len(rows))
+	}
+	if rows[1].Label != "third" {
+		t.Fatalf("row 1 = %q, want third shifted into archived row's index", rows[1].Label)
+	}
+	if !rows[1].Selected {
+		t.Fatalf("rows = %#v, want shifted row selected", rows)
+	}
+	if rows[0].Selected {
+		t.Fatalf("rows = %#v, want previous row unselected", rows)
+	}
+
+	mb.BuildThreadDisplay()
+	rows = *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatalf("rows after rebuild = %#v, want selection to survive refresh rebuild", rows)
+	}
+}
+
 func TestDelete_WithExpandedThread(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
@@ -1134,6 +1175,47 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 		if !gotInverse[id] {
 			t.Errorf("missing undo move for %s", id)
 		}
+	}
+}
+
+func TestDelete_LastRowSelectsNewLastRow(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	mb.SetSelected(2)
+	mb.Delete(2)
+
+	rows := *mb.ThreadRows()
+	if len(rows) != 2 {
+		t.Fatalf("rows after delete = %d, want 2", len(rows))
+	}
+	if rows[1].Label != "second" {
+		t.Fatalf("row 1 = %q, want new last row", rows[1].Label)
+	}
+	if !rows[1].Selected {
+		t.Fatalf("rows = %#v, want new last row selected", rows)
+	}
+	if rows[0].Selected {
+		t.Fatalf("rows = %#v, want first row unselected", rows)
+	}
+
+	mb.BuildThreadDisplay()
+	rows = *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatalf("rows after rebuild = %#v, want clamped selection to survive refresh rebuild", rows)
 	}
 }
 
