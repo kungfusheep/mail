@@ -124,6 +124,10 @@ func (d Document) Segments() []Segment {
 }
 
 func (d Document) GlyphSpans() []glyph.Span {
+	return d.GlyphSpansWithLinks(nil)
+}
+
+func (d Document) GlyphSpansWithLinks(onLink func(string)) []glyph.Span {
 	spans := make([]glyph.Span, 0, len(d.Blocks)*3)
 	for _, block := range d.Blocks {
 		if block.Empty() {
@@ -132,7 +136,7 @@ func (d Document) GlyphSpans() []glyph.Span {
 		if len(spans) > 0 {
 			spans = append(spans, glyph.Span{Text: "\n\n"})
 		}
-		spans = append(spans, block.GlyphSpans()...)
+		spans = append(spans, block.GlyphSpansWithLinks(onLink)...)
 	}
 	return spans
 }
@@ -173,8 +177,12 @@ func (b Block) PlainText() string {
 }
 
 func (b Block) GlyphSpans() []glyph.Span {
+	return b.GlyphSpansWithLinks(nil)
+}
+
+func (b Block) GlyphSpansWithLinks(onLink func(string)) []glyph.Span {
 	if b.Kind == BlockTable && b.Table != nil {
-		return b.Table.GlyphSpans()
+		return b.Table.GlyphSpansWithLinks(onLink)
 	}
 
 	style := blockStyle(b.Kind)
@@ -196,7 +204,7 @@ func (b Block) GlyphSpans() []glyph.Span {
 		style.Attr |= glyph.AttrDim
 	}
 	for _, in := range b.Inlines {
-		spans = appendInlineGlyphSpans(spans, style, in)
+		spans = appendInlineGlyphSpans(spans, style, in, onLink)
 	}
 	return spans
 }
@@ -213,22 +221,59 @@ func (t Table) Empty() bool {
 }
 
 func (t Table) GlyphSpans() []glyph.Span {
-	lines := renderTableLines(t)
+	return t.GlyphSpansWithLinks(nil)
+}
+
+func (t Table) GlyphSpansWithLinks(onLink func(string)) []glyph.Span {
+	if onLink == nil {
+		lines := renderTableLines(t)
+		spans := make([]glyph.Span, 0, len(lines)*2)
+		for i, line := range lines {
+			if i > 0 {
+				spans = append(spans, glyph.Span{Text: "\n"})
+			}
+			style := glyph.Style{}
+			if i == 0 && t.HasHeader() {
+				style.Attr |= glyph.AttrBold
+			}
+			if tableSeparatorLine(line) {
+				style.Attr |= glyph.AttrDim
+			}
+			spans = append(spans, glyph.Span{Text: line, Style: style})
+		}
+		return spans
+	}
+
+	lines := t.renderGlyphLines(onLink)
 	spans := make([]glyph.Span, 0, len(lines)*2)
 	for i, line := range lines {
 		if i > 0 {
 			spans = append(spans, glyph.Span{Text: "\n"})
 		}
+		spans = append(spans, line...)
+	}
+	return spans
+}
+
+func (t Table) renderGlyphLines(onLink func(string)) [][]glyph.Span {
+	widths := tableColumnWidths(t)
+	if len(widths) == 0 {
+		return nil
+	}
+	shrinkTableColumns(widths, 92)
+
+	lines := make([][]glyph.Span, 0, len(t.Rows)+1)
+	for i, row := range t.Rows {
 		style := glyph.Style{}
 		if i == 0 && t.HasHeader() {
 			style.Attr |= glyph.AttrBold
 		}
-		if tableSeparatorLine(line) {
-			style.Attr |= glyph.AttrDim
+		lines = append(lines, renderTableGlyphRow(row, widths, style, onLink))
+		if i == 0 && t.HasHeader() && !tableFullWidthRow(row) {
+			lines = append(lines, []glyph.Span{{Text: renderTableSeparator(widths), Style: glyph.Style{Attr: glyph.AttrDim}}})
 		}
-		spans = append(spans, glyph.Span{Text: line, Style: style})
 	}
-	return spans
+	return lines
 }
 
 func (t Table) HasHeader() bool {
@@ -799,6 +844,45 @@ func renderTableRow(row TableRow, widths []int) string {
 	return strings.Join(parts, " | ")
 }
 
+func renderTableGlyphRow(row TableRow, widths []int, style glyph.Style, onLink func(string)) []glyph.Span {
+	if tableFullWidthRow(row) {
+		return glyphCellSpans(row.Cells[0], 0, style, onLink)
+	}
+
+	spans := make([]glyph.Span, 0, len(widths)*2)
+	for i := range widths {
+		if i > 0 {
+			spans = append(spans, glyph.Span{Text: " | ", Style: style})
+		}
+		if i >= len(row.Cells) {
+			spans = append(spans, glyph.Span{Text: strings.Repeat(" ", widths[i]), Style: style})
+			continue
+		}
+		spans = append(spans, glyphCellSpans(row.Cells[i], widths[i], style, onLink)...)
+	}
+	return spans
+}
+
+func glyphCellSpans(cell TableCell, width int, style glyph.Style, onLink func(string)) []glyph.Span {
+	text := cell.PlainText()
+	if width > 0 {
+		text = padRight(truncateText(text, width), width)
+	}
+	if text == "" {
+		return nil
+	}
+	return []glyph.Span{{Text: text, Style: style, OnSelect: linkSelect(cellHref(cell), onLink)}}
+}
+
+func cellHref(cell TableCell) string {
+	for _, in := range cell.Inlines {
+		if in.Href != "" {
+			return in.Href
+		}
+	}
+	return ""
+}
+
 func renderTableSeparator(widths []int) string {
 	parts := make([]string, len(widths))
 	for i, width := range widths {
@@ -1092,8 +1176,9 @@ func writeInlinePlainText(out *strings.Builder, text string) {
 	}
 }
 
-func appendInlineGlyphSpans(spans []glyph.Span, blockStyle glyph.Style, in Inline) []glyph.Span {
+func appendInlineGlyphSpans(spans []glyph.Span, blockStyle glyph.Style, in Inline, onLink func(string)) []glyph.Span {
 	style := inlineGlyphStyle(blockStyle, in)
+	onSelect := linkSelect(in.Href, onLink)
 	parts := strings.Split(in.Text, "\n")
 	for i, part := range parts {
 		if i > 0 {
@@ -1106,9 +1191,18 @@ func appendInlineGlyphSpans(spans []glyph.Span, blockStyle glyph.Style, in Inlin
 		if needsInlineSpace(lastSpanText(spans), part) {
 			spans = append(spans, glyph.Span{Text: " ", Style: blockStyle})
 		}
-		spans = append(spans, glyph.Span{Text: part, Style: style})
+		spans = append(spans, glyph.Span{Text: part, Style: style, OnSelect: onSelect})
 	}
 	return spans
+}
+
+func linkSelect(href string, onLink func(string)) func() {
+	if href == "" || onLink == nil {
+		return nil
+	}
+	return func() {
+		onLink(href)
+	}
 }
 
 func writeInlineText(out *strings.Builder, text string) {

@@ -106,6 +106,70 @@ func TestGlyphSpansStylesBlocksAndInlines(t *testing.T) {
 	}
 }
 
+func TestGlyphSpansWithLinksAttachesCallbacksToLinkSpans(t *testing.T) {
+	doc := Document{Blocks: []Block{
+		{Kind: BlockParagraph, Inlines: []Inline{
+			{Text: "Hello"},
+			{Text: "example", Href: "https://example.test"},
+		}},
+	}}
+
+	var opened string
+	spans := doc.GlyphSpansWithLinks(func(href string) {
+		opened = href
+	})
+
+	for _, span := range spans {
+		if span.Text != "example" {
+			continue
+		}
+		if span.OnSelect == nil {
+			t.Fatalf("link span = %#v, want callback", span)
+		}
+		span.OnSelect()
+		if opened != "https://example.test" {
+			t.Fatalf("opened = %q, want link href", opened)
+		}
+		return
+	}
+	t.Fatalf("spans = %#v, want link span", spans)
+}
+
+func TestGlyphSpansWithLinksKeepsTableCellCallbacks(t *testing.T) {
+	doc := Document{Blocks: []Block{
+		{Kind: BlockTable, Table: &Table{Rows: []TableRow{
+			{Cells: []TableCell{
+				{Inlines: []Inline{{Text: "Name"}}, IsHeader: true},
+				{Inlines: []Inline{{Text: "Link"}}, IsHeader: true},
+			}},
+			{Cells: []TableCell{
+				{Inlines: []Inline{{Text: "Example"}}},
+				{Inlines: []Inline{{Text: "Open", Href: "https://example.test/open"}}},
+			}},
+		}}},
+	}}
+
+	var opened string
+	spans := doc.GlyphSpansWithLinks(func(href string) {
+		opened = href
+	})
+
+	for _, span := range spans {
+		if !strings.Contains(span.Text, "Open") {
+			continue
+		}
+		if span.OnSelect == nil {
+			t.Fatalf("table link span = %#v, want callback", span)
+		}
+		span.OnSelect()
+		if opened != "https://example.test/open" {
+			t.Fatalf("opened = %q, want table href", opened)
+		}
+		return
+	}
+	t.Fatalf("spans = %#v, want table link span", spans)
+}
+
 func TestGlyphLinesPreservesBlockLayout(t *testing.T) {
 	doc := Document{Blocks: []Block{
 		{Kind: BlockHeading, Inlines: []Inline{{Text: "Receipt"}}},

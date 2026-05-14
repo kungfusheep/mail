@@ -67,6 +67,7 @@ func main() {
 	}
 
 	mb := mailbox.NewState(db, email)
+	mb.SetLinkOpener(mailbox.OpenSystemURL)
 	var smtpClient *smtp.SMTP
 	if !offline {
 		smtpClient = smtp.New(smtp.Config{
@@ -308,6 +309,7 @@ func main() {
 				Key("c", model.ComposeNew),
 				Key("C", model.ResumeDraft),
 				Key("/", model.StartSearch),
+				Key(";", app.EnterJumpMode),
 			),
 		),
 	).NoCounts()

@@ -20,6 +20,8 @@ type State struct {
 	imap  *imap.IMAP
 	email string
 
+	linkOpener LinkOpener
+
 	folders []provider.Folder
 	active  int
 
@@ -77,6 +79,20 @@ func (m *State) SetSearchResults(results []provider.Thread) {
 
 func NewState(c *cache.Cache, email string) *State {
 	return &State{cache: c, email: email}
+}
+
+func (m *State) SetLinkOpener(open LinkOpener) {
+	m.linkOpener = open
+}
+
+func (m *State) OpenLink(href string) {
+	if m.linkOpener == nil {
+		log.Printf("no link opener configured for %q", href)
+		return
+	}
+	if err := m.linkOpener(href); err != nil {
+		log.Printf("open link %q: %v", href, err)
+	}
 }
 
 func (m *State) SetIMAP(imapClient *imap.IMAP) {
@@ -850,7 +866,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			Sender:    from,
 			Date:      msg.Date.Format("2 Jan 15:04"),
 			Body:      doc.PlainText(),
-			BodySpans: doc.GlyphSpans(),
+			BodySpans: doc.GlyphSpansWithLinks(m.OpenLink),
 			Segments:  doc.Segments(),
 			IsMe:      isMe,
 		})
@@ -921,7 +937,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 				}
 				doc := m.renderDocument(thread.Messages[i])
 				m.conversation[i].Body = doc.PlainText()
-				m.conversation[i].BodySpans = doc.GlyphSpans()
+				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
 				m.conversation[i].Segments = doc.Segments()
 			}
 			m.convMu.Unlock()
