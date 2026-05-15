@@ -21,6 +21,10 @@ type State struct {
 	email string
 
 	linkOpener LinkOpener
+	notify     func(string)
+	notifyErr  func(string)
+
+	attachmentOpener LinkOpener
 
 	folders []provider.Folder
 	active  int
@@ -54,6 +58,7 @@ type State struct {
 }
 
 // read-only pointers for glyph view binding
+
 func (m *State) FolderNames() *[]string                       { return &m.folderNames }
 func (m *State) ThreadRows() *[]ThreadRow                     { return &m.threadRows }
 func (m *State) PreviewLines() *[]string                      { return &m.previewLines }
@@ -85,14 +90,40 @@ func (m *State) SetLinkOpener(open LinkOpener) {
 	m.linkOpener = open
 }
 
+func (m *State) SetAttachmentOpener(open LinkOpener) {
+	m.attachmentOpener = open
+}
+
+func (m *State) SetNotifiers(info, err func(string)) {
+	m.notify = info
+	m.notifyErr = err
+}
+
 func (m *State) OpenLink(href string) {
+	m.notifyInfo("opening link...")
 	if m.linkOpener == nil {
 		log.Printf("no link opener configured for %q", href)
+		m.notifyError("link opener not configured")
 		return
 	}
 	if err := m.linkOpener(href); err != nil {
 		log.Printf("open link %q: %v", href, err)
+		m.notifyError(fmt.Sprintf("open link: %v", err))
 	}
+}
+
+func (m *State) notifyInfo(text string) {
+	if m.notify != nil {
+		m.notify(text)
+	}
+}
+
+func (m *State) notifyError(text string) {
+	if m.notifyErr != nil {
+		m.notifyErr(text)
+		return
+	}
+	m.notifyInfo(text)
 }
 
 func (m *State) SetIMAP(imapClient *imap.IMAP) {
@@ -874,7 +905,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 		local = append(local, ConversationMessage{
 			Sender:         from,
 			Date:           msg.Date.Format("2 Jan 15:04"),
-			Attachments:    attachmentRows(msg.Attachments),
+			Attachments:    m.attachmentRows(msg),
 			HasAttachments: len(msg.Attachments) > 0,
 			Body:           doc.PlainText(),
 			BodySpans:      doc.GlyphSpansWithLinks(m.OpenLink),
@@ -947,7 +978,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 					continue
 				}
 				doc := m.renderDocument(thread.Messages[i])
-				m.conversation[i].Attachments = attachmentRows(thread.Messages[i].Attachments)
+				m.conversation[i].Attachments = m.attachmentRows(thread.Messages[i])
 				m.conversation[i].HasAttachments = len(thread.Messages[i].Attachments) > 0
 				m.conversation[i].Body = doc.PlainText()
 				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
@@ -1664,21 +1695,36 @@ type ConversationMessage struct {
 }
 
 type AttachmentRow struct {
-	Icon     string
-	Filename string
+	Icon        string
+	Filename    string
+	ContentType string
+	MessageID   string
+	Part        []int
+	Encoding    string
+	Display     []glyph.Span
 }
 
-func attachmentRows(attachments []provider.Attachment) []AttachmentRow {
-	rows := make([]AttachmentRow, 0, len(attachments))
-	for _, a := range attachments {
+func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
+	rows := make([]AttachmentRow, 0, len(msg.Attachments))
+	for _, a := range msg.Attachments {
 		name := a.Filename
 		if name == "" {
 			name = "attachment"
 		}
-		rows = append(rows, AttachmentRow{
-			Icon:     provider.AttachmentIcon(name, a.ContentType),
-			Filename: name,
-		})
+		row := AttachmentRow{
+			Icon:        provider.AttachmentIcon(name, a.ContentType),
+			Filename:    name,
+			ContentType: a.ContentType,
+			MessageID:   msg.ID,
+			Part:        append([]int(nil), a.Part...),
+			Encoding:    a.Encoding,
+		}
+		row.Display = []glyph.Span{
+			{Text: row.Icon},
+			{Text: " "},
+			{Text: row.Filename, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
+		}
+		rows = append(rows, row)
 	}
 	return rows
 }

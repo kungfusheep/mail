@@ -99,6 +99,7 @@ func main() {
 		State: mb,
 		Theme: t,
 	})
+	mb.SetNotifiers(model.Notify, model.NotifyError)
 
 	// continuous frame requests for time-based animation
 	go func() {
@@ -142,6 +143,7 @@ func main() {
 
 	fade := Animate
 	accentMarker := Style{FG: t.Accent}
+	attachmentTextStyle := Style{FG: t.Bright}
 
 	app.View("main",
 		VBox.PaddingTRBL(0, 2, 0, 2)(
@@ -264,10 +266,8 @@ func main() {
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
 										ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
-											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1)(
-												Text(&attachment.Icon).FG(t.Bright),
-												SpaceW(1),
-												Text(&attachment.Filename).FG(t.Bright).Bold(),
+											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1).CascadeStyle(&attachmentTextStyle)(
+												Rich(&attachment.Display),
 											)
 										}),
 									),

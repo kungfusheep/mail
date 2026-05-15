@@ -14,6 +14,7 @@ import (
 
 	imaplib "github.com/emersion/go-imap/v2"
 	"github.com/emersion/go-imap/v2/imapclient"
+	gomessage "github.com/emersion/go-message"
 	"github.com/emersion/go-message/mail"
 
 	// register charset decoders (iso-8859-1 etc.) for go-message
@@ -247,10 +248,11 @@ func (im *IMAP) GetMessage(id string) (provider.Message, error) {
 		uidSet := imaplib.UIDSetNum(uid)
 		bodySection := &imaplib.FetchItemBodySection{Peek: true}
 		fetchOpts := &imaplib.FetchOptions{
-			Envelope:    true,
-			Flags:       true,
-			UID:         true,
-			BodySection: []*imaplib.FetchItemBodySection{bodySection},
+			BodyStructure: &imaplib.FetchItemBodyStructure{Extended: true},
+			Envelope:      true,
+			Flags:         true,
+			UID:           true,
+			BodySection:   []*imaplib.FetchItemBodySection{bodySection},
 		}
 
 		messages, err := im.client.Fetch(uidSet, fetchOpts).Collect()
@@ -269,11 +271,75 @@ func (im *IMAP) GetMessage(id string) (provider.Message, error) {
 			text, html, attachments := parseBody(bodyBytes)
 			pm.TextBody = text
 			pm.HTMLBody = html
-			pm.Attachments = attachments
+			if len(pm.Attachments) == 0 {
+				pm.Attachments = attachments
+			}
 		}
 
 		return pm, nil
 	})
+}
+
+func (im *IMAP) GetAttachment(messageID string, part []int, contentType, encoding string) ([]byte, error) {
+	return withRetry(im, func() ([]byte, error) {
+		if len(part) == 0 {
+			return nil, fmt.Errorf("missing attachment part")
+		}
+
+		var uid imaplib.UID
+		fmt.Sscanf(messageID, "%d", &uid)
+		if uid == 0 {
+			return nil, fmt.Errorf("invalid message uid %q", messageID)
+		}
+
+		uidSet := imaplib.UIDSetNum(uid)
+		bodySection := &imaplib.FetchItemBodySection{
+			Peek: true,
+			Part: append([]int(nil), part...),
+		}
+		fetchOpts := &imaplib.FetchOptions{
+			UID:         true,
+			BodySection: []*imaplib.FetchItemBodySection{bodySection},
+		}
+
+		messages, err := im.client.Fetch(uidSet, fetchOpts).Collect()
+		if err != nil {
+			return nil, err
+		}
+		if len(messages) == 0 {
+			return nil, fmt.Errorf("message %s not found", messageID)
+		}
+
+		body := messages[0].FindBodySection(bodySection)
+		if body == nil {
+			return nil, fmt.Errorf("attachment part %v not found", part)
+		}
+		data, err := decodeAttachmentBody(body, contentType, encoding)
+		if err != nil {
+			return nil, err
+		}
+		return data, nil
+	})
+}
+
+func decodeAttachmentBody(body []byte, contentType, encoding string) ([]byte, error) {
+	if encoding == "" {
+		return append([]byte(nil), body...), nil
+	}
+	var header gomessage.Header
+	if contentType != "" {
+		header.Set("Content-Type", contentType)
+	}
+	header.Set("Content-Transfer-Encoding", encoding)
+	entity, err := gomessage.New(header, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(entity.Body)
+	if err != nil {
+		return nil, err
+	}
+	return data, nil
 }
 
 func (im *IMAP) Send(msg provider.Message) error {
@@ -703,7 +769,7 @@ func attachmentsFromBodyStructure(body imaplib.BodyStructure) []provider.Attachm
 		return nil
 	}
 	var attachments []provider.Attachment
-	body.Walk(func(_ []int, part imaplib.BodyStructure) bool {
+	body.Walk(func(path []int, part imaplib.BodyStructure) bool {
 		single, ok := part.(*imaplib.BodyStructureSinglePart)
 		if !ok {
 			return true
@@ -720,6 +786,8 @@ func attachmentsFromBodyStructure(body imaplib.BodyStructure) []provider.Attachm
 			Filename:    filename,
 			ContentType: single.MediaType(),
 			Size:        int64(single.Size),
+			Part:        append([]int(nil), path...),
+			Encoding:    single.Encoding,
 		})
 		return true
 	})

@@ -269,6 +269,7 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 			Attachments: []provider.Attachment{{
 				Filename:    "brief.pdf",
 				ContentType: "application/pdf",
+				Part:        []int{2},
 			}},
 		}},
 	}})
@@ -289,6 +290,68 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 	}
 	if got := msgs[0].Attachments[0].Filename; got != "brief.pdf" {
 		t.Fatalf("attachment filename = %q, want brief.pdf", got)
+	}
+	if got := msgs[0].Attachments[0].MessageID; got != "m1" {
+		t.Fatalf("attachment message id = %q, want m1", got)
+	}
+	if got := msgs[0].Attachments[0].Part; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("attachment part = %v, want [2]", got)
+	}
+	jumps := 0
+	for _, span := range msgs[0].Attachments[0].Display {
+		if span.OnSelect != nil {
+			jumps++
+		}
+	}
+	if jumps != 1 {
+		t.Fatalf("attachment display jump callbacks = %d, want 1", jumps)
+	}
+}
+
+func TestAttachmentJumpCallbackNotifiesOpening(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "attachments",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:       "m1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject:  "attachments",
+			Date:     now,
+			TextBody: "see attached",
+			Attachments: []provider.Attachment{{
+				Filename:    "brief.pdf",
+				ContentType: "application/pdf",
+				Part:        []int{2},
+			}},
+		}},
+	}})
+
+	var notices []string
+	var errors []string
+	mb := NewState(c, "me@example.com")
+	mb.SetNotifiers(func(text string) {
+		notices = append(notices, text)
+	}, func(text string) {
+		errors = append(errors, text)
+	})
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	msgs[0].Attachments[0].Display[2].OnSelect()
+
+	if len(notices) != 1 || notices[0] != "opening brief.pdf..." {
+		t.Fatalf("notices = %v, want opening attachment feedback", notices)
+	}
+	if len(errors) != 1 || errors[0] != "attachment: not connected" {
+		t.Fatalf("errors = %v, want not connected feedback", errors)
 	}
 }
 

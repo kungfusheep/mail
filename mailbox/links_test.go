@@ -14,14 +14,21 @@ func TestOpenSystemURLRejectsUnsafeSchemes(t *testing.T) {
 func TestStateOpenLinkUsesConfiguredOpener(t *testing.T) {
 	mb := NewState(nil, "test@example.com")
 	var opened string
+	var notices []string
 	mb.SetLinkOpener(func(href string) error {
 		opened = href
 		return nil
 	})
+	mb.SetNotifiers(func(text string) {
+		notices = append(notices, text)
+	}, nil)
 
 	mb.OpenLink("https://example.test")
 
 	if opened != "https://example.test" {
 		t.Fatalf("opened = %q, want configured link", opened)
+	}
+	if len(notices) != 1 || notices[0] != "opening link..." {
+		t.Fatalf("notices = %v, want opening feedback", notices)
 	}
 }

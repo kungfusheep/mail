@@ -76,6 +76,8 @@ type Attachment struct {
 	Filename    string
 	ContentType string
 	Size        int64
+	Part        []int
+	Encoding    string
 }
 
 func AttachmentIcon(filename, contentType string) string {

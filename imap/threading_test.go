@@ -51,9 +51,10 @@ func TestAttachmentsFromBodyStructure(t *testing.T) {
 				Size:    5,
 			},
 			&imaplib.BodyStructureSinglePart{
-				Type:    "application",
-				Subtype: "pdf",
-				Size:    1234,
+				Type:     "application",
+				Subtype:  "pdf",
+				Encoding: "base64",
+				Size:     1234,
 				Extended: &imaplib.BodyStructureSinglePartExt{
 					Disposition: &imaplib.BodyStructureDisposition{
 						Value:  "attachment",
@@ -76,6 +77,22 @@ func TestAttachmentsFromBodyStructure(t *testing.T) {
 	}
 	if attachments[0].Size != 1234 {
 		t.Fatalf("size = %d, want 1234", attachments[0].Size)
+	}
+	if got := attachments[0].Part; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("part = %v, want [2]", got)
+	}
+	if attachments[0].Encoding != "base64" {
+		t.Fatalf("encoding = %q, want base64", attachments[0].Encoding)
+	}
+}
+
+func TestDecodeAttachmentBodyDecodesBase64(t *testing.T) {
+	data, err := decodeAttachmentBody([]byte("JVBERi0xLjQ="), "application/pdf", "base64")
+	if err != nil {
+		t.Fatalf("decodeAttachmentBody: %v", err)
+	}
+	if string(data) != "%PDF-1.4" {
+		t.Fatalf("data = %q, want %%PDF-1.4", data)
 	}
 }
 
