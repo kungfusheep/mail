@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -263,8 +264,8 @@ func main() {
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
 										ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
-											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(t.GroupBG).PaddingVH(0, 1)(
-												Text(&attachment.Icon).FG(t.Subtle),
+											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1)(
+												Text(&attachment.Icon).FG(t.Bright),
 												SpaceW(1),
 												Text(&attachment.Filename).FG(t.Bright).Bold(),
 											)
@@ -380,4 +381,37 @@ func notificationRow(item *ui.Notification, t theme.Theme) Component {
 		),
 		Text(&item.Text).FG(t.Bright),
 	)
+}
+
+func attachmentFill(filename *string, t theme.Theme) *MatchC[string] {
+	return attachmentTone(filename, ReadableTint(t.BG, t.Subtle, t.Bright, 4.5, 0.20), func(base Color) Color {
+		return ReadableTint(t.BG, base, t.Bright, 4.5, 0.40)
+	})
+}
+
+func attachmentTone(filename *string, fallback Color, tone func(Color) Color) *MatchC[string] {
+	return Match(filename,
+		Where(func(name string) bool { return attachmentNameHas(name, ".pdf") }, tone(Hex(0xd65f5f))),
+		Where(func(name string) bool { return attachmentNameHasAny(name, ".doc", ".docx") }, tone(Hex(0x5f8fd6))),
+		Where(func(name string) bool { return attachmentNameHasAny(name, ".xls", ".xlsx", ".csv") }, tone(Hex(0x6fbf7a))),
+		Where(func(name string) bool { return attachmentNameHasAny(name, ".ppt", ".pptx") }, tone(Hex(0xd68a5f))),
+		Where(func(name string) bool { return attachmentNameHasAny(name, ".png", ".jpg", ".jpeg", ".gif", ".webp") }, tone(Hex(0x8f7ad6))),
+		Where(func(name string) bool {
+			return attachmentNameHasAny(name, ".mp3", ".wav", ".m4a", ".mov", ".mp4", ".mkv")
+		}, tone(Hex(0x63bfc7))),
+		Where(func(name string) bool { return attachmentNameHasAny(name, ".zip", ".tar", ".gz") }, tone(Hex(0xc99b55))),
+	).Default(fallback)
+}
+
+func attachmentNameHas(name, suffix string) bool {
+	return strings.HasSuffix(strings.ToLower(name), suffix)
+}
+
+func attachmentNameHasAny(name string, suffixes ...string) bool {
+	for _, suffix := range suffixes {
+		if attachmentNameHas(name, suffix) {
+			return true
+		}
+	}
+	return false
 }

@@ -74,7 +74,7 @@ func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 					VBox.Gap(1)(
 						SpaceH(1),
 						ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
-							return HBox.Border(BorderSoft).BorderFG(palette.GroupBG).Fill(palette.GroupBG).PaddingVH(0, 2)(
+							return HBox.Border(BorderSoft).BorderFG(palette.GroupBG).Fill(attachmentFill(&attachment.Filename, palette)).PaddingVH(0, 2)(
 								Text(&attachment.Icon),
 								SpaceW(1),
 								Text(&attachment.Filename).Bold(),
@@ -100,6 +100,24 @@ func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 	if strings.Index(rendered, "brief.pdf") >= strings.Index(rendered, "Body starts here") {
 		t.Fatalf("rendered preview = %q, want attachment before body", rendered)
 	}
+	wantFill := ReadableTint(palette.BG, Hex(0xd65f5f), palette.Bright, 4.5, 0.40)
+	if !bufferHasBG(buf, wantFill) {
+		t.Fatalf("rendered preview missing pdf fill tone")
+	}
+	if got := ContrastRatio(palette.Bright, wantFill); got < 4.5 {
+		t.Fatalf("pdf fill contrast = %.2f, want >= 4.5", got)
+	}
+}
+
+func bufferHasBG(buf *Buffer, want Color) bool {
+	for y := 0; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			if buf.Get(x, y).Style.BG == want {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func TestNotificationRowsRightAlignText(t *testing.T) {
