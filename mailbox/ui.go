@@ -204,6 +204,7 @@ func (m *UI) LoadPreview() {
 		m.App.RequestRender()
 	})
 	if m.ConvView != nil {
+		m.ConvView.Layer().ScrollToTop()
 		m.ConvView.Refresh()
 	}
 	m.App.RequestRender()

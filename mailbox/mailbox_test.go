@@ -8,6 +8,7 @@ import (
 	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/provider"
+	"github.com/kungfusheep/mail/theme"
 )
 
 func testCache(t *testing.T) *cache.Cache {
@@ -175,6 +176,51 @@ func spansContain(spans []glyph.Span, text string) bool {
 		}
 	}
 	return false
+}
+
+func TestThreadNavigationResetsPreviewScroll(t *testing.T) {
+	mb := testState(t, []provider.Folder{{ID: "INBOX", Name: "INBOX"}}, []provider.Thread{
+		{
+			ID:      "one",
+			Subject: "one",
+			Messages: []provider.Message{{
+				ID:        "m1",
+				MessageID: "m1",
+				From:      provider.Address{Name: "Alice", Email: "alice@example.com"},
+				Date:      time.Date(2026, 5, 15, 9, 0, 0, 0, time.UTC),
+				TextBody:  "first",
+			}},
+		},
+		{
+			ID:      "two",
+			Subject: "two",
+			Messages: []provider.Message{{
+				ID:        "m2",
+				MessageID: "m2",
+				From:      provider.Address{Name: "Bob", Email: "bob@example.com"},
+				Date:      time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC),
+				TextBody:  "second",
+			}},
+		},
+	})
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: testCache(t),
+		State: mb,
+		Theme: theme.Dark(),
+	})
+	scroll := glyph.ScrollView()
+	scroll.Layer().SetViewport(20, 5)
+	scroll.Layer().SetBuffer(glyph.NewBuffer(20, 20))
+	scroll.Layer().ScrollTo(8)
+	model.SetConversationView(scroll)
+
+	model.ThreadDown()
+
+	if got := scroll.Layer().ScrollY(); got != 0 {
+		t.Fatalf("preview scroll = %d, want 0 after thread navigation", got)
+	}
 }
 
 func TestLoadPreviewUsesDocumentModelForHTML(t *testing.T) {
