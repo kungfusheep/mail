@@ -12,6 +12,7 @@ import (
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/composeview"
+	"github.com/kungfusheep/mail/effects"
 	"github.com/kungfusheep/mail/helpdialog"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
@@ -141,9 +142,15 @@ func main() {
 		model.UpdateStatusOverlay()
 	})
 
-	fade := Animate
-	accentMarker := Style{FG: t.Accent}
-	attachmentTextStyle := Style{FG: t.Bright}
+	shade := Animate.Duration(380 * time.Millisecond).Ease(EaseOutCubic)
+
+	folderShade := effects.NewFocusShade(&model.FolderPaneRef).
+		Strength(In(shade(0.38)).Out(shade(0.0))).
+		Dodge(&model.HelpRef, omniBox.Ref())
+
+	threadShade := effects.NewFocusShade(&model.ThreadPaneRef).
+		Strength(In(shade(0.38)).Out(shade(0.0))).
+		Dodge(&model.HelpRef, omniBox.Ref())
 
 	app.View("main",
 		VBox.PaddingTRBL(0, 2, 0, 2)(
@@ -151,21 +158,28 @@ func main() {
 			ScreenEffect(composeTransition.SourceEffect()),
 			ScreenEffect(composeTransition.TargetEffect()),
 
+			If(&model.Pane).Ne(mailbox.FolderPane).Then(
+				ScreenEffect(folderShade),
+			),
+			If(&model.Pane).Ne(mailbox.ThreadPane).Then(
+				ScreenEffect(threadShade),
+			),
+
 			HBox.Grow(1).Gap(4)(
 
 				// left folder nav
-				VBox.Grow(1).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&model.FolderStyle)(
+				VBox.Grow(1).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.FolderPaneRef).CascadeStyle(&model.FolderStyle)(
 					HBox(
-						Text("mail").FG(t.Bright).Bold(),
+						Text("mail").Bold(),
 						SpaceW(2),
-						Text(&model.FolderTitle).FG(t.Subtle),
+						Text(&model.FolderTitle).Dim(),
 					),
 					SpaceH(2),
 					List(mb.FolderNames()).
 						Selection(&model.FolderSel).
-						Style(fade(&model.FolderListStyle)).
-						SelectedStyle(fade(&model.FolderSelStyle)).
-						Marker("● ").MarkerStyle(accentMarker),
+						Style(&model.FolderListStyle).
+						SelectedStyle(&model.FolderSelStyle).
+						Marker("● "),
 					If(&model.Pane).Eq(mailbox.FolderPane).Then(
 						On(
 							Key("j", model.FolderDown),
@@ -176,20 +190,20 @@ func main() {
 				),
 
 				// threads list
-				VBox.Grow(3).Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&model.ThreadStyle)(
+				VBox.Grow(3).Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.ThreadPaneRef).CascadeStyle(&model.ThreadStyle)(
 					HBox(
 						SpaceW(3),
 						Text(&model.FolderTitle).FG(t.Accent).Bold(),
 						SpaceW(1),
-						Text(&model.ThreadUnreadText).FG(t.Subtle),
+						Text(&model.ThreadUnreadText).Dim(),
 						Space(),
-						Text("Newest ▾").FG(t.Subtle),
+						Text("Newest ▾").Dim(),
 						SpaceW(2),
 					),
 					SpaceH(2),
 					List(mb.ThreadRows()).
 						Selection(&model.ThreadSel).
-						Style(fade(&model.ThreadListStyle)).
+						Style(&model.ThreadListStyle).
 						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) Component {
@@ -225,6 +239,30 @@ func main() {
 										SpaceW(2),
 										If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
 									),
+									If(&row.HasAttachments).Then(
+										HBox.Gap(1).Fill(itemBG).PaddingTRBL(0, 0, 0, 2)(
+											ForEach(&row.Attachments, func(chip *mailbox.AttachmentChip) Component {
+												return HBox.Width(22).Border(BorderSoft).BorderFG(
+													If(&row.Selected).Then(t.SelBG).Else(
+														If(&row.Grouped).Then(t.GroupBG).Else(t.ThreadBG),
+													),
+												).Fill(attachmentFill(&chip.FillName, t)).PaddingVH(0, 1)(
+													Text(&chip.Icon),
+													SpaceW(1),
+													Text(&chip.Filename),
+												)
+											}),
+											If(&row.HasAttachmentOverflow).Then(
+												HBox.Width(5).Border(BorderSoft).BorderFG(
+													If(&row.Selected).Then(t.SelBG).Else(
+														If(&row.Grouped).Then(t.GroupBG).Else(t.ThreadBG),
+													),
+												).Fill(t.GroupBG).PaddingVH(0, 1)(
+													Text(&row.AttachmentOverflow).Bold(),
+												),
+											),
+										),
+									),
 								),
 							)
 						}),
@@ -247,7 +285,8 @@ func main() {
 				),
 
 				// preview window
-				VBox.Grow(3).PaddingTRBL(1, 0, 0, 0).CascadeStyle(&model.PreviewStyle)(
+				VBox.Grow(3).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.PreviewPaneRef).CascadeStyle(&model.PreviewStyle)(
+
 					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) {
 						model.SetConversationView(sv)
 					})(
@@ -255,18 +294,14 @@ func main() {
 						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) Component {
 							return VBox(
 								HBox(
-									Text(&msg.Sender).Style(
-										If(&msg.IsMe).
-											Then(Style{Attr: AttrBold, FG: t.Accent}).
-											Else(Style{Attr: AttrBold}),
-									),
+									Text(&msg.Sender).Bold(),
 									SpaceW(1),
 									Text(&msg.Date).Dim(),
 								),
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
 										ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
-											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1).CascadeStyle(&attachmentTextStyle)(
+											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1)(
 												Rich(&attachment.Display),
 											)
 										}),

@@ -109,6 +109,86 @@ func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 	}
 }
 
+func TestThreadAttachmentChipBorderMatchesSelectedRowBG(t *testing.T) {
+	palette := theme.Dark()
+	rows := []mailbox.ThreadRow{
+		{
+			Label:          "receipt",
+			Sender:         "sales@example.com",
+			Date:           "2h",
+			Selected:       true,
+			HasAttachments: true,
+			Attachments: []mailbox.AttachmentChip{{
+				Icon:     "󰈦",
+				Filename: "invoice.pdf",
+				FillName: "invoice.pdf",
+			}},
+		},
+		{
+			Label:          "normal",
+			Sender:         "sales@example.com",
+			Date:           "3h",
+			Selected:       false,
+			HasAttachments: true,
+			Attachments: []mailbox.AttachmentChip{{
+				Icon:     "󰈦",
+				Filename: "normal.pdf",
+				FillName: "normal.pdf",
+			}},
+		},
+	}
+	view := VBox.Fill(palette.ThreadBG).Width(42)(
+		ForEach(&rows, func(row *mailbox.ThreadRow) Component {
+			itemBG := If(&row.Selected).Then(palette.SelBG).Else(palette.ThreadBG)
+			return VBox.Fill(itemBG).PaddingVH(1, 2)(
+				HBox(
+					Text(&row.Label),
+					SpaceW(2),
+					Text(&row.Date),
+				),
+				HBox(
+					Text(&row.Sender),
+				),
+				If(&row.HasAttachments).Then(
+					HBox.Gap(1).Fill(itemBG).PaddingTRBL(0, 0, 0, 2)(
+						ForEach(&row.Attachments, func(chip *mailbox.AttachmentChip) Component {
+							return HBox.Width(22).Border(BorderSoft).BorderFG(
+								If(&row.Selected).Then(palette.SelBG).Else(palette.ThreadBG),
+							).Fill(attachmentFill(&chip.FillName, palette)).PaddingVH(0, 1)(
+								Text(&chip.Icon),
+								SpaceW(1),
+								Text(&chip.Filename),
+							)
+						}),
+					),
+				),
+			)
+		}),
+	)
+
+	buf := NewBuffer(42, 14)
+	Build(view).Execute(buf, 42, 14)
+
+	x, y := findFirstRune(buf, '▀')
+	if x < 0 {
+		t.Fatalf("rendered chip has no soft top border:\n%s", buf.String())
+	}
+	border := buf.Get(x, y)
+	if border.Style.FG != palette.SelBG {
+		t.Fatalf("selected chip border fg = %v, want selected row bg %v\n%s", border.Style.FG, palette.SelBG, buf.String())
+	}
+	if got := buf.Get(0, y+1).Style.BG; got != palette.SelBG {
+		t.Fatalf("selected chip row gutter bg = %v, want selected row bg %v\n%s", got, palette.SelBG, buf.String())
+	}
+	x, y = findRuneAfter(buf, '▀', y+1)
+	if x < 0 {
+		t.Fatalf("rendered second chip has no soft top border:\n%s", buf.String())
+	}
+	if got := buf.Get(x, y).Style.FG; got != palette.ThreadBG {
+		t.Fatalf("normal chip border fg = %v, want thread bg %v\n%s", got, palette.ThreadBG, buf.String())
+	}
+}
+
 func bufferHasBG(buf *Buffer, want Color) bool {
 	for y := 0; y < buf.Height(); y++ {
 		for x := 0; x < buf.Width(); x++ {
@@ -118,6 +198,21 @@ func bufferHasBG(buf *Buffer, want Color) bool {
 		}
 	}
 	return false
+}
+
+func findFirstRune(buf *Buffer, want rune) (int, int) {
+	return findRuneAfter(buf, want, 0)
+}
+
+func findRuneAfter(buf *Buffer, want rune, startY int) (int, int) {
+	for y := startY; y < buf.Height(); y++ {
+		for x := 0; x < buf.Width(); x++ {
+			if buf.Get(x, y).Rune == want {
+				return x, y
+			}
+		}
+	}
+	return -1, -1
 }
 
 func TestNotificationRowsRightAlignText(t *testing.T) {

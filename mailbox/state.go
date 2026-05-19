@@ -740,6 +740,7 @@ func (m *State) BuildThreadDisplay() {
 		if m.cache != nil && m.ActiveFolderCanonical() != "Drafts" {
 			hasDraft = m.cache.HasDraft(t.ID)
 		}
+		chips, overflow := threadAttachmentChips(t.Messages, 2)
 		group := dateGroup(t.Date)
 		groupLabel := ""
 		if group != lastGroup {
@@ -747,16 +748,20 @@ func (m *State) BuildThreadDisplay() {
 			lastGroup = group
 		}
 		m.threadRows = append(m.threadRows, ThreadRow{
-			ThreadIdx:  i,
-			MsgIdx:     -1,
-			Label:      t.Subject,
-			Sender:     sender,
-			Date:       relativeTime(t.Date),
-			GroupLabel: groupLabel,
-			HasGroup:   groupLabel != "",
-			Unread:     t.Unread > 0,
-			Starred:    starred,
-			HasDraft:   hasDraft,
+			ThreadIdx:             i,
+			MsgIdx:                -1,
+			Label:                 t.Subject,
+			Sender:                sender,
+			Date:                  relativeTime(t.Date),
+			GroupLabel:            groupLabel,
+			HasGroup:              groupLabel != "",
+			Unread:                t.Unread > 0,
+			Starred:               starred,
+			HasDraft:              hasDraft,
+			Attachments:           chips,
+			HasAttachments:        len(chips) > 0,
+			AttachmentOverflow:    overflow,
+			HasAttachmentOverflow: overflow != "",
 		})
 	}
 	m.applySelected()
@@ -788,14 +793,19 @@ func (m *State) ToggleThread(sel int) {
 			if msg.From.Name != "" {
 				name = msg.From.Name
 			}
+			chips, overflow := threadAttachmentChips([]provider.Message{msg}, 2)
 			msgRows = append(msgRows, ThreadRow{
-				ThreadIdx: row.ThreadIdx,
-				MsgIdx:    j,
-				Label:     name,
-				Date:      relativeTime(msg.Date),
-				Unread:    !msg.Read,
-				Starred:   msg.Starred,
-				Grouped:   true,
+				ThreadIdx:             row.ThreadIdx,
+				MsgIdx:                j,
+				Label:                 name,
+				Date:                  relativeTime(msg.Date),
+				Unread:                !msg.Read,
+				Starred:               msg.Starred,
+				Attachments:           chips,
+				HasAttachments:        len(chips) > 0,
+				AttachmentOverflow:    overflow,
+				HasAttachmentOverflow: overflow != "",
+				Grouped:               true,
 			})
 		}
 		after := make([]ThreadRow, len(m.threadRows[sel+1:]))
@@ -1704,6 +1714,12 @@ type AttachmentRow struct {
 	Display     []glyph.Span
 }
 
+type AttachmentChip struct {
+	Icon     string
+	Filename string
+	FillName string
+}
+
 func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 	rows := make([]AttachmentRow, 0, len(msg.Attachments))
 	for _, a := range msg.Attachments {
@@ -1730,19 +1746,53 @@ func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 }
 
 type ThreadRow struct {
-	ThreadIdx  int
-	MsgIdx     int // -1 for thread header, >= 0 for message
-	Label      string
-	Sender     string
-	Date       string
-	GroupLabel string
-	HasGroup   bool
-	Unread     bool
-	Starred    bool
-	HasDraft   bool
-	Expanded   bool
-	Selected   bool
-	Grouped    bool
+	ThreadIdx             int
+	MsgIdx                int // -1 for thread header, >= 0 for message
+	Label                 string
+	Sender                string
+	Date                  string
+	GroupLabel            string
+	HasGroup              bool
+	Unread                bool
+	Starred               bool
+	HasDraft              bool
+	Attachments           []AttachmentChip
+	HasAttachments        bool
+	AttachmentOverflow    string
+	HasAttachmentOverflow bool
+	Expanded              bool
+	Selected              bool
+	Grouped               bool
+}
+
+func threadAttachmentChips(messages []provider.Message, limit int) ([]AttachmentChip, string) {
+	if limit <= 0 {
+		return nil, ""
+	}
+	total := 0
+	chips := make([]AttachmentChip, 0, limit)
+	for i := len(messages) - 1; i >= 0; i-- {
+		msg := messages[i]
+		for _, attachment := range msg.Attachments {
+			total++
+			if len(chips) >= limit {
+				continue
+			}
+			name := attachment.Filename
+			if name == "" {
+				name = "attachment"
+			}
+			chips = append(chips, AttachmentChip{
+				Icon:     provider.AttachmentIcon(name, attachment.ContentType),
+				Filename: truncate(name, 18),
+				FillName: name,
+			})
+		}
+	}
+	if total > len(chips) {
+		return chips, fmt.Sprintf("+%d", total-len(chips))
+	}
+	return chips, ""
 }
 
 func (m *State) SetSelected(sel int) {

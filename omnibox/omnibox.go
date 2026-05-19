@@ -43,6 +43,10 @@ func New(cfg Config) *OmniBox {
 	return box
 }
 
+func (b *OmniBox) Ref() *NodeRef {
+	return &b.ref
+}
+
 func (b *OmniBox) Open() {
 	if b.open {
 		return

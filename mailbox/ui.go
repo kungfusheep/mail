@@ -53,6 +53,9 @@ type UI struct {
 	LabelsOpen       bool
 	HelpOpen         bool
 	HelpRef          glyph.NodeRef
+	FolderPaneRef    glyph.NodeRef
+	ThreadPaneRef    glyph.NodeRef
+	PreviewPaneRef   glyph.NodeRef
 	Frame            int
 	FolderTitle      string
 	SearchQuery      string
@@ -75,20 +78,15 @@ type UI struct {
 
 func NewUI(cfg UIConfig) *UI {
 	m := &UI{
-		App:             cfg.App,
-		Cache:           cfg.Cache,
-		State:           cfg.State,
-		Theme:           cfg.Theme,
-		FolderTitle:     "Inbox",
-		Pane:            ThreadPane,
-		FolderStyle:     glyph.Style{FG: cfg.Theme.Dim},
-		ThreadStyle:     glyph.Style{FG: cfg.Theme.FG},
-		PreviewStyle:    glyph.Style{FG: cfg.Theme.Dim},
-		FolderListStyle: glyph.Style{FG: cfg.Theme.Dim},
-		FolderSelStyle:  glyph.Style{FG: cfg.Theme.Dim},
-		ThreadListStyle: glyph.Style{FG: cfg.Theme.FG},
-		statusFeed:      ui.NewFeed(time.Now),
+		App:         cfg.App,
+		Cache:       cfg.Cache,
+		State:       cfg.State,
+		Theme:       cfg.Theme,
+		FolderTitle: "Inbox",
+		Pane:        ThreadPane,
+		statusFeed:  ui.NewFeed(time.Now),
 	}
+	m.UpdateFocus()
 	m.UpdateThreadHeader()
 	m.UpdateStatusOverlay()
 	return m
@@ -168,23 +166,12 @@ func (m *UI) NotifyCompose(text string) {
 
 func (m *UI) UpdateFocus() {
 	t := m.Theme
-	m.FolderStyle = glyph.Style{FG: t.Dim}
-	m.ThreadStyle = glyph.Style{FG: t.Dim}
-	m.FolderListStyle = glyph.Style{FG: t.Dim}
-	m.FolderSelStyle = glyph.Style{FG: t.Dim}
-	m.ThreadListStyle = glyph.Style{FG: t.Dim}
-	m.PreviewStyle = glyph.Style{FG: t.Dim}
-	switch m.Pane {
-	case FolderPane:
-		m.FolderStyle = glyph.Style{FG: t.FG}
-		m.FolderListStyle = glyph.Style{FG: t.FG}
-		m.FolderSelStyle = glyph.Style{FG: t.Bright}
-	case ThreadPane:
-		m.ThreadStyle = glyph.Style{FG: t.FG}
-		m.ThreadListStyle = glyph.Style{FG: t.FG}
-	case PreviewPane:
-		m.PreviewStyle = glyph.Style{FG: t.FG}
-	}
+	m.FolderStyle = glyph.Style{FG: t.FG}
+	m.ThreadStyle = glyph.Style{FG: t.FG}
+	m.PreviewStyle = glyph.Style{FG: t.FG}
+	m.FolderListStyle = glyph.Style{FG: t.FG}
+	m.FolderSelStyle = glyph.Style{FG: t.Bright}
+	m.ThreadListStyle = glyph.Style{FG: t.FG}
 }
 
 func (m *UI) UpdateThreadHeader() {
@@ -596,11 +583,18 @@ func (m *UI) RefreshMail() {
 }
 
 func (m *UI) ShowKeyboardHelp() {
+	if m.HelpOpen {
+		return
+	}
 	m.HelpOpen = true
 }
 
 func (m *UI) ToggleKeyboardHelp() {
-	m.HelpOpen = !m.HelpOpen
+	if m.HelpOpen {
+		m.HelpOpen = false
+		return
+	}
+	m.HelpOpen = true
 }
 
 func (m *UI) TickFrame() {

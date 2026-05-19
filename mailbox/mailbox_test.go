@@ -252,6 +252,28 @@ func TestLoadPreviewUsesDocumentModelForHTML(t *testing.T) {
 	}
 }
 
+func TestUpdateFocusKeepsPaneStylesActiveForScreenEffects(t *testing.T) {
+	tm := theme.Dark()
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: testCache(t),
+		State: NewState(nil, "test@example.com"),
+		Theme: tm,
+	})
+
+	model.FocusPreview()
+
+	if model.ThreadStyle.FG != tm.FG {
+		t.Fatalf("thread style after preview focus = %v, want fg %v", model.ThreadStyle.FG, tm.FG)
+	}
+	if model.PreviewStyle.FG != tm.FG {
+		t.Fatalf("preview style after preview focus = %v, want fg %v", model.PreviewStyle.FG, tm.FG)
+	}
+	if model.FolderListStyle.FG != tm.FG {
+		t.Fatalf("folder list style after preview focus = %v, want fg %v", model.FolderListStyle.FG, tm.FG)
+	}
+}
+
 func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 	c := testCache(t)
 	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
@@ -933,7 +955,8 @@ func TestCacheRoundTrip_Threads(t *testing.T) {
 }
 
 func TestBuildThreadDisplay_DateGroups(t *testing.T) {
-	now := time.Now()
+	today := time.Now()
+	now := time.Date(today.Year(), today.Month(), today.Day(), 12, 0, 0, 0, today.Location())
 	mb := testState(t,
 		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
 		[]provider.Thread{
@@ -957,6 +980,47 @@ func TestBuildThreadDisplay_DateGroups(t *testing.T) {
 		if rows[i].HasGroup != (want[i] != "") {
 			t.Fatalf("row %d HasGroup = %v, want %v", i, rows[i].HasGroup, want[i] != "")
 		}
+	}
+}
+
+func TestBuildThreadDisplay_AttachmentChips(t *testing.T) {
+	now := time.Now()
+	mb := testState(t,
+		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
+		[]provider.Thread{{
+			ID:      "t1",
+			Subject: "receipts",
+			Date:    now,
+			Messages: []provider.Message{{
+				ID:   "m1",
+				Date: now,
+				Attachments: []provider.Attachment{
+					{Filename: "invoice.pdf", ContentType: "application/pdf"},
+					{Filename: "usage.csv", ContentType: "text/csv"},
+					{Filename: "notes.txt", ContentType: "text/plain"},
+				},
+			}},
+		}},
+	)
+
+	rows := *mb.ThreadRows()
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	if !rows[0].HasAttachments {
+		t.Fatalf("expected row to have attachment chips")
+	}
+	if len(rows[0].Attachments) != 2 {
+		t.Fatalf("attachment chips = %d, want 2", len(rows[0].Attachments))
+	}
+	if rows[0].Attachments[0].Filename != "invoice.pdf" {
+		t.Fatalf("first chip filename = %q, want invoice.pdf", rows[0].Attachments[0].Filename)
+	}
+	if rows[0].Attachments[0].Icon == "" {
+		t.Fatalf("first chip icon is empty")
+	}
+	if rows[0].AttachmentOverflow != "+1" || !rows[0].HasAttachmentOverflow {
+		t.Fatalf("overflow = %q/%v, want +1/true", rows[0].AttachmentOverflow, rows[0].HasAttachmentOverflow)
 	}
 }
 
