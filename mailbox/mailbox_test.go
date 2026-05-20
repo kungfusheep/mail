@@ -291,6 +291,7 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 			Attachments: []provider.Attachment{{
 				Filename:    "brief.pdf",
 				ContentType: "application/pdf",
+				Size:        153600,
 				Part:        []int{2},
 			}},
 		}},
@@ -313,6 +314,12 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 	if got := msgs[0].Attachments[0].Filename; got != "brief.pdf" {
 		t.Fatalf("attachment filename = %q, want brief.pdf", got)
 	}
+	if got := msgs[0].Attachments[0].Size; got != 153600 {
+		t.Fatalf("attachment size = %d, want 153600", got)
+	}
+	if got := msgs[0].Attachments[0].Metadata; got != "pdf · 150 KB" {
+		t.Fatalf("attachment metadata = %q, want pdf · 150 KB", got)
+	}
 	if got := msgs[0].Attachments[0].MessageID; got != "m1" {
 		t.Fatalf("attachment message id = %q, want m1", got)
 	}
@@ -327,6 +334,32 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 	}
 	if jumps != 1 {
 		t.Fatalf("attachment display jump callbacks = %d, want 1", jumps)
+	}
+}
+
+func TestAttachmentMetadataFormatsKindAndSize(t *testing.T) {
+	tests := []struct {
+		name        string
+		filename    string
+		contentType string
+		size        int64
+		want        string
+	}{
+		{name: "extension and kilobytes", filename: "brief.pdf", contentType: "application/pdf", size: 153600, want: "pdf · 150 KB"},
+		{name: "content type fallback", filename: "attachment", contentType: "text/calendar", size: 2048, want: "calendar · 2 KB"},
+		{name: "bytes", filename: "notes.txt", contentType: "text/plain", size: 72, want: "txt · 72 B"},
+		{name: "megabytes", filename: "photo.png", contentType: "image/png", size: 1572864, want: "png · 1.5 MB"},
+		{name: "kind only", filename: "invoice.csv", contentType: "text/csv", size: 0, want: "csv"},
+		{name: "size only", filename: "attachment", contentType: "", size: 1024, want: "1 KB"},
+		{name: "empty", filename: "attachment", contentType: "", size: 0, want: ""},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := attachmentMetadata(tt.filename, tt.contentType, tt.size); got != tt.want {
+				t.Fatalf("attachmentMetadata() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

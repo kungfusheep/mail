@@ -1708,6 +1708,8 @@ type AttachmentRow struct {
 	Icon        string
 	Filename    string
 	ContentType string
+	Size        int64
+	Metadata    string
 	MessageID   string
 	Part        []int
 	Encoding    string
@@ -1731,6 +1733,8 @@ func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 			Icon:        provider.AttachmentIcon(name, a.ContentType),
 			Filename:    name,
 			ContentType: a.ContentType,
+			Size:        a.Size,
+			Metadata:    attachmentMetadata(name, a.ContentType, a.Size),
 			MessageID:   msg.ID,
 			Part:        append([]int(nil), a.Part...),
 			Encoding:    a.Encoding,
@@ -1740,9 +1744,61 @@ func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 			{Text: " "},
 			{Text: row.Filename, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
 		}
+		if row.Metadata != "" {
+			row.Display = append(row.Display,
+				glyph.Span{Text: "  "},
+				glyph.Span{Text: row.Metadata, Style: glyph.Style{Attr: glyph.AttrDim}},
+			)
+		}
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func attachmentMetadata(filename, contentType string, size int64) string {
+	parts := make([]string, 0, 2)
+	if kind := attachmentKind(filename, contentType); kind != "" {
+		parts = append(parts, kind)
+	}
+	if formatted := attachmentSize(size); formatted != "" {
+		parts = append(parts, formatted)
+	}
+	return strings.Join(parts, " · ")
+}
+
+func attachmentKind(filename, contentType string) string {
+	if dot := strings.LastIndex(filename, "."); dot >= 0 && dot < len(filename)-1 {
+		return strings.ToLower(filename[dot+1:])
+	}
+	contentType = strings.ToLower(strings.TrimSpace(contentType))
+	if slash := strings.LastIndex(contentType, "/"); slash >= 0 && slash < len(contentType)-1 {
+		return strings.TrimPrefix(contentType[slash+1:], "x-")
+	}
+	return contentType
+}
+
+func attachmentSize(size int64) string {
+	if size <= 0 {
+		return ""
+	}
+	const unit = 1024
+	if size < unit {
+		return fmt.Sprintf("%d B", size)
+	}
+	if size < unit*unit {
+		return fmt.Sprintf("%d KB", (size+unit/2)/unit)
+	}
+	if size < unit*unit*unit {
+		return formatAttachmentUnit(float64(size)/(unit*unit), "MB")
+	}
+	return formatAttachmentUnit(float64(size)/(unit*unit*unit), "GB")
+}
+
+func formatAttachmentUnit(value float64, suffix string) string {
+	if value >= 10 {
+		return fmt.Sprintf("%.0f %s", value, suffix)
+	}
+	return fmt.Sprintf("%.1f %s", value, suffix)
 }
 
 type ThreadRow struct {

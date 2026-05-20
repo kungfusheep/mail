@@ -56,9 +56,20 @@ func TestPreviewTemplateRendersConversationSpans(t *testing.T) {
 func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 	palette := theme.Dark()
 	messages := []mailbox.ConversationMessage{{
-		Sender:         "Alice",
-		Date:           "13 May 09:30",
-		Attachments:    []mailbox.AttachmentRow{{Icon: "󰈦", Filename: "brief.pdf"}},
+		Sender: "Alice",
+		Date:   "13 May 09:30",
+		Attachments: []mailbox.AttachmentRow{{
+			Icon:     "󰈦",
+			Filename: "brief.pdf",
+			Metadata: "pdf · 150 KB",
+			Display: []Span{
+				{Text: "󰈦"},
+				{Text: " "},
+				{Text: "brief.pdf", Style: Style{Attr: AttrBold}},
+				{Text: "  "},
+				{Text: "pdf · 150 KB", Style: Style{Attr: AttrDim}},
+			},
+		}},
 		HasAttachments: true,
 		BodySpans:      []Span{{Text: "Body starts here"}},
 	}}
@@ -75,9 +86,7 @@ func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 						SpaceH(1),
 						ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
 							return HBox.Border(BorderSoft).BorderFG(palette.GroupBG).Fill(attachmentFill(&attachment.Filename, palette)).PaddingVH(0, 2)(
-								Text(&attachment.Icon),
-								SpaceW(1),
-								Text(&attachment.Filename).Bold(),
+								Rich(&attachment.Display),
 							)
 						}),
 					),
@@ -92,13 +101,16 @@ func TestPreviewTemplateRendersAttachmentsAboveBody(t *testing.T) {
 	Build(view).Execute(buf, 40, 10)
 
 	rendered := buf.String()
-	for _, want := range []string{"brief.pdf", "Body starts here"} {
+	for _, want := range []string{"brief.pdf", "pdf · 150 KB", "Body starts here"} {
 		if !strings.Contains(rendered, want) {
 			t.Fatalf("rendered preview = %q, want to contain %q", rendered, want)
 		}
 	}
 	if strings.Index(rendered, "brief.pdf") >= strings.Index(rendered, "Body starts here") {
 		t.Fatalf("rendered preview = %q, want attachment before body", rendered)
+	}
+	if strings.Index(rendered, "brief.pdf") >= strings.Index(rendered, "pdf · 150 KB") {
+		t.Fatalf("rendered preview = %q, want attachment metadata after filename", rendered)
 	}
 	wantFill := ReadableTint(palette.BG, Hex(0xd65f5f), palette.Bright, 4.5, 0.40)
 	if !bufferHasBG(buf, wantFill) {
