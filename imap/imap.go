@@ -776,15 +776,21 @@ func attachmentsFromBodyStructure(body imaplib.BodyStructure) []provider.Attachm
 		}
 		filename := single.Filename()
 		disp := single.Disposition()
-		if filename == "" && (disp == nil || !strings.EqualFold(disp.Value, "attachment")) {
+		contentType := single.MediaType()
+		isCalendar := strings.EqualFold(contentType, "text/calendar")
+		if filename == "" && !isCalendar && (disp == nil || !strings.EqualFold(disp.Value, "attachment")) {
 			return true
 		}
 		if filename == "" {
-			filename = "attachment"
+			if isCalendar {
+				filename = "invite.ics"
+			} else {
+				filename = "attachment"
+			}
 		}
 		attachments = append(attachments, provider.Attachment{
 			Filename:    filename,
-			ContentType: single.MediaType(),
+			ContentType: contentType,
 			Size:        int64(single.Size),
 			Part:        append([]int(nil), path...),
 			Encoding:    single.Encoding,

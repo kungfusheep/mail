@@ -86,6 +86,45 @@ func TestAttachmentsFromBodyStructure(t *testing.T) {
 	}
 }
 
+func TestAttachmentsFromBodyStructureIncludesInlineCalendar(t *testing.T) {
+	body := &imaplib.BodyStructureMultiPart{
+		Subtype: "mixed",
+		Children: []imaplib.BodyStructure{
+			&imaplib.BodyStructureSinglePart{
+				Type:    "text",
+				Subtype: "plain",
+				Size:    5,
+			},
+			&imaplib.BodyStructureSinglePart{
+				Type:     "text",
+				Subtype:  "calendar",
+				Encoding: "quoted-printable",
+				Size:     456,
+			},
+		},
+	}
+
+	attachments := attachmentsFromBodyStructure(body)
+	if len(attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(attachments))
+	}
+	if attachments[0].Filename != "invite.ics" {
+		t.Fatalf("filename = %q, want invite.ics", attachments[0].Filename)
+	}
+	if attachments[0].ContentType != "text/calendar" {
+		t.Fatalf("content type = %q, want text/calendar", attachments[0].ContentType)
+	}
+	if attachments[0].Size != 456 {
+		t.Fatalf("size = %d, want 456", attachments[0].Size)
+	}
+	if got := attachments[0].Part; len(got) != 1 || got[0] != 2 {
+		t.Fatalf("part = %v, want [2]", got)
+	}
+	if attachments[0].Encoding != "quoted-printable" {
+		t.Fatalf("encoding = %q, want quoted-printable", attachments[0].Encoding)
+	}
+}
+
 func TestDecodeAttachmentBodyDecodesBase64(t *testing.T) {
 	data, err := decodeAttachmentBody([]byte("JVBERi0xLjQ="), "application/pdf", "base64")
 	if err != nil {

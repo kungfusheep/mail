@@ -363,6 +363,238 @@ func TestAttachmentMetadataFormatsKindAndSize(t *testing.T) {
 	}
 }
 
+func TestLoadConversationShowsCalendarPlaceholderBeforeEnrichment(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "calendar",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:       "m1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject:  "calendar",
+			Date:     now,
+			TextBody: "see invite",
+			Attachments: []provider.Attachment{{
+				Filename:    "invite.ics",
+				ContentType: "text/calendar",
+				Size:        2048,
+				Part:        []int{2},
+			}},
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if len(msgs) != 1 || len(msgs[0].Attachments) != 1 {
+		t.Fatalf("conversation attachments = %#v, want one calendar attachment", msgs)
+	}
+	row := msgs[0].Attachments[0]
+	if !row.Calendar {
+		t.Fatal("attachment Calendar = false, want true")
+	}
+	if !spansContain(row.Display, "calendar invite") {
+		t.Fatalf("display = %#v, want calendar invite placeholder", row.Display)
+	}
+	if !spansContain(row.Display, "invite.ics") {
+		t.Fatalf("display = %#v, want filename as placeholder detail", row.Display)
+	}
+}
+
+func TestLoadConversationAsyncEnrichesCalendarAttachment(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "calendar",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:       "m1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject:  "calendar",
+			Date:     now,
+			TextBody: "see invite",
+			Attachments: []provider.Attachment{{
+				Filename:    "invite.ics",
+				ContentType: "text/calendar",
+				Size:        2048,
+				Part:        []int{2},
+			}},
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.attachmentFetcher = func(row AttachmentRow) ([]byte, error) {
+		return []byte("BEGIN:VCALENDAR\n" +
+			"BEGIN:VEVENT\n" +
+			"SUMMARY:Design review\n" +
+			"DTSTART:20260526T140000Z\n" +
+			"END:VEVENT\n" +
+			"END:VCALENDAR\n"), nil
+	}
+	updated := make(chan struct{}, 1)
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, func() { updated <- struct{}{} })
+
+	select {
+	case <-updated:
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("calendar attachment enrichment did not update preview")
+	}
+
+	msgs := *mb.ConversationMessages()
+	row := msgs[0].Attachments[0]
+	if row.CalendarTitle != "Design review" {
+		t.Fatalf("calendar title = %q, want Design review", row.CalendarTitle)
+	}
+	if row.CalendarWhen != "Tue 26 May, 14:00" {
+		t.Fatalf("calendar when = %q, want Tue 26 May, 14:00", row.CalendarWhen)
+	}
+	if !spansContain(row.Display, "Design review") || !spansContain(row.Display, "Tue 26 May, 14:00") {
+		t.Fatalf("display = %#v, want enriched calendar title and date", row.Display)
+	}
+	if spansContain(row.Display, "invite.ics") {
+		t.Fatalf("display = %#v, want event info to replace filename detail", row.Display)
+	}
+}
+
+func TestLoadConversationRefreshesSearchCalendarAttachmentBeforeEnrichment(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "calendar",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:       "m1",
+			From:     provider.Address{Name: "Wex", Email: "delivery@example.com"},
+			Subject:  "calendar",
+			Date:     now,
+			TextBody: "delivery notice",
+			Attachments: []provider.Attachment{{
+				Filename:    "DPD Delivery.ics",
+				ContentType: "text/calendar",
+			}},
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.messageFetcher = func(id string) (provider.Message, error) {
+		if id != "m1" {
+			t.Fatalf("message id = %q, want m1", id)
+		}
+		return provider.Message{
+			ID:       "m1",
+			TextBody: "delivery notice",
+			Attachments: []provider.Attachment{{
+				Filename:    "DPD Delivery.ics",
+				ContentType: "text/calendar",
+				Size:        2048,
+				Part:        []int{3},
+			}},
+		}, nil
+	}
+	mb.attachmentFetcher = func(row AttachmentRow) ([]byte, error) {
+		if len(row.Part) != 1 || row.Part[0] != 3 {
+			t.Fatalf("attachment part = %v, want [3]", row.Part)
+		}
+		return []byte("BEGIN:VCALENDAR\n" +
+			"BEGIN:VEVENT\n" +
+			"SUMMARY:DPD delivery\n" +
+			"DTSTART:20260516T073800Z\n" +
+			"END:VEVENT\n" +
+			"END:VCALENDAR\n"), nil
+	}
+	updated := make(chan struct{}, 4)
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, func() { updated <- struct{}{} })
+
+	deadline := time.After(500 * time.Millisecond)
+	for {
+		msgs := *mb.ConversationMessages()
+		if len(msgs) == 1 && len(msgs[0].Attachments) == 1 {
+			row := msgs[0].Attachments[0]
+			if row.CalendarTitle == "DPD delivery" && row.CalendarWhen == "Sat 16 May, 07:38" {
+				if !spansContain(row.Display, "DPD delivery") || !spansContain(row.Display, "Sat 16 May, 07:38") {
+					t.Fatalf("display = %#v, want enriched delivery summary", row.Display)
+				}
+				return
+			}
+		}
+
+		select {
+		case <-updated:
+		case <-deadline:
+			t.Fatalf("calendar attachment never enriched from refreshed search metadata: %#v", msgs)
+		}
+	}
+}
+
+func TestFetchFolderCandidatesFallBackToAllMailForSearchResults(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Google Mail]/All Mail", Name: "All Mail", Total: 40000},
+		{ID: "[Google Mail]/Bin", Name: "Bin"},
+	})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	candidates := mb.fetchFolderCandidates("search-only-thread")
+
+	want := []string{"INBOX", "[Google Mail]/All Mail"}
+	if len(candidates) != len(want) {
+		t.Fatalf("candidates = %v, want %v", candidates, want)
+	}
+	for i := range want {
+		if candidates[i] != want[i] {
+			t.Fatalf("candidates = %v, want %v", candidates, want)
+		}
+	}
+}
+
+func TestFetchFolderCandidatesIncludeCachedThreadLabels(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "Receipts", Name: "Receipts"},
+		{ID: "[Google Mail]/All Mail", Name: "All Mail", Total: 40000},
+	})
+	c.ReplaceThreads("Receipts", []provider.Thread{{ID: "t1", Subject: "receipt"}})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	candidates := mb.fetchFolderCandidates("t1")
+
+	want := []string{"INBOX", "Receipts", "[Google Mail]/All Mail"}
+	if len(candidates) != len(want) {
+		t.Fatalf("candidates = %v, want %v", candidates, want)
+	}
+	for i := range want {
+		if candidates[i] != want[i] {
+			t.Fatalf("candidates = %v, want %v", candidates, want)
+		}
+	}
+}
+
 func TestAttachmentJumpCallbackNotifiesOpening(t *testing.T) {
 	c := testCache(t)
 	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})

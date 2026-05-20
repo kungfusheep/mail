@@ -944,6 +944,10 @@ func (c *Cache) GetThread(id string) (provider.Thread, error) {
 	return t, nil
 }
 
+func (c *Cache) ThreadLabels(threadID string) []string {
+	return c.labelsForThread(threadID)
+}
+
 // messages
 
 func (c *Cache) PutMessage(msg provider.Message) error {

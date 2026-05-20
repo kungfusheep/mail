@@ -43,3 +43,20 @@ func TestParseAddressListEmpty(t *testing.T) {
 		t.Fatalf("ParseAddressList(\"\") = %+v, want nil", got)
 	}
 }
+
+func TestAttachmentIconCalendar(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		filename    string
+		contentType string
+	}{
+		{name: "content type", filename: "invite", contentType: "text/calendar"},
+		{name: "extension", filename: "invite.ics", contentType: "application/octet-stream"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AttachmentIcon(tt.filename, tt.contentType); got != "󰃭" {
+				t.Fatalf("AttachmentIcon() = %q, want calendar icon", got)
+			}
+		})
+	}
+}

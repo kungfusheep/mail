@@ -429,6 +429,7 @@ func attachmentTone(filename *string, fallback Color, tone func(Color) Color) *M
 		Where(func(name string) bool { return attachmentNameHas(name, ".pdf") }, tone(Hex(0xd65f5f))),
 		Where(func(name string) bool { return attachmentNameHasAny(name, ".doc", ".docx") }, tone(Hex(0x5f8fd6))),
 		Where(func(name string) bool { return attachmentNameHasAny(name, ".xls", ".xlsx", ".csv") }, tone(Hex(0x6fbf7a))),
+		Where(func(name string) bool { return attachmentNameHas(name, ".ics") }, tone(Hex(0x5fae95))),
 		Where(func(name string) bool { return attachmentNameHasAny(name, ".ppt", ".pptx") }, tone(Hex(0xd68a5f))),
 		Where(func(name string) bool { return attachmentNameHasAny(name, ".png", ".jpg", ".jpeg", ".gif", ".webp") }, tone(Hex(0x8f7ad6))),
 		Where(func(name string) bool {

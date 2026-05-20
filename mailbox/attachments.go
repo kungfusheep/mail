@@ -2,7 +2,6 @@ package mailbox
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -25,13 +24,7 @@ func (m *State) OpenAttachment(row AttachmentRow) {
 	}
 
 	go func() {
-		if folder := m.ActiveFolderID(); folder != "" {
-			if err := m.imap.SelectFolder(folder); err != nil {
-				log.Printf("attachment: select folder: %v", err)
-			}
-		}
-
-		data, err := m.imap.GetAttachment(row.MessageID, row.Part, row.ContentType, row.Encoding)
+		data, err := m.fetchAttachment(row)
 		if err != nil {
 			m.notifyError(fmt.Sprintf("attachment: %v", err))
 			return
@@ -52,6 +45,33 @@ func (m *State) OpenAttachment(row AttachmentRow) {
 			return
 		}
 	}()
+}
+
+func (m *State) fetchAttachment(row AttachmentRow) ([]byte, error) {
+	if m.attachmentFetcher != nil {
+		return m.attachmentFetcher(row)
+	}
+	if m.imap == nil {
+		return nil, fmt.Errorf("not connected")
+	}
+	var lastErr error
+	for _, folder := range m.fetchFolderCandidates(row.ThreadID) {
+		if folder != "" {
+			if err := m.imap.SelectFolder(folder); err != nil {
+				lastErr = err
+				continue
+			}
+		}
+		data, err := m.imap.GetAttachment(row.MessageID, row.Part, row.ContentType, row.Encoding)
+		if err == nil {
+			return data, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return nil, lastErr
+	}
+	return nil, fmt.Errorf("no folder candidates")
 }
 
 func writeAttachmentTemp(filename string, data []byte) (string, error) {

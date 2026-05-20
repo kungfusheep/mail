@@ -101,6 +101,8 @@ func AttachmentIcon(filename, contentType string) string {
 		strings.HasSuffix(name, ".mp4") ||
 		strings.HasSuffix(name, ".mkv"):
 		return "󰈫"
+	case strings.Contains(contentType, "calendar") || strings.HasSuffix(name, ".ics"):
+		return "󰃭"
 	case strings.Contains(contentType, "pdf") || strings.HasSuffix(name, ".pdf"):
 		return "󰈦"
 	case strings.HasSuffix(name, ".zip") ||

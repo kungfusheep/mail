@@ -24,7 +24,9 @@ type State struct {
 	notify     func(string)
 	notifyErr  func(string)
 
-	attachmentOpener LinkOpener
+	attachmentOpener  LinkOpener
+	attachmentFetcher func(AttachmentRow) ([]byte, error)
+	messageFetcher    func(string) (provider.Message, error)
 
 	folders []provider.Folder
 	active  int
@@ -892,6 +894,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 	// read or rebuild m.conversation freely while we prepare this one.
 	local := make([]ConversationMessage, 0, len(t.Messages))
 	var needFetch []int
+	var calendarTargets []calendarAttachmentTarget
 	for i := range t.Messages {
 		msg := t.Messages[i]
 		if msg.TextBody == "" && msg.HTMLBody == "" {
@@ -925,8 +928,11 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 
 		if msg.TextBody == "" && msg.HTMLBody == "" {
 			needFetch = append(needFetch, i)
+		} else if needsCalendarAttachmentParts(msg) {
+			needFetch = append(needFetch, i)
 		}
 	}
+	calendarTargets = calendarAttachmentTargets(local)
 
 	// Publish the built slice — tiny critical section, just a pointer
 	// swap. If a newer LoadConversation has already started, discard
@@ -940,6 +946,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 	if superseded {
 		return
 	}
+	m.enrichCalendarAttachments(epoch, calendarTargets, onUpdate)
 
 	// async fetch missing bodies from IMAP.
 	//
@@ -949,23 +956,31 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 	// nothing. Bodies for drafts are filled by reconcile's backfill path.
 	// Also avoids corrupting the threads table via the PutThread call
 	// below with a synthesised drafts projection.
-	if len(needFetch) > 0 && m.imap != nil && onUpdate != nil && m.ActiveFolderCanonical() != "Drafts" {
+	if len(needFetch) > 0 && (m.imap != nil || m.messageFetcher != nil) && onUpdate != nil && m.ActiveFolderCanonical() != "Drafts" {
 		thread := t
 		folder := m.ActiveFolderID()
 		targets := append([]int(nil), needFetch...)
 		go func() {
-			if err := m.imap.SelectFolder(folder); err != nil {
-				log.Printf("conversation: failed to select %s: %v", folder, err)
-				return
+			if m.messageFetcher == nil && folder != "" {
+				if err := m.imap.SelectFolder(folder); err != nil {
+					log.Printf("conversation: failed to select %s: %v", folder, err)
+					return
+				}
 			}
 			changed := false
 			for _, i := range targets {
-				full, err := m.imap.GetMessage(thread.Messages[i].ID)
+				full, err := m.fetchMessage(thread.Messages[i].ID)
 				if err != nil {
+					log.Printf("conversation: fetch message %s: %v", thread.Messages[i].ID, err)
 					continue
 				}
-				thread.Messages[i].TextBody = full.TextBody
-				thread.Messages[i].HTMLBody = full.HTMLBody
+				if full.TextBody != "" || full.HTMLBody != "" {
+					thread.Messages[i].TextBody = full.TextBody
+					thread.Messages[i].HTMLBody = full.HTMLBody
+				}
+				if len(full.Attachments) > 0 {
+					thread.Messages[i].Attachments = full.Attachments
+				}
 				changed = true
 			}
 			if !changed {
@@ -994,10 +1009,138 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
 				m.conversation[i].Segments = doc.Segments()
 			}
+			calendarTargets := calendarAttachmentTargets(m.conversation)
 			m.convMu.Unlock()
 			onUpdate()
+			m.enrichCalendarAttachments(epoch, calendarTargets, onUpdate)
 		}()
 	}
+}
+
+func (m *State) fetchMessage(id string) (provider.Message, error) {
+	if m.messageFetcher != nil {
+		return m.messageFetcher(id)
+	}
+	if m.imap == nil {
+		return provider.Message{}, fmt.Errorf("not connected")
+	}
+	var lastErr error
+	for _, folder := range m.fetchFolderCandidates(id) {
+		if folder != "" {
+			if err := m.imap.SelectFolder(folder); err != nil {
+				lastErr = err
+				continue
+			}
+		}
+		msg, err := m.imap.GetMessage(id)
+		if err == nil {
+			return msg, nil
+		}
+		lastErr = err
+	}
+	if lastErr != nil {
+		return provider.Message{}, lastErr
+	}
+	return provider.Message{}, fmt.Errorf("no folder candidates")
+}
+
+func needsCalendarAttachmentParts(msg provider.Message) bool {
+	for _, attachment := range msg.Attachments {
+		if isCalendarAttachment(attachment.Filename, attachment.ContentType) && len(attachment.Part) == 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func (m *State) fetchFolderCandidates(threadID string) []string {
+	var folders []string
+	add := func(folder string) {
+		if folder == "" {
+			return
+		}
+		for _, existing := range folders {
+			if existing == folder {
+				return
+			}
+		}
+		folders = append(folders, folder)
+	}
+
+	add(m.ActiveFolderID())
+	if m.cache != nil && threadID != "" {
+		for _, label := range m.cache.ThreadLabels(threadID) {
+			add(label)
+		}
+	}
+	add(m.FolderIDByDisplayName("Archive"))
+	return folders
+}
+
+type calendarAttachmentTarget struct {
+	ThreadID        string
+	MessageIndex    int
+	AttachmentIndex int
+	Row             AttachmentRow
+}
+
+func calendarAttachmentTargets(messages []ConversationMessage) []calendarAttachmentTarget {
+	var targets []calendarAttachmentTarget
+	for msgIdx := range messages {
+		for attachmentIdx := range messages[msgIdx].Attachments {
+			row := messages[msgIdx].Attachments[attachmentIdx]
+			if !row.Calendar || row.MessageID == "" || len(row.Part) == 0 {
+				continue
+			}
+			targets = append(targets, calendarAttachmentTarget{
+				ThreadID:        row.ThreadID,
+				MessageIndex:    msgIdx,
+				AttachmentIndex: attachmentIdx,
+				Row:             row,
+			})
+		}
+	}
+	return targets
+}
+
+func (m *State) enrichCalendarAttachments(epoch int64, targets []calendarAttachmentTarget, onUpdate func()) {
+	if len(targets) == 0 || onUpdate == nil || (m.imap == nil && m.attachmentFetcher == nil) {
+		return
+	}
+	go func() {
+		changed := false
+		for _, target := range targets {
+			data, err := m.fetchAttachment(target.Row)
+			if err != nil {
+				log.Printf("calendar attachment: fetch %s: %v", target.Row.Filename, err)
+				continue
+			}
+			summary, ok := parseCalendarSummary(string(data))
+			if !ok {
+				continue
+			}
+
+			m.convMu.Lock()
+			if m.convEpoch != epoch {
+				m.convMu.Unlock()
+				return
+			}
+			if target.MessageIndex >= len(m.conversation) ||
+				target.AttachmentIndex >= len(m.conversation[target.MessageIndex].Attachments) {
+				m.convMu.Unlock()
+				continue
+			}
+			row := &m.conversation[target.MessageIndex].Attachments[target.AttachmentIndex]
+			row.CalendarTitle = summary.Title
+			row.CalendarWhen = summary.When
+			row.Display = m.attachmentDisplay(*row)
+			m.convMu.Unlock()
+			changed = true
+		}
+		if changed {
+			onUpdate()
+		}
+	}()
 }
 
 func (m *State) resolveCachedBody(msg provider.Message) provider.Message {
@@ -1705,15 +1848,19 @@ type ConversationMessage struct {
 }
 
 type AttachmentRow struct {
-	Icon        string
-	Filename    string
-	ContentType string
-	Size        int64
-	Metadata    string
-	MessageID   string
-	Part        []int
-	Encoding    string
-	Display     []glyph.Span
+	Icon          string
+	Filename      string
+	ContentType   string
+	Size          int64
+	Metadata      string
+	Calendar      bool
+	CalendarTitle string
+	CalendarWhen  string
+	ThreadID      string
+	MessageID     string
+	Part          []int
+	Encoding      string
+	Display       []glyph.Span
 }
 
 type AttachmentChip struct {
@@ -1735,24 +1882,60 @@ func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 			ContentType: a.ContentType,
 			Size:        a.Size,
 			Metadata:    attachmentMetadata(name, a.ContentType, a.Size),
+			Calendar:    isCalendarAttachment(name, a.ContentType),
+			ThreadID:    msg.ThreadID,
 			MessageID:   msg.ID,
 			Part:        append([]int(nil), a.Part...),
 			Encoding:    a.Encoding,
 		}
-		row.Display = []glyph.Span{
-			{Text: row.Icon},
-			{Text: " "},
-			{Text: row.Filename, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
-		}
-		if row.Metadata != "" {
-			row.Display = append(row.Display,
-				glyph.Span{Text: "  "},
-				glyph.Span{Text: row.Metadata, Style: glyph.Style{Attr: glyph.AttrDim}},
-			)
-		}
+		row.Display = m.attachmentDisplay(row)
 		rows = append(rows, row)
 	}
 	return rows
+}
+
+func (m *State) attachmentDisplay(row AttachmentRow) []glyph.Span {
+	if row.Calendar {
+		title := row.CalendarTitle
+		if title == "" {
+			title = "calendar invite"
+		}
+		secondary := row.CalendarWhen
+		if secondary == "" && row.Filename != "" && row.Filename != "attachment" {
+			secondary = row.Filename
+		}
+		spans := []glyph.Span{
+			{Text: row.Icon},
+			{Text: " "},
+			{Text: title, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
+		}
+		if secondary != "" {
+			spans = append(spans,
+				glyph.Span{Text: "  "},
+				glyph.Span{Text: secondary, Style: glyph.Style{Attr: glyph.AttrDim}},
+			)
+		}
+		return spans
+	}
+
+	spans := []glyph.Span{
+		{Text: row.Icon},
+		{Text: " "},
+		{Text: row.Filename, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
+	}
+	if row.Metadata != "" {
+		spans = append(spans,
+			glyph.Span{Text: "  "},
+			glyph.Span{Text: row.Metadata, Style: glyph.Style{Attr: glyph.AttrDim}},
+		)
+	}
+	return spans
+}
+
+func isCalendarAttachment(filename, contentType string) bool {
+	name := strings.ToLower(filename)
+	contentType = strings.ToLower(contentType)
+	return strings.Contains(contentType, "text/calendar") || strings.HasSuffix(name, ".ics")
 }
 
 func attachmentMetadata(filename, contentType string, size int64) string {
