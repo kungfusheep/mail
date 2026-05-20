@@ -189,6 +189,51 @@ func TestThreadAttachmentChipBorderMatchesSelectedRowBG(t *testing.T) {
 	}
 }
 
+func TestThreadAttachmentChipsStayInsideNarrowRow(t *testing.T) {
+	palette := theme.Dark()
+	row := mailbox.ThreadRow{
+		Label:          "receipt",
+		Sender:         "sales@example.com",
+		Date:           "2h",
+		Selected:       true,
+		HasAttachments: true,
+		Attachments: []mailbox.AttachmentChip{
+			{Icon: "󰈦", Filename: "invoice.pdf", FillName: "invoice.pdf"},
+			{Icon: "󰈦", Filename: "receipt.pdf", FillName: "receipt.pdf"},
+		},
+	}
+	itemBG := If(&row.Selected).Then(palette.SelBG).Else(palette.ThreadBG)
+	view := VBox.Fill(palette.ThreadBG).Width(28)(
+		VBox.Fill(itemBG).PaddingVH(1, 2)(
+			Text(&row.Label),
+			If(&row.HasAttachments).Then(
+				HBox.Gap(1).Fill(itemBG).PaddingTRBL(0, 0, 0, 2)(
+					ForEach(&row.Attachments, func(chip *mailbox.AttachmentChip) Component {
+						return HBox.Width(22).Border(BorderSoft).BorderFG(
+							If(&row.Selected).Then(palette.SelBG).Else(palette.ThreadBG),
+						).Fill(attachmentFill(&chip.FillName, palette)).PaddingVH(0, 1)(
+							Text(&chip.Icon),
+							SpaceW(1),
+							Text(&chip.Filename),
+						)
+					}),
+				),
+			),
+		),
+	)
+
+	buf := NewBuffer(42, 8)
+	Build(view).Execute(buf, 42, 8)
+
+	for y := 0; y < buf.Height(); y++ {
+		for x := 28; x < buf.Width(); x++ {
+			if got := buf.Get(x, y).Style.BG; got != (Color{}) {
+				t.Fatalf("cell %d,%d bg = %v, want default outside narrow row\n%s", x, y, got, buf.String())
+			}
+		}
+	}
+}
+
 func bufferHasBG(buf *Buffer, want Color) bool {
 	for y := 0; y < buf.Height(); y++ {
 		for x := 0; x < buf.Width(); x++ {
