@@ -916,12 +916,15 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 
 		doc := m.renderDocument(msg)
 		local = append(local, ConversationMessage{
+			Subject:        msg.Subject,
+			HasSubject:     strings.TrimSpace(msg.Subject) != "",
 			Sender:         from,
 			Date:           msg.Date.Format("2 Jan 15:04"),
 			Attachments:    m.attachmentRows(msg),
 			HasAttachments: len(msg.Attachments) > 0,
 			Body:           doc.PlainText(),
 			BodySpans:      doc.GlyphSpansWithLinks(m.OpenLink),
+			BodyBlocks:     m.previewBodyBlocks(doc),
 			Segments:       doc.Segments(),
 			IsMe:           isMe,
 		})
@@ -1003,10 +1006,13 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 					continue
 				}
 				doc := m.renderDocument(thread.Messages[i])
+				m.conversation[i].Subject = thread.Messages[i].Subject
+				m.conversation[i].HasSubject = strings.TrimSpace(thread.Messages[i].Subject) != ""
 				m.conversation[i].Attachments = m.attachmentRows(thread.Messages[i])
 				m.conversation[i].HasAttachments = len(thread.Messages[i].Attachments) > 0
 				m.conversation[i].Body = doc.PlainText()
 				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
+				m.conversation[i].BodyBlocks = m.previewBodyBlocks(doc)
 				m.conversation[i].Segments = doc.Segments()
 			}
 			calendarTargets := calendarAttachmentTargets(m.conversation)
@@ -1193,6 +1199,21 @@ func (m *State) renderDocument(msg provider.Message) preview.Document {
 		body = preview.RenderHTML(body, "", 72)
 	}
 	return preview.ParseText(body)
+}
+
+func (m *State) previewBodyBlocks(doc preview.Document) []PreviewBodyBlock {
+	blocks := make([]PreviewBodyBlock, 0, len(doc.Blocks))
+	for _, block := range doc.Blocks {
+		if block.Empty() {
+			continue
+		}
+		blocks = append(blocks, PreviewBodyBlock{
+			Kind:           block.Kind,
+			HasSpaceBefore: len(blocks) > 0,
+			Spans:          block.GlyphSpansWithLinks(m.OpenLink),
+		})
+	}
+	return blocks
 }
 
 func (m *State) LoadPreview(msg provider.Message, width int) {
@@ -1837,14 +1858,23 @@ func formatAddresses(addrs []provider.Address) string {
 
 // ThreadRow is a display row — either a thread header or an expanded message
 type ConversationMessage struct {
+	Subject        string
+	HasSubject     bool
 	Sender         string
 	Date           string
 	Attachments    []AttachmentRow
 	HasAttachments bool
 	Body           string
 	BodySpans      []glyph.Span
+	BodyBlocks     []PreviewBodyBlock
 	Segments       []preview.Segment
 	IsMe           bool
+}
+
+type PreviewBodyBlock struct {
+	Kind           preview.BlockKind
+	HasSpaceBefore bool
+	Spans          []glyph.Span
 }
 
 type AttachmentRow struct {

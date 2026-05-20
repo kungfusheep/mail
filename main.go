@@ -293,10 +293,15 @@ func main() {
 						SpaceH(2),
 						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) Component {
 							return VBox(
-								HBox(
-									Text(&msg.Sender).Bold(),
-									SpaceW(1),
-									Text(&msg.Date).Dim(),
+								VBox(
+									If(&msg.HasSubject).Then(
+										Text(&msg.Subject).Bold(),
+									),
+									HBox(
+										Text(&msg.Sender).Dim(),
+										SpaceW(1),
+										Text(&msg.Date).Dim(),
+									),
 								),
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
@@ -308,7 +313,16 @@ func main() {
 									),
 								),
 								SpaceH(1),
-								Rich(&msg.BodySpans),
+								VBox(
+									ForEach(&msg.BodyBlocks, func(block *mailbox.PreviewBodyBlock) Component {
+										return VBox(
+											If(&block.HasSpaceBefore).Then(
+												SpaceH(1),
+											),
+											Rich(&block.Spans),
+										)
+									}),
+								),
 								SpaceH(1),
 							)
 						}),

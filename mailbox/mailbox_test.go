@@ -7,6 +7,7 @@ import (
 
 	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/cache"
+	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/mail/theme"
 )
@@ -360,6 +361,64 @@ func TestAttachmentMetadataFormatsKindAndSize(t *testing.T) {
 				t.Fatalf("attachmentMetadata() = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 19, 11, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "letter heading",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:      "m1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "letter heading",
+			Date:    now,
+			HTMLBody: `<html><body>
+				<h1>Account update</h1>
+				<p>Hello Pete, your account is ready.</p>
+				<ul><li>Review the details</li></ul>
+			</body></html>`,
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation messages = %d, want 1", len(msgs))
+	}
+	if got := msgs[0].Subject; got != "letter heading" {
+		t.Fatalf("subject = %q, want letter heading", got)
+	}
+	if !msgs[0].HasSubject {
+		t.Fatal("HasSubject = false, want true")
+	}
+	if len(msgs[0].BodyBlocks) != 3 {
+		t.Fatalf("body blocks = %d, want 3", len(msgs[0].BodyBlocks))
+	}
+	if msgs[0].BodyBlocks[0].HasSpaceBefore {
+		t.Fatal("first body block has space before it, want false")
+	}
+	if !msgs[0].BodyBlocks[1].HasSpaceBefore {
+		t.Fatal("second body block has no space before it, want true")
+	}
+	if got := msgs[0].BodyBlocks[0].Kind; got != preview.BlockHeading {
+		t.Fatalf("first block kind = %v, want heading", got)
+	}
+	if !spansContain(msgs[0].BodyBlocks[1].Spans, "Hello Pete") {
+		t.Fatalf("second block spans = %#v, want body paragraph", msgs[0].BodyBlocks[1].Spans)
+	}
+	if got := msgs[0].BodyBlocks[2].Kind; got != preview.BlockListItem {
+		t.Fatalf("third block kind = %v, want list item", got)
 	}
 }
 
