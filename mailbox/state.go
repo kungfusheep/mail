@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -13,6 +14,7 @@ import (
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/provider"
+	"github.com/kungfusheep/mail/senderid"
 )
 
 type State struct {
@@ -749,11 +751,22 @@ func (m *State) BuildThreadDisplay() {
 			groupLabel = group
 			lastGroup = group
 		}
+		senderEmail := firstThreadSenderEmail(t)
+		senderDomain := senderid.DomainFromEmail(senderEmail)
+		senderIdentity, _, _ := m.senderIdentity(senderDomain)
+		senderColor, hasSenderColor := senderDisplayColor(senderIdentity)
+		senderStyle := senderDisplayStyle(senderColor, hasSenderColor)
 		m.threadRows = append(m.threadRows, ThreadRow{
 			ThreadIdx:             i,
 			MsgIdx:                -1,
 			Label:                 t.Subject,
 			Sender:                sender,
+			SenderEmail:           senderEmail,
+			SenderDomain:          senderDomain,
+			SenderIdentity:        senderIdentity,
+			SenderColor:           senderColor,
+			HasSenderColor:        hasSenderColor,
+			SenderStyle:           senderStyle,
 			Date:                  relativeTime(t.Date),
 			GroupLabel:            groupLabel,
 			HasGroup:              groupLabel != "",
@@ -767,6 +780,73 @@ func (m *State) BuildThreadDisplay() {
 		})
 	}
 	m.applySelected()
+}
+
+func (m *State) SenderDomains(limit int) []string {
+	m.displayMu.Lock()
+	defer m.displayMu.Unlock()
+
+	seen := make(map[string]bool)
+	domains := make([]string, 0, limit)
+	for _, thread := range m.threads {
+		for _, msg := range thread.Messages {
+			domain := senderid.DomainFromEmail(msg.From.Email)
+			if domain == "" || seen[domain] {
+				continue
+			}
+			seen[domain] = true
+			domains = append(domains, domain)
+			if limit > 0 && len(domains) >= limit {
+				return domains
+			}
+		}
+	}
+	return domains
+}
+
+func firstThreadSenderEmail(t provider.Thread) string {
+	if len(t.Messages) == 0 {
+		return ""
+	}
+	return t.Messages[0].From.Email
+}
+
+func (m *State) senderIdentity(domain string) (cache.SenderIdentity, bool, error) {
+	if m.cache == nil || domain == "" {
+		return cache.SenderIdentity{}, false, nil
+	}
+	return m.cache.SenderIdentity(domain)
+}
+
+func senderDisplayColor(identity cache.SenderIdentity) (glyph.Color, bool) {
+	color, ok := parseHexColor(identity.ThemeColor)
+	if !ok {
+		return glyph.Color{}, false
+	}
+	bg := glyph.Hex(0x1c1c1c)
+	fg := glyph.Hex(0xe8e6e3)
+	return glyph.LerpToContrast(color, fg, bg, 3.0), true
+}
+
+func senderDisplayStyle(color glyph.Color, hasColor bool) glyph.Style {
+	style := glyph.Style{Attr: glyph.AttrDim}
+	if hasColor {
+		style.FG = color
+	}
+	return style
+}
+
+func parseHexColor(raw string) (glyph.Color, bool) {
+	raw = strings.TrimSpace(raw)
+	raw = strings.TrimPrefix(raw, "#")
+	if len(raw) != 6 {
+		return glyph.Color{}, false
+	}
+	value, err := strconv.ParseUint(raw, 16, 32)
+	if err != nil {
+		return glyph.Color{}, false
+	}
+	return glyph.Hex(uint32(value)), true
 }
 
 func (m *State) ToggleThread(sel int) {
@@ -913,12 +993,33 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 		if isMe {
 			from = "You"
 		}
+		fromLine := msg.From.String()
+		if isMe {
+			fromLine = "You <" + msg.From.Email + ">"
+		}
+		senderDomain := senderid.DomainFromEmail(msg.From.Email)
+		senderIdentity, _, _ := m.senderIdentity(senderDomain)
+		senderColor, hasSenderColor := senderDisplayColor(senderIdentity)
+		senderStyle := senderDisplayStyle(senderColor, hasSenderColor)
 
 		doc := m.renderDocument(msg)
 		local = append(local, ConversationMessage{
 			Subject:        msg.Subject,
 			HasSubject:     strings.TrimSpace(msg.Subject) != "",
 			Sender:         from,
+			SenderEmail:    msg.From.Email,
+			SenderDomain:   senderDomain,
+			SenderIdentity: senderIdentity,
+			SenderColor:    senderColor,
+			HasSenderColor: hasSenderColor,
+			SenderStyle:    senderStyle,
+			FromLine:       fromLine,
+			ToLine:         formatAddresses(msg.To),
+			HasTo:          len(msg.To) > 0,
+			CCLine:         formatAddresses(msg.CC),
+			HasCC:          len(msg.CC) > 0,
+			BCCLine:        formatAddresses(msg.BCC),
+			HasBCC:         len(msg.BCC) > 0,
 			Date:           msg.Date.Format("2 Jan 15:04"),
 			Attachments:    m.attachmentRows(msg),
 			HasAttachments: len(msg.Attachments) > 0,
@@ -1183,10 +1284,6 @@ func (m *State) cacheMessageBody(msg provider.Message) {
 	}
 }
 
-func (m *State) renderBody(msg provider.Message) string {
-	return m.renderDocument(msg).PlainText()
-}
-
 func (m *State) renderDocument(msg provider.Message) preview.Document {
 	body := msg.TextBody
 	if msg.HTMLBody != "" {
@@ -1208,12 +1305,29 @@ func (m *State) previewBodyBlocks(doc preview.Document) []PreviewBodyBlock {
 			continue
 		}
 		blocks = append(blocks, PreviewBodyBlock{
-			Kind:           block.Kind,
-			HasSpaceBefore: len(blocks) > 0,
-			Spans:          block.GlyphSpansWithLinks(m.OpenLink),
+			Kind:                block.Kind,
+			HasSpaceBefore:      len(blocks) > 0,
+			HasExtraSpaceBefore: len(blocks) > 0 && block.Kind == preview.BlockHeading,
+			Style:               previewBodyBlockStyle(block.Kind),
+			Spans:               block.GlyphSpansWithLinks(m.OpenLink),
 		})
 	}
 	return blocks
+}
+
+func previewBodyBlockStyle(kind preview.BlockKind) glyph.Style {
+	switch kind {
+	case preview.BlockHeading:
+		return glyph.Style{Attr: glyph.AttrBold}
+	case preview.BlockQuote, preview.BlockSignature, preview.BlockFooter, preview.BlockForwarded:
+		return glyph.Style{Attr: glyph.AttrDim}
+	case preview.BlockImage:
+		return glyph.Style{Attr: glyph.AttrDim | glyph.AttrItalic}
+	case preview.BlockDivider:
+		return glyph.Style{Attr: glyph.AttrDim}
+	default:
+		return glyph.Style{}
+	}
 }
 
 func (m *State) LoadPreview(msg provider.Message, width int) {
@@ -1861,6 +1975,19 @@ type ConversationMessage struct {
 	Subject        string
 	HasSubject     bool
 	Sender         string
+	SenderEmail    string
+	SenderDomain   string
+	SenderIdentity cache.SenderIdentity
+	SenderColor    glyph.Color
+	HasSenderColor bool
+	SenderStyle    glyph.Style
+	FromLine       string
+	ToLine         string
+	HasTo          bool
+	CCLine         string
+	HasCC          bool
+	BCCLine        string
+	HasBCC         bool
 	Date           string
 	Attachments    []AttachmentRow
 	HasAttachments bool
@@ -1872,9 +1999,11 @@ type ConversationMessage struct {
 }
 
 type PreviewBodyBlock struct {
-	Kind           preview.BlockKind
-	HasSpaceBefore bool
-	Spans          []glyph.Span
+	Kind                preview.BlockKind
+	HasSpaceBefore      bool
+	HasExtraSpaceBefore bool
+	Style               glyph.Style
+	Spans               []glyph.Span
 }
 
 type AttachmentRow struct {
@@ -2019,6 +2148,12 @@ type ThreadRow struct {
 	MsgIdx                int // -1 for thread header, >= 0 for message
 	Label                 string
 	Sender                string
+	SenderEmail           string
+	SenderDomain          string
+	SenderIdentity        cache.SenderIdentity
+	SenderColor           glyph.Color
+	HasSenderColor        bool
+	SenderStyle           glyph.Style
 	Date                  string
 	GroupLabel            string
 	HasGroup              bool

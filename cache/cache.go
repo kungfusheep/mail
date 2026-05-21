@@ -169,6 +169,18 @@ func (c *Cache) migrate() error {
 			updated_at INTEGER NOT NULL
 		);
 
+		CREATE TABLE IF NOT EXISTS sender_identities (
+			domain TEXT PRIMARY KEY,
+			display_name TEXT NOT NULL DEFAULT '',
+			icon_url TEXT NOT NULL DEFAULT '',
+			theme_color TEXT NOT NULL DEFAULT '',
+			bimi_logo_url TEXT NOT NULL DEFAULT '',
+			source TEXT NOT NULL DEFAULT '',
+			confidence INTEGER NOT NULL DEFAULT 0,
+			color_checked_at INTEGER NOT NULL DEFAULT 0,
+			updated_at INTEGER NOT NULL
+		);
+
 		CREATE TABLE IF NOT EXISTS journal (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			action TEXT NOT NULL,
@@ -196,6 +208,8 @@ func (c *Cache) migrate() error {
 	if err != nil {
 		return err
 	}
+
+	c.db.Exec(`ALTER TABLE sender_identities ADD COLUMN color_checked_at INTEGER NOT NULL DEFAULT 0`)
 
 	// one-shot migration: existing installs have a `folder` column on threads
 	// and messages — lift those values into the new label join tables. errors

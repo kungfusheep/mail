@@ -123,6 +123,12 @@ func TestGlyphSpansWithLinksAttachesCallbacksToLinkSpans(t *testing.T) {
 		if span.Text != "example" {
 			continue
 		}
+		if !span.Style.FG.Equal(linkStyle.FG) {
+			t.Fatalf("link span fg = %#v, want %#v", span.Style.FG, linkStyle.FG)
+		}
+		if span.Style.Attr&glyph.AttrUnderline == 0 {
+			t.Fatalf("link span attr = %v, want underline", span.Style.Attr)
+		}
 		if span.OnSelect == nil {
 			t.Fatalf("link span = %#v, want callback", span)
 		}
@@ -133,6 +139,59 @@ func TestGlyphSpansWithLinksAttachesCallbacksToLinkSpans(t *testing.T) {
 		return
 	}
 	t.Fatalf("spans = %#v, want link span", spans)
+}
+
+func TestGlyphSpansStyleInlineImagePlaceholders(t *testing.T) {
+	doc := ParseHTML(`<html><body>
+		<p>Before <img alt="Keynote app icon" src="https://example.test/keynote.png"> after.</p>
+	</body></html>`, "")
+
+	spans := doc.GlyphSpans()
+	for _, span := range spans {
+		if span.Text != " Keynote app icon" {
+			continue
+		}
+		if !span.Style.FG.Equal(imagePlaceholderStyle.FG) {
+			t.Fatalf("image span fg = %#v, want %#v", span.Style.FG, imagePlaceholderStyle.FG)
+		}
+		if span.Style.Attr&(glyph.AttrDim|glyph.AttrItalic|glyph.AttrUnderline) != glyph.AttrDim|glyph.AttrItalic {
+			t.Fatalf("image span attr = %v, want dim italic without link underline", span.Style.Attr)
+		}
+		return
+	}
+	t.Fatalf("spans = %#v, want inline image placeholder span", spans)
+}
+
+func TestGlyphSpansDeduplicateAdjacentImagePlaceholders(t *testing.T) {
+	doc := ParseHTML(`<html><body>
+		<p><img alt="Stripe" src="https://example.test/one.png"><img alt="Stripe" src="https://example.test/two.png"></p>
+	</body></html>`, "")
+
+	spans := doc.GlyphSpans()
+	count := 0
+	for _, span := range spans {
+		if span.Text == " Stripe" {
+			count++
+		}
+	}
+	if count != 1 {
+		t.Fatalf("spans = %#v, want one Stripe image placeholder", spans)
+	}
+}
+
+func TestParseHTMLDeduplicatesAdjacentImagePlaceholderBlocks(t *testing.T) {
+	doc := ParseHTML(`<html><body>
+		<p><img alt="Keynote app icon" src="https://example.test/desktop.png"></p>
+		<p><img alt="Keynote app icon" src="https://example.test/mobile.png"></p>
+		<p>Keynote</p>
+	</body></html>`, "")
+
+	if len(doc.Blocks) != 2 {
+		t.Fatalf("blocks = %d, want image placeholder and text block: %#v", len(doc.Blocks), doc.Blocks)
+	}
+	if got := doc.Blocks[0].PlainText(); got != " Keynote app icon" {
+		t.Fatalf("first block text = %q, want compact image placeholder", got)
+	}
 }
 
 func TestGlyphSpansWithLinksKeepsTableCellCallbacks(t *testing.T) {
@@ -325,7 +384,7 @@ func TestParseHTMLSkipsDecorativeEmailChrome(t *testing.T) {
 		"Thinking ahead pays off",
 		"Planning early means more control.",
 		"What investors need to know",
-		"[image: Performance chart]",
+		" Performance chart",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("plain text = %q, want %q included", got, want)

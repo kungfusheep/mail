@@ -74,3 +74,28 @@ func TestRuntimeOfflineSyncRefreshesCacheProjection(t *testing.T) {
 		t.Fatalf("thread row label = %q, want fixture thread", rows[0].Label)
 	}
 }
+
+func TestSenderIdentityFreshRequiresColourSamplingForColourlessRows(t *testing.T) {
+	now := time.Now()
+	maxAge := 14 * 24 * time.Hour
+
+	if senderIdentityFresh(cache.SenderIdentity{
+		ThemeColor: "#123456",
+		UpdatedAt:  now.Add(-time.Hour),
+	}, maxAge) != true {
+		t.Fatal("fresh theme colour row should not refresh")
+	}
+
+	if senderIdentityFresh(cache.SenderIdentity{
+		UpdatedAt:      now.Add(-time.Hour),
+		ColorCheckedAt: now.Add(-time.Hour),
+	}, maxAge) != true {
+		t.Fatal("fresh colourless row with recent colour check should not refresh")
+	}
+
+	if senderIdentityFresh(cache.SenderIdentity{
+		UpdatedAt: now.Add(-time.Hour),
+	}, maxAge) != false {
+		t.Fatal("fresh colourless row without colour check should refresh once")
+	}
+}

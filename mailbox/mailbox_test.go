@@ -1,6 +1,8 @@
 package mailbox
 
 import (
+	"bytes"
+	"log"
 	"strings"
 	"testing"
 	"time"
@@ -366,6 +368,9 @@ func TestAttachmentMetadataFormatsKindAndSize(t *testing.T) {
 
 func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
 	c := testCache(t)
+	if err := c.PutSenderIdentity(cache.SenderIdentity{Domain: "example.com", ThemeColor: "#ff3533"}); err != nil {
+		t.Fatal(err)
+	}
 	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
 	now := time.Date(2026, 5, 19, 11, 0, 0, 0, time.UTC)
 	c.ReplaceThreads("INBOX", []provider.Thread{{
@@ -375,6 +380,8 @@ func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
 		Messages: []provider.Message{{
 			ID:      "m1",
 			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			To:      []provider.Address{{Name: "Pete", Email: "pete@example.com"}},
+			CC:      []provider.Address{{Name: "Team", Email: "team@example.com"}},
 			Subject: "letter heading",
 			Date:    now,
 			HTMLBody: `<html><body>
@@ -402,6 +409,21 @@ func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
 	if !msgs[0].HasSubject {
 		t.Fatal("HasSubject = false, want true")
 	}
+	if !msgs[0].HasSenderColor {
+		t.Fatal("HasSenderColor = false, want sender theme colour from cache")
+	}
+	if got := msgs[0].FromLine; got != "Alice <alice@example.com>" {
+		t.Fatalf("from line = %q, want Alice address", got)
+	}
+	if got := msgs[0].ToLine; got != "Pete <pete@example.com>" {
+		t.Fatalf("to line = %q, want Pete address", got)
+	}
+	if got := msgs[0].CCLine; got != "Team <team@example.com>" {
+		t.Fatalf("cc line = %q, want Team address", got)
+	}
+	if !msgs[0].HasTo || !msgs[0].HasCC || msgs[0].HasBCC {
+		t.Fatalf("recipient flags to/cc/bcc = %v/%v/%v, want true/true/false", msgs[0].HasTo, msgs[0].HasCC, msgs[0].HasBCC)
+	}
 	if len(msgs[0].BodyBlocks) != 3 {
 		t.Fatalf("body blocks = %d, want 3", len(msgs[0].BodyBlocks))
 	}
@@ -414,11 +436,77 @@ func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
 	if got := msgs[0].BodyBlocks[0].Kind; got != preview.BlockHeading {
 		t.Fatalf("first block kind = %v, want heading", got)
 	}
+	if msgs[0].BodyBlocks[0].Style.Attr&glyph.AttrBold == 0 {
+		t.Fatalf("heading style attr = %v, want bold", msgs[0].BodyBlocks[0].Style.Attr)
+	}
 	if !spansContain(msgs[0].BodyBlocks[1].Spans, "Hello Pete") {
 		t.Fatalf("second block spans = %#v, want body paragraph", msgs[0].BodyBlocks[1].Spans)
 	}
 	if got := msgs[0].BodyBlocks[2].Kind; got != preview.BlockListItem {
 		t.Fatalf("third block kind = %v, want list item", got)
+	}
+}
+
+func TestPreviewBodyBlocksClassifySecondaryContent(t *testing.T) {
+	mb := NewState(nil, "me@example.com")
+	doc := preview.ParseHTML(`<html><body>
+		<p>Main content</p>
+		<blockquote><p>Older reply</p></blockquote>
+		<img alt="Performance chart" src="https://example.test/chart.png">
+		<hr>
+	</body></html>`, "")
+
+	blocks := mb.previewBodyBlocks(doc)
+	if len(blocks) != 4 {
+		t.Fatalf("body blocks = %d, want 4", len(blocks))
+	}
+	if blocks[1].Kind != preview.BlockQuote {
+		t.Fatalf("second block kind = %v, want quote", blocks[1].Kind)
+	}
+	if blocks[1].Style.Attr&glyph.AttrDim == 0 {
+		t.Fatalf("quote style attr = %v, want dim", blocks[1].Style.Attr)
+	}
+	if blocks[2].Kind != preview.BlockImage {
+		t.Fatalf("third block kind = %v, want image", blocks[2].Kind)
+	}
+	if blocks[2].Style.Attr&(glyph.AttrDim|glyph.AttrItalic) != glyph.AttrDim|glyph.AttrItalic {
+		t.Fatalf("image style attr = %v, want dim italic", blocks[2].Style.Attr)
+	}
+	if blocks[3].Kind != preview.BlockDivider {
+		t.Fatalf("fourth block kind = %v, want divider", blocks[3].Kind)
+	}
+}
+
+func TestSenderDomainsReturnsVisibleUniqueDomains(t *testing.T) {
+	mb := NewState(nil, "me@example.com")
+	mb.threads = []provider.Thread{
+		{Messages: []provider.Message{{From: provider.Address{Email: "one@mail.example.com"}}}},
+		{Messages: []provider.Message{{From: provider.Address{Email: "two@example.com"}}}},
+		{Messages: []provider.Message{{From: provider.Address{Email: "person@amazon.co.uk"}}}},
+	}
+
+	got := mb.SenderDomains(10)
+	want := []string{"example.com", "amazon.co.uk"}
+	if len(got) != len(want) {
+		t.Fatalf("domains = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Fatalf("domains = %v, want %v", got, want)
+		}
+	}
+}
+
+func TestSenderDisplayColorParsesThemeColor(t *testing.T) {
+	color, ok := senderDisplayColor(cache.SenderIdentity{ThemeColor: "#012169"})
+	if !ok {
+		t.Fatal("senderDisplayColor ok = false, want true")
+	}
+	if color.Mode == glyph.ColorDefault {
+		t.Fatalf("senderDisplayColor = %#v, want explicit colour", color)
+	}
+	if _, ok := senderDisplayColor(cache.SenderIdentity{ThemeColor: ""}); ok {
+		t.Fatal("senderDisplayColor empty ok = true, want false")
 	}
 }
 
@@ -698,6 +786,44 @@ func TestAttachmentJumpCallbackNotifiesOpening(t *testing.T) {
 	}
 	if len(errors) != 1 || errors[0] != "attachment: not connected" {
 		t.Fatalf("errors = %v, want not connected feedback", errors)
+	}
+}
+
+func TestOpenAttachmentLogsFailuresWithContext(t *testing.T) {
+	var logs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&logs)
+	t.Cleanup(func() { log.SetOutput(previous) })
+
+	var errors []string
+	mb := NewState(nil, "me@example.com")
+	mb.SetNotifiers(nil, func(text string) {
+		errors = append(errors, text)
+	})
+
+	mb.OpenAttachment(AttachmentRow{
+		Filename:    "brief.pdf",
+		MessageID:   "m1",
+		ThreadID:    "t1",
+		ContentType: "application/pdf",
+		Part:        []int{2},
+	})
+
+	if len(errors) != 1 || errors[0] != "attachment: not connected" {
+		t.Fatalf("errors = %v, want not connected feedback", errors)
+	}
+	for _, want := range []string{
+		"open attachment failed",
+		`filename="brief.pdf"`,
+		`message="m1"`,
+		`thread="t1"`,
+		`content_type="application/pdf"`,
+		"part=[2]",
+		"not connected",
+	} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("log = %q, want to contain %q", logs.String(), want)
+		}
 	}
 }
 

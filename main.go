@@ -235,7 +235,7 @@ func main() {
 									),
 									HBox(
 										SpaceW(2),
-										Text(&row.Sender).Dim(),
+										Text(&row.Sender).Style(&row.SenderStyle),
 										SpaceW(2),
 										If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
 									),
@@ -297,11 +297,15 @@ func main() {
 									If(&msg.HasSubject).Then(
 										Text(&msg.Subject).Bold(),
 									),
+									headerMetaRow("at", &msg.Date),
 									HBox(
-										Text(&msg.Sender).Dim(),
+										Text("from").Dim(),
 										SpaceW(1),
-										Text(&msg.Date).Dim(),
+										Text(&msg.FromLine).Style(&msg.SenderStyle),
 									),
+									If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine)),
+									If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine)),
+									If(&msg.HasBCC).Then(headerMetaRow("bcc", &msg.BCCLine)),
 								),
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
@@ -315,12 +319,7 @@ func main() {
 								SpaceH(1),
 								VBox(
 									ForEach(&msg.BodyBlocks, func(block *mailbox.PreviewBodyBlock) Component {
-										return VBox(
-											If(&block.HasSpaceBefore).Then(
-												SpaceH(1),
-											),
-											Rich(&block.Spans),
-										)
+										return previewBodyBlock(block, &block.Style)
 									}),
 								),
 								SpaceH(1),
@@ -429,6 +428,26 @@ func notificationRow(item *ui.Notification, t theme.Theme) Component {
 			).Default(t.Info),
 		),
 		Text(&item.Text).FG(t.Bright),
+	)
+}
+
+func previewBodyBlock(block *mailbox.PreviewBodyBlock, style *Style) Component {
+	return VBox.CascadeStyle(style)(
+		If(&block.HasSpaceBefore).Then(
+			SpaceH(1),
+		),
+		If(&block.HasExtraSpaceBefore).Then(
+			SpaceH(1),
+		),
+		Rich(&block.Spans),
+	)
+}
+
+func headerMetaRow(label string, value *string) Component {
+	return HBox(
+		Text(label).Dim(),
+		SpaceW(1),
+		Text(value).Dim(),
 	)
 }
 

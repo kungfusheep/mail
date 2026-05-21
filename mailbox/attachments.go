@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,10 +16,12 @@ func (m *State) OpenAttachment(row AttachmentRow) {
 	m.notifyInfo(fmt.Sprintf("opening %s...", name))
 
 	if m.imap == nil {
+		log.Printf("open attachment failed: filename=%q message=%q thread=%q content_type=%q part=%v: not connected", name, row.MessageID, row.ThreadID, row.ContentType, row.Part)
 		m.notifyError("attachment: not connected")
 		return
 	}
 	if row.MessageID == "" || len(row.Part) == 0 {
+		log.Printf("open attachment failed: filename=%q message=%q thread=%q content_type=%q part=%v: file part unavailable", name, row.MessageID, row.ThreadID, row.ContentType, row.Part)
 		m.notifyError("attachment: file part unavailable")
 		return
 	}
@@ -26,12 +29,14 @@ func (m *State) OpenAttachment(row AttachmentRow) {
 	go func() {
 		data, err := m.fetchAttachment(row)
 		if err != nil {
+			log.Printf("open attachment fetch failed: filename=%q message=%q thread=%q content_type=%q part=%v: %v", name, row.MessageID, row.ThreadID, row.ContentType, row.Part, err)
 			m.notifyError(fmt.Sprintf("attachment: %v", err))
 			return
 		}
 
 		path, err := writeAttachmentTemp(name, data)
 		if err != nil {
+			log.Printf("open attachment temp write failed: filename=%q message=%q thread=%q content_type=%q part=%v: %v", name, row.MessageID, row.ThreadID, row.ContentType, row.Part, err)
 			m.notifyError(fmt.Sprintf("attachment: %v", err))
 			return
 		}
@@ -41,6 +46,7 @@ func (m *State) OpenAttachment(row AttachmentRow) {
 			open = OpenSystemFile
 		}
 		if err := open(path); err != nil {
+			log.Printf("open attachment system open failed: filename=%q path=%q message=%q thread=%q content_type=%q part=%v: %v", name, path, row.MessageID, row.ThreadID, row.ContentType, row.Part, err)
 			m.notifyError(fmt.Sprintf("open attachment: %v", err))
 			return
 		}

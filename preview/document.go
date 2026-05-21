@@ -29,7 +29,11 @@ const (
 	InlineStrong InlineStyle = 1 << iota
 	InlineEmphasis
 	InlineCode
+	InlineImage
 )
+
+var imagePlaceholderStyle = glyph.Style{FG: glyph.Hex(0x3f3c38), Attr: glyph.AttrDim | glyph.AttrItalic}
+var linkStyle = glyph.Style{FG: glyph.Hex(0x7aa2f7), Attr: glyph.AttrUnderline}
 
 type Document struct {
 	Blocks []Block
@@ -303,7 +307,42 @@ func (d *Document) appendBlock(block Block) {
 	if previewChromeText(block.PlainText()) {
 		return
 	}
+	if len(d.Blocks) > 0 && duplicateImagePlaceholderBlock(d.Blocks[len(d.Blocks)-1], block) {
+		return
+	}
 	d.Blocks = append(d.Blocks, block)
+}
+
+func duplicateImagePlaceholderBlock(prev, next Block) bool {
+	prevText, ok := imagePlaceholderBlockText(prev)
+	if !ok {
+		return false
+	}
+	nextText, ok := imagePlaceholderBlockText(next)
+	return ok && prevText == nextText
+}
+
+func imagePlaceholderBlockText(block Block) (string, bool) {
+	if len(block.Inlines) == 0 || block.Table != nil {
+		return "", false
+	}
+	var text strings.Builder
+	for _, in := range block.Inlines {
+		if in.Text == "" {
+			continue
+		}
+		if in.Style&InlineImage == 0 {
+			return "", false
+		}
+		if text.Len() > 0 {
+			text.WriteByte(' ')
+		}
+		text.WriteString(strings.TrimSpace(in.Text))
+	}
+	if text.Len() == 0 {
+		return "", false
+	}
+	return text.String(), true
 }
 
 func findHTMLNode(n *html.Node, tag string) *html.Node {
@@ -671,7 +710,7 @@ func extractInline(n *html.Node, style InlineStyle, href string) []Inline {
 				continue
 			case "img":
 				if alt := imageText(c); alt != "" {
-					out = append(out, Inline{Text: alt, Href: htmlAttr(c, "src"), Style: style | InlineEmphasis})
+					out = append(out, Inline{Text: alt, Href: htmlAttr(c, "src"), Style: style | InlineEmphasis | InlineImage})
 				}
 				continue
 			}
@@ -940,8 +979,12 @@ func inlineGlyphStyle(base glyph.Style, in Inline) glyph.Style {
 	if in.Style&InlineCode != 0 {
 		style.Attr |= glyph.AttrDim
 	}
-	if in.Href != "" {
-		style.Attr |= glyph.AttrUnderline
+	if in.Style&InlineImage != 0 {
+		style.FG = imagePlaceholderStyle.FG
+		style.Attr |= imagePlaceholderStyle.Attr
+	} else if in.Href != "" {
+		style.FG = linkStyle.FG
+		style.Attr |= linkStyle.Attr
 	}
 	return style
 }
@@ -979,7 +1022,7 @@ func headingLevel(tag string) int {
 }
 
 func imageBlock(n *html.Node) Block {
-	return Block{Kind: BlockImage, Inlines: []Inline{{Text: imageText(n), Href: htmlAttr(n, "src"), Style: InlineEmphasis}}}
+	return Block{Kind: BlockImage, Inlines: []Inline{{Text: imageText(n), Href: htmlAttr(n, "src"), Style: InlineEmphasis | InlineImage}}}
 }
 
 func imageText(n *html.Node) string {
@@ -987,7 +1030,7 @@ func imageText(n *html.Node) string {
 	if !meaningfulImageAlt(alt) {
 		return ""
 	}
-	return "[image: " + alt + "]"
+	return " " + alt
 }
 
 func preText(n *html.Node) string {
@@ -1151,6 +1194,9 @@ func mergeInlineSpaces(in []Inline) []Inline {
 		prev := &out[len(out)-1]
 		if strings.Contains(prev.Text, "\n") || strings.Contains(next.Text, "\n") {
 			out = append(out, next)
+			continue
+		}
+		if prev.Style&InlineImage != 0 && next.Style&InlineImage != 0 && prev.Text == next.Text {
 			continue
 		}
 		if prev.Href == next.Href && prev.Style == next.Style {

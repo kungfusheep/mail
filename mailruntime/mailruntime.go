@@ -4,11 +4,13 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/contacts"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/senderid"
 )
 
 type Config struct {
@@ -47,6 +49,7 @@ func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime 
 func (r *Runtime) Start() {
 	if !r.cfg.Backend {
 		r.WatchActiveFolder()
+		go r.enrichVisibleSenders()
 		return
 	}
 
@@ -73,6 +76,7 @@ func (r *Runtime) Start() {
 		r.syncActiveFolderFromBackend()
 
 		go r.cacheContacts()
+		go r.enrichVisibleSenders()
 		r.WatchActiveFolder()
 	}()
 }
@@ -146,6 +150,7 @@ func (r *Runtime) syncActiveFolderFromBackend() {
 	}
 	r.threadsChanged()
 	r.render()
+	go r.enrichVisibleSenders()
 }
 
 func (r *Runtime) cacheContacts() {
@@ -158,6 +163,55 @@ func (r *Runtime) cacheContacts() {
 	if len(all) > 0 {
 		r.db.PutContacts(all)
 	}
+}
+
+func (r *Runtime) enrichVisibleSenders() {
+	if r.db == nil {
+		return
+	}
+	domains := r.mb.SenderDomains(50)
+	if len(domains) == 0 {
+		return
+	}
+
+	enricher := senderid.Enricher{}
+	changed := false
+	for _, domain := range domains {
+		identity, found, err := r.db.SenderIdentity(domain)
+		if err != nil {
+			log.Printf("sender identity cache: %v", err)
+			continue
+		}
+		if found && senderIdentityFresh(identity, 14*24*time.Hour) {
+			continue
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		identity = enricher.Enrich(ctx, domain)
+		cancel()
+		if identity.Domain == "" {
+			continue
+		}
+		if err := r.db.PutSenderIdentity(identity); err != nil {
+			log.Printf("sender identity save %s: %v", domain, err)
+			continue
+		}
+		changed = true
+	}
+	if changed {
+		r.mb.BuildThreadDisplay()
+		r.threadsChanged()
+		r.render()
+	}
+}
+
+func senderIdentityFresh(identity cache.SenderIdentity, maxAge time.Duration) bool {
+	if time.Since(identity.UpdatedAt) > maxAge {
+		return false
+	}
+	if identity.ThemeColor != "" {
+		return true
+	}
+	return !identity.ColorCheckedAt.IsZero() && time.Since(identity.ColorCheckedAt) <= maxAge
 }
 
 func (r *Runtime) status(text string) {
