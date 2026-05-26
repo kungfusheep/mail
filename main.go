@@ -327,6 +327,8 @@ func main() {
 											),
 										),
 										Text(&msg.FromLine).FG(t.Subtle),
+										If(&msg.HasUnsubscribe).Then(SpaceW(1)),
+										If(&msg.HasUnsubscribe).Then(Rich(&msg.UnsubscribeChip)),
 									),
 									If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine, t)),
 									If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine, t)),

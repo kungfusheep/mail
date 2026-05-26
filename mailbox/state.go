@@ -1002,6 +1002,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 		senderStyle := senderDisplayStyle(senderColor, hasSenderColor)
 
 		doc := m.renderDocument(msg)
+		unsubscribeURL := doc.UnsubscribeLink()
 		local = append(local, ConversationMessage{
 			Subject:        msg.Subject,
 			HasSubject:     strings.TrimSpace(msg.Subject) != "",
@@ -1013,6 +1014,11 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			HasSenderColor: hasSenderColor,
 			SenderStyle:    senderStyle,
 			FromLine:       fromLine,
+			UnsubscribeURL: unsubscribeURL,
+			HasUnsubscribe: unsubscribeURL != "",
+			UnsubscribeChip: unsubscribeChip(unsubscribeURL, func(href string) {
+				m.OpenLink(href)
+			}),
 			ToLine:         formatAddresses(msg.To),
 			HasTo:          len(msg.To) > 0,
 			CCLine:         formatAddresses(msg.CC),
@@ -1110,6 +1116,12 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 				m.conversation[i].HasSubject = strings.TrimSpace(thread.Messages[i].Subject) != ""
 				m.conversation[i].Attachments = m.attachmentRows(thread.Messages[i])
 				m.conversation[i].HasAttachments = len(thread.Messages[i].Attachments) > 0
+				unsubscribeURL := doc.UnsubscribeLink()
+				m.conversation[i].UnsubscribeURL = unsubscribeURL
+				m.conversation[i].HasUnsubscribe = unsubscribeURL != ""
+				m.conversation[i].UnsubscribeChip = unsubscribeChip(unsubscribeURL, func(href string) {
+					m.OpenLink(href)
+				})
 				m.conversation[i].Body = doc.PlainText()
 				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
 				m.conversation[i].BodyBlocks = m.previewBodyBlocks(doc)
@@ -1327,6 +1339,22 @@ func previewBodyBlockStyle(kind preview.BlockKind) glyph.Style {
 	default:
 		return glyph.Style{}
 	}
+}
+
+func unsubscribeChip(href string, open func(string)) []glyph.Span {
+	if href == "" {
+		return nil
+	}
+	return []glyph.Span{{
+		Text: "unsubscribe",
+		Style: glyph.Style{
+			FG:   glyph.Hex(0x7aa2f7),
+			Attr: glyph.AttrBold | glyph.AttrUnderline,
+		},
+		OnSelect: func() {
+			open(href)
+		},
+	}}
 }
 
 func (m *State) LoadPreview(msg provider.Message, width int) {
@@ -1992,30 +2020,33 @@ func formatAddresses(addrs []provider.Address) string {
 
 // ThreadRow is a display row — either a thread header or an expanded message
 type ConversationMessage struct {
-	Subject        string
-	HasSubject     bool
-	Sender         string
-	SenderEmail    string
-	SenderDomain   string
-	SenderIdentity cache.SenderIdentity
-	SenderColor    glyph.Color
-	HasSenderColor bool
-	SenderStyle    glyph.Style
-	FromLine       string
-	ToLine         string
-	HasTo          bool
-	CCLine         string
-	HasCC          bool
-	BCCLine        string
-	HasBCC         bool
-	Date           string
-	Attachments    []AttachmentRow
-	HasAttachments bool
-	Body           string
-	BodySpans      []glyph.Span
-	BodyBlocks     []PreviewBodyBlock
-	Segments       []preview.Segment
-	IsMe           bool
+	Subject         string
+	HasSubject      bool
+	Sender          string
+	SenderEmail     string
+	SenderDomain    string
+	SenderIdentity  cache.SenderIdentity
+	SenderColor     glyph.Color
+	HasSenderColor  bool
+	SenderStyle     glyph.Style
+	FromLine        string
+	UnsubscribeURL  string
+	HasUnsubscribe  bool
+	UnsubscribeChip []glyph.Span
+	ToLine          string
+	HasTo           bool
+	CCLine          string
+	HasCC           bool
+	BCCLine         string
+	HasBCC          bool
+	Date            string
+	Attachments     []AttachmentRow
+	HasAttachments  bool
+	Body            string
+	BodySpans       []glyph.Span
+	BodyBlocks      []PreviewBodyBlock
+	Segments        []preview.Segment
+	IsMe            bool
 }
 
 type PreviewBodyBlock struct {

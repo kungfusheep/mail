@@ -447,6 +447,61 @@ func TestLoadConversationCarriesSubjectAndPreviewBlocks(t *testing.T) {
 	}
 }
 
+func TestLoadConversationPromotesUnsubscribeLink(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "newsletter",
+		Date:    time.Now(),
+		Messages: []provider.Message{{
+			ID:      "m1",
+			From:    provider.Address{Name: "News", Email: "news@example.com"},
+			Subject: "newsletter",
+			HTMLBody: `<html><body>
+				<p>Main news.</p>
+				<p><a href="https://example.test/unsubscribe">Unsubscribe</a></p>
+			</body></html>`,
+		}},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	var opened string
+	mb.SetLinkOpener(func(href string) error {
+		opened = href
+		return nil
+	})
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("conversation messages = %d, want 1", len(msgs))
+	}
+	if !msgs[0].HasUnsubscribe {
+		t.Fatal("HasUnsubscribe = false, want true")
+	}
+	if got := msgs[0].UnsubscribeURL; got != "https://example.test/unsubscribe" {
+		t.Fatalf("UnsubscribeURL = %q", got)
+	}
+	if len(msgs[0].UnsubscribeChip) != 1 || msgs[0].UnsubscribeChip[0].OnSelect == nil {
+		t.Fatalf("unsubscribe chip = %#v, want clickable span", msgs[0].UnsubscribeChip)
+	}
+	if !msgs[0].UnsubscribeChip[0].Style.FG.Equal(glyph.Hex(0x7aa2f7)) {
+		t.Fatalf("unsubscribe chip fg = %#v, want link blue", msgs[0].UnsubscribeChip[0].Style.FG)
+	}
+	if msgs[0].UnsubscribeChip[0].Style.Attr&(glyph.AttrBold|glyph.AttrUnderline) != glyph.AttrBold|glyph.AttrUnderline {
+		t.Fatalf("unsubscribe chip attrs = %#v, want bold underline", msgs[0].UnsubscribeChip[0].Style.Attr)
+	}
+	msgs[0].UnsubscribeChip[0].OnSelect()
+	if opened != "https://example.test/unsubscribe" {
+		t.Fatalf("opened = %q, want unsubscribe href", opened)
+	}
+}
+
 func TestPreviewBodyBlocksClassifySecondaryContent(t *testing.T) {
 	mb := NewState(nil, "me@example.com")
 	doc := preview.ParseHTML(`<html><body>

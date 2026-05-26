@@ -127,6 +127,15 @@ func (d Document) Segments() []Segment {
 	return segments
 }
 
+func (d Document) UnsubscribeLink() string {
+	for _, block := range d.Blocks {
+		if href := block.UnsubscribeLink(); href != "" {
+			return href
+		}
+	}
+	return ""
+}
+
 func (d Document) GlyphSpans() []glyph.Span {
 	return d.GlyphSpansWithLinks(nil)
 }
@@ -178,6 +187,38 @@ func (b Block) PlainText() string {
 		writeInlinePlainText(&out, in.Text)
 	}
 	return out.String()
+}
+
+func (b Block) UnsubscribeLink() string {
+	if b.Kind == BlockTable && b.Table != nil {
+		return b.Table.UnsubscribeLink()
+	}
+	if href := unsubscribeInlinesLink(b.Inlines); href != "" {
+		return href
+	}
+	return contextualUnsubscribeLink(b.Inlines)
+}
+
+func unsubscribeInlinesLink(inlines []Inline) string {
+	for _, in := range inlines {
+		if unsubscribeInline(in) {
+			return in.Href
+		}
+	}
+	return ""
+}
+
+func contextualUnsubscribeLink(inlines []Inline) string {
+	text := inlineText(inlines)
+	if !unsubscribeContextText(text) {
+		return ""
+	}
+	for _, in := range inlines {
+		if in.Href != "" {
+			return in.Href
+		}
+	}
+	return ""
 }
 
 func (b Block) GlyphSpans() []glyph.Span {
@@ -290,6 +331,20 @@ func (t Table) HasHeader() bool {
 		}
 	}
 	return false
+}
+
+func (t Table) UnsubscribeLink() string {
+	for _, row := range t.Rows {
+		for _, cell := range row.Cells {
+			if href := unsubscribeInlinesLink(cell.Inlines); href != "" {
+				return href
+			}
+			if href := contextualUnsubscribeLink(cell.Inlines); href != "" {
+				return href
+			}
+		}
+	}
+	return ""
 }
 
 func (c TableCell) PlainText() string {
@@ -443,6 +498,12 @@ func extractBlocks(n *html.Node, doc *Document, quoted bool) {
 				continue
 			}
 			doc.appendBlock(Block{Kind: quoteAwareKind(BlockParagraph, quoted), Inlines: extractInline(c, 0, "")})
+		case "a", "strong", "b", "em", "i", "span", "code", "kbd", "samp":
+			if hasBlockChildren(c) {
+				extractBlocks(c, doc, quoted)
+				continue
+			}
+			doc.appendBlock(Block{Kind: quoteAwareKind(BlockParagraph, quoted), Inlines: extractInlineElement(c, 0, "")})
 		default:
 			if hasBlockChildren(c) {
 				extractBlocks(c, doc, quoted)
@@ -598,6 +659,36 @@ func tableRow(row *html.Node) TableRow {
 	return out
 }
 
+func extractInlineElement(n *html.Node, style InlineStyle, href string) []Inline {
+	if hiddenHTMLNode(n) {
+		return nil
+	}
+	switch n.Data {
+	case "strong", "b":
+		style |= InlineStrong
+	case "em", "i":
+		style |= InlineEmphasis
+	case "span":
+		if htmlStyleHas(n, "font-weight", "bold") || htmlStyleHas(n, "font-weight", "700") {
+			style |= InlineStrong
+		}
+	case "code", "kbd", "samp":
+		style |= InlineCode
+	case "a":
+		if h := htmlAttr(n, "href"); h != "" {
+			href = h
+		}
+	case "br":
+		return []Inline{{Text: "\n", Href: href, Style: style}}
+	case "img":
+		if alt := imageText(n); alt != "" {
+			return []Inline{{Text: alt, Href: htmlAttr(n, "src"), Style: style | InlineEmphasis | InlineImage}}
+		}
+		return nil
+	}
+	return extractInline(n, style, href)
+}
+
 func extractCellInline(n *html.Node) []Inline {
 	var out []Inline
 	for c := n.FirstChild; c != nil; c = c.NextSibling {
@@ -613,7 +704,7 @@ func extractCellInline(n *html.Node) []Inline {
 			if hiddenHTMLNode(c) {
 				continue
 			}
-			out = append(out, extractInline(c, 0, "")...)
+			out = append(out, extractInlineElement(c, 0, "")...)
 		}
 	}
 	return mergeInlineSpaces(out)
@@ -1124,6 +1215,36 @@ func hiddenHTMLNode(n *html.Node) bool {
 		strings.Contains(style, "mso-hide:all")
 }
 
+func unsubscribeInline(in Inline) bool {
+	if in.Href == "" {
+		return false
+	}
+	text := strings.ToLower(strings.Join(strings.Fields(in.Text), " "))
+	href := strings.ToLower(in.Href)
+	return strings.Contains(text, "unsubscribe") ||
+		strings.Contains(text, "manage preferences") ||
+		strings.Contains(text, "email preferences") ||
+		(strings.Contains(text, "manage") && strings.Contains(text, "notifications")) ||
+		strings.Contains(href, "unsubscribe") ||
+		strings.Contains(href, "email-preference") ||
+		strings.Contains(href, "email_preference") ||
+		strings.Contains(href, "preferences")
+}
+
+func unsubscribeContextText(text string) bool {
+	normalized := strings.ToLower(strings.Join(strings.Fields(text), " "))
+	return strings.Contains(normalized, "unsubscribe") ||
+		(strings.Contains(normalized, "subscribed") && strings.Contains(normalized, "notifications"))
+}
+
+func inlineText(inlines []Inline) string {
+	var out strings.Builder
+	for _, in := range inlines {
+		writeInlinePlainText(&out, in.Text)
+	}
+	return out.String()
+}
+
 func previewChromeText(text string) bool {
 	normalized := strings.ToLower(strings.Join(strings.Fields(text), " "))
 	if normalized == "" {
@@ -1133,7 +1254,6 @@ func previewChromeText(text string) bool {
 		"trouble viewing this email? view in browser",
 		"view in browser",
 		"view online",
-		"unsubscribe",
 		"manage your preferences",
 		"update contact preferences",
 		"send me less",

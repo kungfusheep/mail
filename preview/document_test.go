@@ -128,6 +128,62 @@ func TestParseHTMLKeepsFollowingProseInFooterSection(t *testing.T) {
 	}
 }
 
+func TestParseHTMLFindsUnsubscribeLink(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<p>Your newsletter is here.</p>
+			<p><a href="https://example.test/unsubscribe?id=123">Unsubscribe</a></p>
+		</body></html>
+	`, "")
+
+	if got := doc.UnsubscribeLink(); got != "https://example.test/unsubscribe?id=123" {
+		t.Fatalf("UnsubscribeLink = %q, want unsubscribe href", got)
+	}
+	if len(doc.Blocks) != 2 {
+		t.Fatalf("blocks = %d, want standalone unsubscribe block preserved", len(doc.Blocks))
+	}
+	if doc.Blocks[1].Kind != BlockFooter {
+		t.Fatalf("unsubscribe block kind = %v, want footer", doc.Blocks[1].Kind)
+	}
+}
+
+func TestParseHTMLFindsUnsubscribeLinkInTableCell(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<table><tr><td><a href="https://example.test/opt-out">unsubscribe here</a></td></tr></table>
+		</body></html>
+	`, "")
+
+	if got := doc.UnsubscribeLink(); got != "https://example.test/opt-out" {
+		t.Fatalf("UnsubscribeLink = %q, want table-cell unsubscribe href", got)
+	}
+}
+
+func TestParseHTMLFindsContextualUnsubscribeClickHere(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<p>To unsubscribe, <a href="https://example.test/click">click here</a>.</p>
+		</body></html>
+	`, "")
+
+	if got := doc.UnsubscribeLink(); got != "https://example.test/click" {
+		t.Fatalf("UnsubscribeLink = %q, want contextual click-here href", got)
+	}
+}
+
+func TestParseHTMLFindsNotificationManagementLink(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<p>You are receiving this because you are subscribed to this thread.
+			<a href="https://example.test/settings/notifications">Manage your GitHub Actions notifications</a></p>
+		</body></html>
+	`, "")
+
+	if got := doc.UnsubscribeLink(); got != "https://example.test/settings/notifications" {
+		t.Fatalf("UnsubscribeLink = %q, want notification-management href", got)
+	}
+}
+
 func TestGlyphSpansStylesBlocksAndInlines(t *testing.T) {
 	doc := Document{Blocks: []Block{
 		{
