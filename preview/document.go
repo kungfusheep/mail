@@ -307,10 +307,36 @@ func (d *Document) appendBlock(block Block) {
 	if previewChromeText(block.PlainText()) {
 		return
 	}
+	if blockFooterCandidate(block) || d.inFooterSection(block) {
+		block.Kind = BlockFooter
+	}
 	if len(d.Blocks) > 0 && duplicateImagePlaceholderBlock(d.Blocks[len(d.Blocks)-1], block) {
 		return
 	}
 	d.Blocks = append(d.Blocks, block)
+}
+
+func blockFooterCandidate(block Block) bool {
+	switch block.Kind {
+	case BlockParagraph, BlockListItem:
+		return isFooterLine(block.PlainText())
+	default:
+		return false
+	}
+}
+
+func (d *Document) inFooterSection(block Block) bool {
+	switch block.Kind {
+	case BlockParagraph, BlockListItem:
+	default:
+		return false
+	}
+	for _, existing := range d.Blocks {
+		if existing.Kind == BlockFooter {
+			return true
+		}
+	}
+	return false
 }
 
 func duplicateImagePlaceholderBlock(prev, next Block) bool {
@@ -983,8 +1009,12 @@ func inlineGlyphStyle(base glyph.Style, in Inline) glyph.Style {
 		style.FG = imagePlaceholderStyle.FG
 		style.Attr |= imagePlaceholderStyle.Attr
 	} else if in.Href != "" {
-		style.FG = linkStyle.FG
-		style.Attr |= linkStyle.Attr
+		if base.Attr&glyph.AttrDim != 0 {
+			style.Attr |= glyph.AttrBold | glyph.AttrUnderline
+		} else {
+			style.FG = linkStyle.FG
+			style.Attr |= linkStyle.Attr
+		}
 	}
 	return style
 }

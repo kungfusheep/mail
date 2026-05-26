@@ -77,6 +77,57 @@ func TestParseTextKeepsEmailSegments(t *testing.T) {
 	}
 }
 
+func TestParseHTMLClassifiesFooterBlocks(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<p>Your receipt is attached.</p>
+			<p>You are receiving this email because you bought something from us.</p>
+			<ul>
+				<li>Privacy policy</li>
+				<li>Terms and conditions</li>
+			</ul>
+			<p>Example Ltd, registered in England. Company number 123456.</p>
+		</body></html>
+	`, "")
+
+	if len(doc.Blocks) != 5 {
+		t.Fatalf("blocks = %d, want 5: %#v", len(doc.Blocks), doc.Blocks)
+	}
+	if doc.Blocks[0].Kind != BlockParagraph {
+		t.Fatalf("first block kind = %v, want paragraph", doc.Blocks[0].Kind)
+	}
+	for i := 1; i < len(doc.Blocks); i++ {
+		if doc.Blocks[i].Kind != BlockFooter {
+			t.Fatalf("block %d kind = %v, want footer: %#v", i, doc.Blocks[i].Kind, doc.Blocks[i])
+		}
+	}
+}
+
+func TestParseHTMLKeepsFollowingProseInFooterSection(t *testing.T) {
+	doc := ParseHTML(`
+		<html><body>
+			<p>Your delivery is booked.</p>
+			<p>Privacy policy</p>
+			<p>Example Logistics Ltd, 10 Example Street, London.</p>
+			<ul>
+				<li>Reference 12345</li>
+			</ul>
+		</body></html>
+	`, "")
+
+	if len(doc.Blocks) != 4 {
+		t.Fatalf("blocks = %d, want 4: %#v", len(doc.Blocks), doc.Blocks)
+	}
+	if doc.Blocks[0].Kind != BlockParagraph {
+		t.Fatalf("first block kind = %v, want paragraph", doc.Blocks[0].Kind)
+	}
+	for i := 1; i < len(doc.Blocks); i++ {
+		if doc.Blocks[i].Kind != BlockFooter {
+			t.Fatalf("block %d kind = %v, want footer: %#v", i, doc.Blocks[i].Kind, doc.Blocks[i])
+		}
+	}
+}
+
 func TestGlyphSpansStylesBlocksAndInlines(t *testing.T) {
 	doc := Document{Blocks: []Block{
 		{
@@ -139,6 +190,29 @@ func TestGlyphSpansWithLinksAttachesCallbacksToLinkSpans(t *testing.T) {
 		return
 	}
 	t.Fatalf("spans = %#v, want link span", spans)
+}
+
+func TestGlyphSpansKeepsFooterLinksMuted(t *testing.T) {
+	doc := Document{Blocks: []Block{
+		{Kind: BlockFooter, Inlines: []Inline{
+			{Text: "Privacy policy", Href: "https://example.test/privacy"},
+		}},
+	}}
+
+	spans := doc.GlyphSpans()
+	for _, span := range spans {
+		if span.Text != "Privacy policy" {
+			continue
+		}
+		if span.Style.FG.Mode != glyph.ColorDefault {
+			t.Fatalf("footer link FG = %#v, want inherited/default colour", span.Style.FG)
+		}
+		if span.Style.Attr&(glyph.AttrDim|glyph.AttrBold|glyph.AttrUnderline) != glyph.AttrDim|glyph.AttrBold|glyph.AttrUnderline {
+			t.Fatalf("footer link attr = %v, want dim bold underline", span.Style.Attr)
+		}
+		return
+	}
+	t.Fatalf("spans = %#v, want footer link span", spans)
 }
 
 func TestGlyphSpansStyleInlineImagePlaceholders(t *testing.T) {

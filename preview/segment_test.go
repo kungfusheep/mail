@@ -43,3 +43,18 @@ func TestSegmentText_ClassifiesFooterWithoutSignature(t *testing.T) {
 		t.Fatalf("second kind = %v, want footer", got[1].Kind)
 	}
 }
+
+func TestSegmentText_ClassifiesLegalFooterTerms(t *testing.T) {
+	body := "Your order is on its way.\n\nYou are receiving this email because you bought something from us.\nCopyright 2026 Example Ltd. All rights reserved.\nCompany number 123456."
+
+	got := SegmentText(body)
+	if len(got) != 2 {
+		t.Fatalf("segments = %d, want 2: %+v", len(got), got)
+	}
+	if got[0].Kind != SegmentMain {
+		t.Fatalf("first kind = %v, want main", got[0].Kind)
+	}
+	if got[1].Kind != SegmentFooter {
+		t.Fatalf("second kind = %v, want footer", got[1].Kind)
+	}
+}

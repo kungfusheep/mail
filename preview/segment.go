@@ -74,19 +74,43 @@ func isFooterLine(lower string) bool {
 	if lower == "" {
 		return false
 	}
+	lower = strings.ToLower(strings.Join(strings.Fields(lower), " "))
 	needles := []string{
 		"unsubscribe",
 		"email preferences",
+		"manage preferences",
 		"manage your subscription",
+		"update your preferences",
+		"update your contact preferences",
 		"privacy policy",
+		"privacy notice",
+		"cookie policy",
 		"terms & conditions",
 		"terms and conditions",
+		"terms of use",
+		"terms apply",
 		"registered office",
+		"registered address",
+		"registered in england",
+		"registered in wales",
+		"registered company",
+		"company registration",
 		"company number",
+		"vat number",
+		"all rights reserved",
+		"copyright",
+		"©",
+		"you are receiving this",
+		"received this email because",
+		"no longer wish to receive",
+		"mailing list",
+		"marketing communications",
+		"add us to your address book",
 		"this mailbox is not monitored",
 		"please do not reply",
 		"confidentiality notice",
 		"intended recipient",
+		"legal notice",
 	}
 	for _, needle := range needles {
 		if strings.Contains(lower, needle) {
