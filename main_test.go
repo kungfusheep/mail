@@ -6,9 +6,34 @@ import (
 
 	. "github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/ui"
 )
+
+func TestPreviewBodyStyleUsesReadableHierarchy(t *testing.T) {
+	palette := theme.Dark()
+
+	cases := []struct {
+		name string
+		kind preview.BlockKind
+		want Style
+	}{
+		{name: "heading", kind: preview.BlockHeading, want: Style{FG: palette.Bright, Attr: AttrBold}},
+		{name: "body", kind: preview.BlockParagraph, want: Style{FG: palette.FG}},
+		{name: "quote", kind: preview.BlockQuote, want: Style{FG: palette.Subtle, Attr: AttrItalic}},
+		{name: "image", kind: preview.BlockImage, want: Style{FG: palette.Dim, Attr: AttrDim | AttrItalic}},
+		{name: "divider", kind: preview.BlockDivider, want: Style{FG: palette.Muted, Attr: AttrDim}},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := previewBodyStyle(tc.kind, palette); !got.Equal(tc.want) {
+				t.Fatalf("previewBodyStyle = %#v, want %#v", got, tc.want)
+			}
+		})
+	}
+}
 
 func TestPreviewTemplateRendersConversationSpans(t *testing.T) {
 	messages := []mailbox.ConversationMessage{{

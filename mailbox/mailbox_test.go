@@ -510,6 +510,31 @@ func TestSenderDisplayColorParsesThemeColor(t *testing.T) {
 	}
 }
 
+func TestSenderDisplayStyleUsesBrandColourForMarker(t *testing.T) {
+	color := glyph.Hex(0x012169)
+	style := senderDisplayStyle(color, true)
+
+	if style.FG != color {
+		t.Fatalf("sender style FG = %#v, want brand colour %#v", style.FG, color)
+	}
+	if style.BG.Mode != glyph.ColorDefault {
+		t.Fatalf("sender style BG = %#v, want default background for marker", style.BG)
+	}
+	if style.Attr != 0 {
+		t.Fatalf("sender style attr = %v, want plain marker", style.Attr)
+	}
+}
+
+func TestSenderDisplayStyleKeepsUnknownSenderDim(t *testing.T) {
+	style := senderDisplayStyle(glyph.Color{}, false)
+	if style.Attr&glyph.AttrDim == 0 {
+		t.Fatalf("sender style attr = %v, want dim for unknown sender", style.Attr)
+	}
+	if style.BG.Mode != glyph.ColorDefault {
+		t.Fatalf("sender style BG = %#v, want default for unknown sender", style.BG)
+	}
+}
+
 func TestLoadConversationShowsCalendarPlaceholderBeforeEnrichment(t *testing.T) {
 	c := testCache(t)
 	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
@@ -1776,6 +1801,49 @@ func TestToggleRead_PreservesSelectedRow(t *testing.T) {
 	}
 }
 
+func TestMarkRead_PreservesSelectedRow(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1", Read: true}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Unread: 1, Messages: []provider.Message{{ID: "m2", Read: false}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.SetSelected(1)
+
+	undo, _ := mb.MarkRead(1)
+
+	rows := *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after mark read")
+	}
+	if rows[1].Unread {
+		t.Fatal("expected selected row to show read after mark read")
+	}
+	if !mb.threads[1].Messages[0].Read {
+		t.Fatal("expected selected thread message to be read after mark read")
+	}
+
+	undo()
+	rows = *mb.ThreadRows()
+	if !rows[1].Selected {
+		t.Fatal("expected selected row to remain selected after mark read undo")
+	}
+	if !rows[1].Unread {
+		t.Fatal("expected selected row to show unread after mark read undo")
+	}
+	if mb.threads[1].Messages[0].Read {
+		t.Fatal("expected selected thread message to be unread after mark read undo")
+	}
+}
+
 func TestArchive_KeepsSelectionOnSameVisibleIndex(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
@@ -1794,7 +1862,7 @@ func TestArchive_KeepsSelectionOnSameVisibleIndex(t *testing.T) {
 	mb.BuildThreadDisplay()
 
 	mb.SetSelected(1)
-	mb.Archive(1)
+	undo, _ := mb.Archive(1)
 
 	rows := *mb.ThreadRows()
 	if len(rows) != 2 {
@@ -1808,6 +1876,18 @@ func TestArchive_KeepsSelectionOnSameVisibleIndex(t *testing.T) {
 	}
 	if rows[0].Selected {
 		t.Fatalf("rows = %#v, want previous row unselected", rows)
+	}
+
+	undo()
+	rows = *mb.ThreadRows()
+	if len(rows) != 3 {
+		t.Fatalf("rows after archive undo = %d, want 3", len(rows))
+	}
+	if rows[1].Label != "second" {
+		t.Fatalf("row 1 after archive undo = %q, want second restored", rows[1].Label)
+	}
+	if !rows[1].Selected {
+		t.Fatalf("rows after archive undo = %#v, want restored row selected", rows)
 	}
 
 	mb.BuildThreadDisplay()
@@ -1852,6 +1932,10 @@ func TestDelete_WithExpandedThread(t *testing.T) {
 	undo()
 	if mb.ThreadLen() != 2 {
 		t.Fatalf("after undo: rows = %d, want 2", mb.ThreadLen())
+	}
+	rows = *mb.ThreadRows()
+	if rows[0].Label != "has messages" {
+		t.Fatalf("after undo row 0 = %q, want restored deleted thread", rows[0].Label)
 	}
 	trashed, _ = c.GetThreads("[Google Mail]/Bin", 25)
 	if len(trashed) != 0 {

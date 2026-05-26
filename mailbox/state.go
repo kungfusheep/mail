@@ -823,15 +823,14 @@ func senderDisplayColor(identity cache.SenderIdentity) (glyph.Color, bool) {
 	if !ok {
 		return glyph.Color{}, false
 	}
-	bg := glyph.Hex(0x1c1c1c)
-	fg := glyph.Hex(0xe8e6e3)
-	return glyph.LerpToContrast(color, fg, bg, 3.0), true
+	return color, true
 }
 
 func senderDisplayStyle(color glyph.Color, hasColor bool) glyph.Style {
 	style := glyph.Style{Attr: glyph.AttrDim}
 	if hasColor {
 		style.FG = color
+		style.Attr = 0
 	}
 	return style
 }
@@ -1432,17 +1431,14 @@ func (m *State) Archive(sel int) (undo func(), desc string) {
 	m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.cache.AddThreadToLabel(t.ID, dest)
-	m.LoadThreads()
-	m.BuildThreadDisplay()
-	m.SetSelected(sel)
+	threadIdx := m.removeThreadAtSelection(sel)
 
 	return func() {
 		m.cache.PutThread(thread)
 		m.cache.RemoveThreadFromLabel(thread.ID, dest)
 		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.queueMoveCommands(&thread, dest, folder)
-		m.LoadThreads()
-		m.BuildThreadDisplay()
+		m.insertThreadAt(threadIdx, thread)
 		m.SetSelected(sel)
 	}, fmt.Sprintf("archived '%s'", truncate(thread.Subject, 30))
 }
@@ -1461,19 +1457,41 @@ func (m *State) Delete(sel int) (undo func(), desc string) {
 	m.queueMoveCommands(t, folder, dest)
 	m.cache.RemoveThreadFromLabel(t.ID, folder)
 	m.cache.AddThreadToLabel(t.ID, dest)
-	m.LoadThreads()
-	m.BuildThreadDisplay()
-	m.SetSelected(sel)
+	threadIdx := m.removeThreadAtSelection(sel)
 
 	return func() {
 		m.cache.PutThread(thread)
 		m.cache.RemoveThreadFromLabel(thread.ID, dest)
 		m.cache.AddThreadToLabel(thread.ID, folder)
 		m.queueMoveCommands(&thread, dest, folder)
-		m.LoadThreads()
-		m.BuildThreadDisplay()
+		m.insertThreadAt(threadIdx, thread)
 		m.SetSelected(sel)
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
+}
+
+func (m *State) removeThreadAtSelection(sel int) int {
+	row := m.ThreadRowAt(sel)
+	if row == nil || row.ThreadIdx < 0 || row.ThreadIdx >= len(m.threads) {
+		return len(m.threads)
+	}
+	idx := row.ThreadIdx
+	m.threads = append(m.threads[:idx], m.threads[idx+1:]...)
+	m.BuildThreadDisplay()
+	m.SetSelected(sel)
+	return idx
+}
+
+func (m *State) insertThreadAt(idx int, thread provider.Thread) {
+	if idx < 0 {
+		idx = 0
+	}
+	if idx > len(m.threads) {
+		idx = len(m.threads)
+	}
+	m.threads = append(m.threads, provider.Thread{})
+	copy(m.threads[idx+1:], m.threads[idx:])
+	m.threads[idx] = thread
+	m.BuildThreadDisplay()
 }
 
 func (m *State) queueMoveCommands(t *provider.Thread, source, dest string) []string {
@@ -1608,20 +1626,22 @@ func (m *State) MarkRead(sel int) (undo func(), desc string) {
 	t.Unread = 0
 	thread := *t
 	m.cache.PutThread(*t)
-	m.LoadThreads()
 	m.BuildThreadDisplay()
+	m.SetSelected(sel)
 
 	return func() {
 		for _, id := range cmdIDs {
 			m.cancelCommand(id)
 		}
 		thread.Unread = beforeUnread
+		t.Unread = beforeUnread
 		for i := range thread.Messages {
 			thread.Messages[i].Read = beforeRead[i]
+			t.Messages[i].Read = beforeRead[i]
 		}
 		m.cache.PutThread(thread)
-		m.LoadThreads()
 		m.BuildThreadDisplay()
+		m.SetSelected(sel)
 	}, "marked read"
 }
 

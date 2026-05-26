@@ -1,7 +1,10 @@
 package main
 
 import (
+	"context"
+	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -18,6 +21,8 @@ import (
 	"github.com/kungfusheep/mail/mailbox"
 	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/omnibox"
+	"github.com/kungfusheep/mail/preview"
+	"github.com/kungfusheep/mail/senderid"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
@@ -25,6 +30,14 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "cache" {
+		if err := runCacheCommand(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	logFile, err := os.OpenFile(
 		filepath.Join(os.TempDir(), "mail.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644,
@@ -235,7 +248,13 @@ func main() {
 									),
 									HBox(
 										SpaceW(2),
-										Text(&row.Sender).Style(&row.SenderStyle),
+										If(&row.HasSenderColor).Then(
+											HBox(
+												Text("▐").Style(&row.SenderStyle),
+												SpaceW(1),
+											),
+										),
+										Text(&row.Sender).Dim(),
 										SpaceW(2),
 										If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
 									),
@@ -295,17 +314,23 @@ func main() {
 							return VBox(
 								VBox(
 									If(&msg.HasSubject).Then(
-										Text(&msg.Subject).Bold(),
+										Text(&msg.Subject).FG(t.Bright).Bold(),
 									),
-									headerMetaRow("at", &msg.Date),
+									headerMetaRow("at", &msg.Date, t),
 									HBox(
-										Text("from").Dim(),
+										Text("from").FG(t.Dim),
 										SpaceW(1),
-										Text(&msg.FromLine).Style(&msg.SenderStyle),
+										If(&msg.HasSenderColor).Then(
+											HBox(
+												Text("▐").Style(&msg.SenderStyle),
+												SpaceW(1),
+											),
+										),
+										Text(&msg.FromLine).FG(t.Subtle),
 									),
-									If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine)),
-									If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine)),
-									If(&msg.HasBCC).Then(headerMetaRow("bcc", &msg.BCCLine)),
+									If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine, t)),
+									If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine, t)),
+									If(&msg.HasBCC).Then(headerMetaRow("bcc", &msg.BCCLine, t)),
 								),
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
@@ -319,7 +344,7 @@ func main() {
 								SpaceH(1),
 								VBox(
 									ForEach(&msg.BodyBlocks, func(block *mailbox.PreviewBodyBlock) Component {
-										return previewBodyBlock(block, &block.Style)
+										return previewBodyBlock(block, t)
 									}),
 								),
 								SpaceH(1),
@@ -431,7 +456,152 @@ func notificationRow(item *ui.Notification, t theme.Theme) Component {
 	)
 }
 
-func previewBodyBlock(block *mailbox.PreviewBodyBlock, style *Style) Component {
+func runCacheCommand(args []string) error {
+	if len(args) < 1 {
+		return fmt.Errorf("usage: mail cache sender <inspect|clear|refresh> <domain-or-email>")
+	}
+	switch args[0] {
+	case "sender":
+		return runCacheSenderCommand(args[1:])
+	default:
+		return fmt.Errorf("unknown cache command %q", args[0])
+	}
+}
+
+func runCacheSenderCommand(args []string) error {
+	if len(args) != 2 {
+		return fmt.Errorf("usage: mail cache sender <inspect|clear|refresh> <domain-or-email>")
+	}
+	action := args[0]
+	domain := normalizeSenderDomain(args[1])
+	if domain == "" {
+		return fmt.Errorf("sender domain is empty")
+	}
+
+	db, err := openCache()
+	if err != nil {
+		return err
+	}
+	defer db.Close()
+
+	switch action {
+	case "inspect":
+		identity, ok, err := db.SenderIdentity(domain)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Printf("%s: no cached sender identity\n", domain)
+			return nil
+		}
+		printSenderIdentity(identity)
+		return nil
+	case "clear":
+		if err := db.DeleteSenderIdentity(domain); err != nil {
+			return err
+		}
+		fmt.Printf("%s: sender identity cache cleared\n", domain)
+		return nil
+	case "refresh":
+		if err := db.DeleteSenderIdentity(domain); err != nil {
+			return err
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
+		defer cancel()
+		identity := senderid.Enricher{}.Enrich(ctx, domain)
+		if identity.Domain == "" {
+			return fmt.Errorf("%s: sender identity refresh failed", domain)
+		}
+		if err := db.PutSenderIdentity(identity); err != nil {
+			return err
+		}
+		printSenderIdentity(identity)
+		return nil
+	default:
+		return fmt.Errorf("unknown sender cache command %q", action)
+	}
+}
+
+func openCache() (*cache.Cache, error) {
+	if cachePath := os.Getenv("MAIL_CACHE_PATH"); cachePath != "" {
+		return cache.NewAt(cachePath)
+	}
+	return cache.New()
+}
+
+func normalizeSenderDomain(raw string) string {
+	raw = strings.TrimSpace(strings.ToLower(raw))
+	if raw == "" {
+		return ""
+	}
+	if strings.Contains(raw, "@") {
+		return senderid.DomainFromEmail(raw)
+	}
+	if parsed, err := url.Parse(raw); err == nil && parsed.Host != "" {
+		raw = parsed.Host
+	}
+	raw = strings.TrimPrefix(raw, "www.")
+	raw = strings.TrimSuffix(raw, ".")
+	return raw
+}
+
+func printSenderIdentity(identity cache.SenderIdentity) {
+	fmt.Printf("domain: %s\n", identity.Domain)
+	fmt.Printf("display name: %s\n", identity.DisplayName)
+	fmt.Printf("icon url: %s\n", identity.IconURL)
+	fmt.Printf("theme colour: %s\n", identity.ThemeColor)
+	fmt.Printf("bimi logo url: %s\n", identity.BIMILogoURL)
+	fmt.Printf("source: %s\n", identity.Source)
+	fmt.Printf("confidence: %d\n", identity.Confidence)
+	fmt.Printf("colour checked: %s\n", formatCLITime(identity.ColorCheckedAt))
+	fmt.Printf("updated: %s\n", formatCLITime(identity.UpdatedAt))
+}
+
+func formatCLITime(t time.Time) string {
+	if t.IsZero() {
+		return ""
+	}
+	return t.Format(time.RFC3339)
+}
+
+func previewBodyBlock(block *mailbox.PreviewBodyBlock, t theme.Theme) Component {
+	heading := previewBodyStyle(preview.BlockHeading, t)
+	quote := previewBodyStyle(preview.BlockQuote, t)
+	secondary := previewBodyStyle(preview.BlockSignature, t)
+	image := previewBodyStyle(preview.BlockImage, t)
+	divider := previewBodyStyle(preview.BlockDivider, t)
+	body := previewBodyStyle(preview.BlockParagraph, t)
+
+	return If(&block.Kind).Eq(preview.BlockHeading).
+		Then(previewBodyBlockFrame(block, &heading)).
+		Else(
+			If(&block.Kind).Eq(preview.BlockQuote).
+				Then(previewBodyBlockFrame(block, &quote)).
+				Else(
+					If(&block.Kind).Eq(preview.BlockImage).
+						Then(previewBodyBlockFrame(block, &image)).
+						Else(
+							If(&block.Kind).Eq(preview.BlockDivider).
+								Then(previewBodyBlockFrame(block, &divider)).
+								Else(
+									If(&block.Kind).Eq(preview.BlockSignature).
+										Then(previewBodyBlockFrame(block, &secondary)).
+										Else(
+											If(&block.Kind).Eq(preview.BlockFooter).
+												Then(previewBodyBlockFrame(block, &secondary)).
+												Else(
+													If(&block.Kind).Eq(preview.BlockForwarded).
+														Then(previewBodyBlockFrame(block, &secondary)).
+														Else(previewBodyBlockFrame(block, &body)),
+												),
+										),
+								),
+						),
+				),
+		)
+}
+
+func previewBodyBlockFrame(block *mailbox.PreviewBodyBlock, style *Style) Component {
 	return VBox.CascadeStyle(style)(
 		If(&block.HasSpaceBefore).Then(
 			SpaceH(1),
@@ -443,11 +613,32 @@ func previewBodyBlock(block *mailbox.PreviewBodyBlock, style *Style) Component {
 	)
 }
 
-func headerMetaRow(label string, value *string) Component {
+func previewBodyStyle(kind preview.BlockKind, t theme.Theme) Style {
+	switch kind {
+	case preview.BlockHeading:
+		return Style{FG: t.Bright, Attr: AttrBold}
+	case preview.BlockQuote:
+		return Style{FG: t.Subtle, Attr: AttrItalic}
+	case preview.BlockSignature, preview.BlockFooter, preview.BlockForwarded:
+		return Style{FG: t.Dim, Attr: AttrDim}
+	case preview.BlockImage:
+		return Style{FG: t.Dim, Attr: AttrDim | AttrItalic}
+	case preview.BlockDivider:
+		return Style{FG: t.Muted, Attr: AttrDim}
+	case preview.BlockListItem:
+		return Style{FG: t.FG}
+	case preview.BlockCode, preview.BlockTable:
+		return Style{FG: t.FG}
+	default:
+		return Style{FG: t.FG}
+	}
+}
+
+func headerMetaRow(label string, value *string, t theme.Theme) Component {
 	return HBox(
-		Text(label).Dim(),
+		Text(label).FG(t.Dim),
 		SpaceW(1),
-		Text(value).Dim(),
+		Text(value).FG(t.Subtle),
 	)
 }
 

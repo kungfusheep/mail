@@ -29,6 +29,13 @@ func cursorColor(ed *compose.Editor) Color {
 	}
 }
 
+func replySubject(subject string) string {
+	if strings.HasPrefix(strings.ToLower(subject), "re:") {
+		return subject
+	}
+	return "Re: " + subject
+}
+
 func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) mailbox.ComposeControls {
 	if notify == nil {
 		notify = func(string) {}
@@ -57,6 +64,35 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 
 	var pendingCursorShow bool
 
+	setHeaderFields := func(nextTo, nextCC, nextSubject string) {
+		to = nextTo
+		cc = nextCC
+		subject = nextSubject
+		fieldTo.Value = nextTo
+		fieldTo.Cursor = len(nextTo)
+		fieldCC.Value = nextCC
+		fieldCC.Cursor = len(nextCC)
+		fieldSubject.Value = nextSubject
+		fieldSubject.Cursor = len(nextSubject)
+	}
+
+	repairMissingReplyHeaders := func(msg provider.Message) bool {
+		changed := false
+		if strings.TrimSpace(fieldTo.Value) == "" {
+			to = msg.From.String()
+			fieldTo.Value = to
+			fieldTo.Cursor = len(to)
+			changed = true
+		}
+		if strings.TrimSpace(fieldSubject.Value) == "" {
+			subject = replySubject(msg.Subject)
+			fieldSubject.Value = subject
+			fieldSubject.Cursor = len(subject)
+			changed = true
+		}
+		return changed
+	}
+
 	tr.CursorOverlay(func() (int, int, Color, bool) {
 		if !composeActive || focused {
 			return 0, 0, Color{}, false
@@ -66,11 +102,8 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	})
 
 	reset := func() {
-		to, cc, subject = "", "", ""
 		replyMsg = nil
-		fieldTo.Clear()
-		fieldCC.Clear()
-		fieldSubject.Clear()
+		setHeaderFields("", "", "")
 		fieldFocus.Current = -1
 		focused = false
 		ed.ResetEmpty()
@@ -120,15 +153,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		if err != nil || !found {
 			return false
 		}
-		to = d.To
-		cc = d.Cc
-		subject = d.Subject
-		fieldTo.Value = d.To
-		fieldTo.Cursor = len(d.To)
-		fieldCC.Value = d.Cc
-		fieldCC.Cursor = len(d.Cc)
-		fieldSubject.Value = d.Subject
-		fieldSubject.Cursor = len(d.Subject)
+		setHeaderFields(d.To, d.Cc, d.Subject)
 		ed.LoadMarkdown(d.Body)
 		return true
 	}
@@ -583,15 +608,13 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			replyMsg = &lastMsg
 
 			if loadDraft(thread.ID) {
+				if repairMissingReplyHeaders(lastMsg) {
+					saveDraft()
+				}
 				return
 			}
 
-			to = lastMsg.From.String()
-			s := lastMsg.Subject
-			if !strings.HasPrefix(strings.ToLower(s), "re:") {
-				s = "Re: " + s
-			}
-			subject = s
+			setHeaderFields(lastMsg.From.String(), "", replySubject(lastMsg.Subject))
 
 			body := lastMsg.TextBody
 			if body == "" && lastMsg.HTMLBody != "" {
@@ -622,15 +645,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 			reset()
 			currentDraftID = d.ThreadID
-			to = d.To
-			cc = d.Cc
-			subject = d.Subject
-			fieldTo.Value = d.To
-			fieldTo.Cursor = len(d.To)
-			fieldCC.Value = d.Cc
-			fieldCC.Cursor = len(d.Cc)
-			fieldSubject.Value = d.Subject
-			fieldSubject.Cursor = len(d.Subject)
+			setHeaderFields(d.To, d.Cc, d.Subject)
 			ed.LoadMarkdown(d.Body)
 
 			if d.ThreadID != "" {
@@ -658,15 +673,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 			reset()
 			currentDraftID = d.ThreadID
-			to = d.To
-			cc = d.Cc
-			subject = d.Subject
-			fieldTo.Value = d.To
-			fieldTo.Cursor = len(d.To)
-			fieldCC.Value = d.Cc
-			fieldCC.Cursor = len(d.Cc)
-			fieldSubject.Value = d.Subject
-			fieldSubject.Cursor = len(d.Subject)
+			setHeaderFields(d.To, d.Cc, d.Subject)
 			ed.LoadMarkdown(d.Body)
 
 			if t, err := db.GetThread(d.ThreadID); err == nil && len(t.Messages) > 0 {

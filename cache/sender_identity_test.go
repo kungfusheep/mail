@@ -59,3 +59,20 @@ func TestSenderIdentityFresh(t *testing.T) {
 		t.Fatalf("old fresh = %v, err=%v, want false nil", fresh, err)
 	}
 }
+
+func TestDeleteSenderIdentity(t *testing.T) {
+	c, err := NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.PutSenderIdentity(SenderIdentity{Domain: "example.com", DisplayName: "Example"}); err != nil {
+		t.Fatalf("PutSenderIdentity: %v", err)
+	}
+	if err := c.DeleteSenderIdentity("example.com"); err != nil {
+		t.Fatalf("DeleteSenderIdentity: %v", err)
+	}
+	if _, ok, err := c.SenderIdentity("example.com"); err != nil || ok {
+		t.Fatalf("SenderIdentity after delete found = %v, err=%v, want false nil", ok, err)
+	}
+}

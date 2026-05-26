@@ -78,6 +78,11 @@ func (c *Cache) SenderIdentity(domain string) (SenderIdentity, bool, error) {
 	return identity, true, nil
 }
 
+func (c *Cache) DeleteSenderIdentity(domain string) error {
+	_, err := c.db.Exec(`DELETE FROM sender_identities WHERE domain = ?`, domain)
+	return err
+}
+
 func (c *Cache) SenderIdentityFresh(domain string, maxAge time.Duration) (bool, error) {
 	identity, ok, err := c.SenderIdentity(domain)
 	if err != nil || !ok {
