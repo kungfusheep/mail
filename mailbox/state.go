@@ -1641,6 +1641,46 @@ func (m *State) Delete(sel int) (undo func(), desc string) {
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
 }
 
+func (m *State) DeleteDraft(sel int) (undo func(), desc string) {
+	if m.cache == nil || m.ActiveFolderCanonical() != "Drafts" {
+		return m.Delete(sel)
+	}
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	draft, found, err := m.cache.GetDraft(t.ID)
+	if err != nil {
+		log.Printf("delete draft: GetDraft(%q): %v", t.ID, err)
+		return nil, "delete draft failed"
+	}
+	if !found {
+		return nil, "draft not found"
+	}
+
+	thread := *t
+	threadIdx := m.removeThreadAtSelection(sel)
+	if err := m.cache.DeleteDraft(draft.ThreadID); err != nil {
+		log.Printf("delete draft: DeleteDraft(%q): %v", draft.ThreadID, err)
+		m.insertThreadAt(threadIdx, thread)
+		m.SetSelected(sel)
+		return nil, "delete draft failed"
+	}
+
+	return func() {
+		if draft.RemoteUID != "" {
+			_ = m.cache.DeleteCommand("delete_draft-" + draft.RemoteUID)
+			if err := m.cache.SeedDraft(draft); err != nil {
+				log.Printf("undo delete draft: SeedDraft(%q): %v", draft.ThreadID, err)
+			}
+		} else if err := m.cache.PutDraft(draft); err != nil {
+			log.Printf("undo delete draft: PutDraft(%q): %v", draft.ThreadID, err)
+		}
+		m.insertThreadAt(threadIdx, thread)
+		m.SetSelected(sel)
+	}, fmt.Sprintf("deleted draft '%s'", truncate(thread.Subject, 30))
+}
+
 func (m *State) Spam(sel int) (undo func(), desc string) {
 	t := m.SelectedThread(sel)
 	if t == nil {

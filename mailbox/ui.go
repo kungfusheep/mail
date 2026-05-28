@@ -659,7 +659,11 @@ func (m *UI) ArchiveSelected() {
 
 func (m *UI) Delete() {
 	sel := m.ThreadSel
-	m.PushUndo(m.State.Delete(m.ThreadSel))
+	if m.State.ActiveFolderCanonical() == "Drafts" {
+		m.PushUndo(m.State.DeleteDraft(m.ThreadSel))
+	} else {
+		m.PushUndo(m.State.Delete(m.ThreadSel))
+	}
 	m.afterThreadAction(sel)
 }
 

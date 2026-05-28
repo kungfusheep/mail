@@ -200,6 +200,67 @@ func TestDraftsPipeline_RowDatesAndPreview(t *testing.T) {
 	}
 }
 
+func TestDraftsFolder_DeleteSelectedRemovesDraftAndUndoRestores(t *testing.T) {
+	h := newDraftsHarness(t)
+	defer h.unsub()
+
+	now := time.Date(2026, 5, 28, 10, 0, 0, 0, time.UTC)
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-a", Subject: "oldest", Body: "body-a", RemoteUID: "101", UpdatedAt: now.Add(-2 * time.Minute)})
+	h.waitForRefresh(t)
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-b", Subject: "middle", Body: "body-b", RemoteUID: "102", UpdatedAt: now.Add(-time.Minute)})
+	h.waitForRefresh(t)
+	h.seedAdoptedDraft(cache.Draft{ThreadID: "draft-c", Subject: "newest", Body: "body-c", RemoteUID: "103", UpdatedAt: now})
+	h.waitForRefresh(t)
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: h.cache,
+		State: h.mb,
+		Theme: theme.Dark(),
+	})
+	model.ThreadSel = 1
+	h.mb.SetSelected(1)
+
+	model.DeleteSelected()
+	h.waitForRefresh(t)
+	model.ProcessPending()
+	assertThreadRows(t, h.mb, []string{"newest", "oldest"}, 1)
+	if _, found, err := h.cache.GetDraft("draft-b"); err != nil || found {
+		t.Fatalf("draft-b after delete found=%v err=%v, want removed", found, err)
+	}
+	cmds, err := h.cache.PendingCommands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !hasPendingCommand(cmds, "delete_draft-102", "delete_draft", "102") {
+		t.Fatalf("pending commands after delete = %#v, want remote draft delete queued", cmds)
+	}
+
+	model.UndoLast()
+	h.waitForRefresh(t)
+	model.ProcessPending()
+	assertThreadRows(t, h.mb, []string{"newest", "middle", "oldest"}, 1)
+	if got, found, err := h.cache.GetDraft("draft-b"); err != nil || !found || got.RemoteUID != "102" {
+		t.Fatalf("draft-b after undo = %#v found=%v err=%v, want restored remote draft", got, found, err)
+	}
+	cmds, err = h.cache.PendingCommands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if hasPendingCommand(cmds, "delete_draft-102", "delete_draft", "102") {
+		t.Fatalf("pending commands after undo = %#v, want delete canceled", cmds)
+	}
+}
+
+func hasPendingCommand(cmds []cache.Command, id, action, target string) bool {
+	for _, cmd := range cmds {
+		if cmd.ID == id && cmd.Action == action && cmd.TargetID == target {
+			return true
+		}
+	}
+	return false
+}
+
 func spansContain(spans []glyph.Span, text string) bool {
 	for _, span := range spans {
 		if strings.Contains(span.Text, text) {
