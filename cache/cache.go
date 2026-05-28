@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -163,10 +164,22 @@ func (c *Cache) migrate() error {
 			date INTEGER NOT NULL
 		);
 
+		CREATE TABLE IF NOT EXISTS conversation_messages (
+			conversation_key TEXT NOT NULL,
+			message_key TEXT NOT NULL,
+			source TEXT NOT NULL DEFAULT '',
+			thread_id TEXT NOT NULL DEFAULT '',
+			data TEXT NOT NULL,
+			date INTEGER NOT NULL,
+			PRIMARY KEY (conversation_key, message_key, source)
+		);
+		CREATE INDEX IF NOT EXISTS idx_conversation_messages_key_date ON conversation_messages(conversation_key, date);
+
 		CREATE TABLE IF NOT EXISTS contacts (
 			email TEXT PRIMARY KEY,
 			name TEXT NOT NULL DEFAULT '',
-			updated_at INTEGER NOT NULL
+			updated_at INTEGER NOT NULL,
+			last_contacted INTEGER NOT NULL DEFAULT 0
 		);
 
 		CREATE TABLE IF NOT EXISTS sender_identities (
@@ -210,6 +223,7 @@ func (c *Cache) migrate() error {
 	}
 
 	c.db.Exec(`ALTER TABLE sender_identities ADD COLUMN color_checked_at INTEGER NOT NULL DEFAULT 0`)
+	c.db.Exec(`ALTER TABLE contacts ADD COLUMN last_contacted INTEGER NOT NULL DEFAULT 0`)
 
 	// one-shot migration: existing installs have a `folder` column on threads
 	// and messages — lift those values into the new label join tables. errors
@@ -344,7 +358,13 @@ func (c *Cache) PutContacts(contacts []provider.Address) error {
 	}
 	defer tx.Rollback()
 
-	stmt, err := tx.Prepare("INSERT OR REPLACE INTO contacts (email, name, updated_at) VALUES (?, ?, ?)")
+	stmt, err := tx.Prepare(`
+		INSERT INTO contacts (email, name, updated_at, last_contacted)
+		VALUES (?, ?, ?, 0)
+		ON CONFLICT(email) DO UPDATE SET
+			name = CASE WHEN excluded.name != '' THEN excluded.name ELSE contacts.name END,
+			updated_at = excluded.updated_at
+	`)
 	if err != nil {
 		return err
 	}
@@ -352,7 +372,11 @@ func (c *Cache) PutContacts(contacts []provider.Address) error {
 
 	now := time.Now().Unix()
 	for _, contact := range contacts {
-		if _, err := stmt.Exec(contact.Email, contact.Name, now); err != nil {
+		contact.Email = normalizedContactEmail(contact.Email)
+		if contact.Email == "" {
+			continue
+		}
+		if _, err := stmt.Exec(contact.Email, strings.TrimSpace(contact.Name), now); err != nil {
 			return err
 		}
 	}
@@ -362,7 +386,11 @@ func (c *Cache) PutContacts(contacts []provider.Address) error {
 func (c *Cache) SearchContacts(query string) ([]provider.Address, error) {
 	pattern := "%" + query + "%"
 	rows, err := c.db.Query(
-		"SELECT name, email FROM contacts WHERE name LIKE ? OR email LIKE ? ORDER BY name LIMIT 10",
+		`SELECT name, email
+		FROM contacts
+		WHERE name LIKE ? OR email LIKE ?
+		ORDER BY last_contacted DESC, name COLLATE NOCASE, email COLLATE NOCASE
+		LIMIT 10`,
 		pattern, pattern,
 	)
 	if err != nil {
@@ -379,6 +407,206 @@ func (c *Cache) SearchContacts(query string) ([]provider.Address, error) {
 		results = append(results, a)
 	}
 	return results, rows.Err()
+}
+
+type contactCandidate struct {
+	provider.Address
+	LastContacted int64
+}
+
+func (c *Cache) RebuildContactIndex() error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec("UPDATE contacts SET last_contacted = 0"); err != nil {
+		return err
+	}
+
+	var candidates []contactCandidate
+	threadRows, err := tx.Query("SELECT data FROM threads")
+	if err != nil {
+		return err
+	}
+	for threadRows.Next() {
+		var data string
+		if err := threadRows.Scan(&data); err != nil {
+			threadRows.Close()
+			return err
+		}
+		var thread provider.Thread
+		if err := json.Unmarshal([]byte(data), &thread); err == nil {
+			candidates = append(candidates, contactCandidatesFromThread(thread)...)
+		}
+	}
+	if err := threadRows.Close(); err != nil {
+		return err
+	}
+	if err := threadRows.Err(); err != nil {
+		return err
+	}
+
+	messageRows, err := tx.Query("SELECT data FROM messages")
+	if err != nil {
+		return err
+	}
+	for messageRows.Next() {
+		var data string
+		if err := messageRows.Scan(&data); err != nil {
+			messageRows.Close()
+			return err
+		}
+		var msg provider.Message
+		if err := json.Unmarshal([]byte(data), &msg); err == nil {
+			candidates = append(candidates, contactCandidatesFromMessage(msg)...)
+		}
+	}
+	if err := messageRows.Close(); err != nil {
+		return err
+	}
+	if err := messageRows.Err(); err != nil {
+		return err
+	}
+
+	sentRows, err := tx.Query("SELECT data FROM sent_messages")
+	if err != nil {
+		return err
+	}
+	for sentRows.Next() {
+		var data string
+		if err := sentRows.Scan(&data); err != nil {
+			sentRows.Close()
+			return err
+		}
+		var msg provider.Message
+		if err := json.Unmarshal([]byte(data), &msg); err == nil {
+			candidates = append(candidates, contactCandidatesFromMessage(msg)...)
+		}
+	}
+	if err := sentRows.Close(); err != nil {
+		return err
+	}
+	if err := sentRows.Err(); err != nil {
+		return err
+	}
+
+	draftRows, err := tx.Query("SELECT to_addrs, cc_addrs, bcc_addrs, updated_at FROM drafts")
+	if err != nil {
+		return err
+	}
+	for draftRows.Next() {
+		var to, cc, bcc string
+		var updatedAt int64
+		if err := draftRows.Scan(&to, &cc, &bcc, &updatedAt); err != nil {
+			draftRows.Close()
+			return err
+		}
+		candidates = append(candidates, contactCandidatesFromAddresses(provider.ParseAddressList(to), updatedAt)...)
+		candidates = append(candidates, contactCandidatesFromAddresses(provider.ParseAddressList(cc), updatedAt)...)
+		candidates = append(candidates, contactCandidatesFromAddresses(provider.ParseAddressList(bcc), updatedAt)...)
+	}
+	if err := draftRows.Close(); err != nil {
+		return err
+	}
+	if err := draftRows.Err(); err != nil {
+		return err
+	}
+
+	if err := upsertContactCandidatesTx(tx, candidates); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (c *Cache) upsertContactCandidates(candidates []contactCandidate) error {
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := upsertContactCandidatesTx(tx, candidates); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func upsertContactCandidatesTx(tx *sql.Tx, candidates []contactCandidate) error {
+	if len(candidates) == 0 {
+		return nil
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO contacts (email, name, updated_at, last_contacted)
+		VALUES (?, ?, ?, ?)
+		ON CONFLICT(email) DO UPDATE SET
+			name = CASE WHEN excluded.name != '' THEN excluded.name ELSE contacts.name END,
+			updated_at = excluded.updated_at,
+			last_contacted = MAX(contacts.last_contacted, excluded.last_contacted)
+	`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	now := time.Now().Unix()
+	for _, candidate := range candidates {
+		email := normalizedContactEmail(candidate.Email)
+		if email == "" {
+			continue
+		}
+		name := strings.TrimSpace(candidate.Name)
+		if _, err := stmt.Exec(email, name, now, candidate.LastContacted); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func contactCandidatesFromThread(thread provider.Thread) []contactCandidate {
+	var out []contactCandidate
+	for _, msg := range thread.Messages {
+		out = append(out, contactCandidatesFromMessage(msg)...)
+	}
+	return out
+}
+
+func contactCandidatesFromMessage(msg provider.Message) []contactCandidate {
+	seenAt := msg.Date.Unix()
+	if msg.Date.IsZero() {
+		seenAt = time.Now().Unix()
+	}
+	var out []contactCandidate
+	out = append(out, contactCandidatesFromAddresses([]provider.Address{msg.From}, seenAt)...)
+	out = append(out, contactCandidatesFromAddresses(msg.To, seenAt)...)
+	out = append(out, contactCandidatesFromAddresses(msg.CC, seenAt)...)
+	out = append(out, contactCandidatesFromAddresses(msg.BCC, seenAt)...)
+	return out
+}
+
+func contactCandidatesFromDraft(d Draft, seenAt int64) []contactCandidate {
+	var out []contactCandidate
+	out = append(out, contactCandidatesFromAddresses(provider.ParseAddressList(d.To), seenAt)...)
+	out = append(out, contactCandidatesFromAddresses(provider.ParseAddressList(d.Cc), seenAt)...)
+	out = append(out, contactCandidatesFromAddresses(provider.ParseAddressList(d.Bcc), seenAt)...)
+	return out
+}
+
+func contactCandidatesFromAddresses(addrs []provider.Address, seenAt int64) []contactCandidate {
+	out := make([]contactCandidate, 0, len(addrs))
+	for _, addr := range addrs {
+		addr.Email = normalizedContactEmail(addr.Email)
+		addr.Name = strings.TrimSpace(addr.Name)
+		if addr.Email == "" {
+			continue
+		}
+		out = append(out, contactCandidate{Address: addr, LastContacted: seenAt})
+	}
+	return out
+}
+
+func normalizedContactEmail(email string) string {
+	return strings.ToLower(strings.TrimSpace(email))
 }
 
 // drafts — auto-saved compose state keyed by thread id (empty = new compose).
@@ -428,6 +656,9 @@ func (c *Cache) PutDraft(d Draft) error {
 	); err != nil {
 		return err
 	}
+	if err := c.upsertContactCandidates(contactCandidatesFromDraft(d, time.Now().Unix())); err != nil {
+		return err
+	}
 	c.publishDrafts()
 	return c.PutCommand(Command{
 		ID:        "sync_draft-" + d.ThreadID,
@@ -465,6 +696,9 @@ func (c *Cache) SeedDraft(d Draft) error {
 	// Only publish if we actually inserted — OR IGNORE turns a conflicting
 	// insert into a no-op, and signalling a no-op spams the subscriber.
 	if n, _ := res.RowsAffected(); n > 0 {
+		if err := c.upsertContactCandidates(contactCandidatesFromDraft(d, updatedAt)); err != nil {
+			return err
+		}
 		c.publishDrafts()
 	}
 	return nil
@@ -696,11 +930,24 @@ func (c *Cache) PutSentMessage(msg provider.Message) error {
 	if err != nil {
 		return err
 	}
-	_, err = c.db.Exec(
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		"INSERT OR REPLACE INTO sent_messages (message_id, data, date) VALUES (?, ?, ?)",
 		msg.MessageID, string(data), msg.Date.Unix(),
-	)
-	return err
+	); err != nil {
+		return err
+	}
+	if err := indexConversationMessagesTx(tx, "sent", "", []provider.Message{msg}); err != nil {
+		return err
+	}
+	if err := upsertContactCandidatesTx(tx, contactCandidatesFromMessage(msg)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (c *Cache) GetSentMessages(limit int) ([]provider.Message, error) {
@@ -811,10 +1058,24 @@ func (c *Cache) PutThread(t provider.Thread) error {
 	if err != nil {
 		return err
 	}
-	if _, err = c.db.Exec(
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(
 		"INSERT OR REPLACE INTO threads (id, data, date, unread) VALUES (?, ?, ?, ?)",
 		t.ID, string(data), t.Date.Unix(), t.Unread,
 	); err != nil {
+		return err
+	}
+	if err := indexConversationMessagesTx(tx, "thread", t.ID, t.Messages); err != nil {
+		return err
+	}
+	if err := upsertContactCandidatesTx(tx, contactCandidatesFromThread(t)); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
 		return err
 	}
 	for _, label := range c.labelsForThread(t.ID) {
@@ -860,6 +1121,12 @@ func (c *Cache) ReplaceThreads(label string, threads []provider.Thread) error {
 		if _, err := labelStmt.Exec(t.ID, label); err != nil {
 			return err
 		}
+		if err := indexConversationMessagesTx(tx, label, t.ID, t.Messages); err != nil {
+			return err
+		}
+		if err := upsertContactCandidatesTx(tx, contactCandidatesFromThread(t)); err != nil {
+			return err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -881,6 +1148,9 @@ func (c *Cache) DeleteThread(id string) error {
 		return err
 	}
 	if _, err := tx.Exec("DELETE FROM threads WHERE id = ?", id); err != nil {
+		return err
+	}
+	if _, err := tx.Exec("DELETE FROM conversation_messages WHERE thread_id = ?", id); err != nil {
 		return err
 	}
 	if err := tx.Commit(); err != nil {
@@ -914,6 +1184,46 @@ func (c *Cache) RemoveThreadFromLabel(threadID, label string) error {
 		return err
 	}
 	c.subs.publish(label)
+	return nil
+}
+
+// MoveThreadLabel moves a thread between labels as one visible cache update.
+// Subscribers see only the final state, avoiding refreshes against the
+// intermediate "removed from source but not yet added to destination" view.
+func (c *Cache) MoveThreadLabel(threadID, source, dest string) error {
+	if source == dest {
+		return nil
+	}
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if source != "" {
+		if _, err := tx.Exec(
+			"DELETE FROM thread_labels WHERE thread_id = ? AND label = ?",
+			threadID, source,
+		); err != nil {
+			return err
+		}
+	}
+	if dest != "" {
+		if _, err := tx.Exec(
+			"INSERT OR IGNORE INTO thread_labels (thread_id, label) VALUES (?, ?)",
+			threadID, dest,
+		); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	if source != "" {
+		c.subs.publish(source)
+	}
+	if dest != "" {
+		c.subs.publish(dest)
+	}
 	return nil
 }
 
@@ -958,8 +1268,413 @@ func (c *Cache) GetThread(id string) (provider.Thread, error) {
 	return t, nil
 }
 
+func (c *Cache) GetConversationMessages(seed provider.Thread, limit int) ([]provider.Message, error) {
+	keys := conversationKeysForThread(seed, true)
+	if len(keys) == 0 {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	args := make([]any, 0, len(keys)+1)
+	placeholders := make([]string, 0, len(keys))
+	for _, key := range keys {
+		placeholders = append(placeholders, "?")
+		args = append(args, key)
+	}
+	args = append(args, limit*4)
+
+	rows, err := c.db.Query(
+		`SELECT source, thread_id, data
+		 FROM conversation_messages
+		 WHERE conversation_key IN (`+strings.Join(placeholders, ",")+`)
+		 ORDER BY date ASC
+		 LIMIT ?`,
+		args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	seedKeys := conversationSeedKeys(seed)
+	messages := make(map[string]provider.Message)
+	for rows.Next() {
+		var source, rowThreadID, data string
+		if err := rows.Scan(&source, &rowThreadID, &data); err != nil {
+			return nil, err
+		}
+		var msg provider.Message
+		if err := json.Unmarshal([]byte(data), &msg); err != nil {
+			return nil, err
+		}
+		if !conversationMessageRelates(seedKeys, seed.Date, msg, rowThreadID, source == "sent") {
+			continue
+		}
+		key := conversationMessageKey(msg)
+		if key == "" {
+			continue
+		}
+		if existing, ok := messages[key]; !ok || richerConversationMessage(msg, existing) {
+			messages[key] = msg
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	out := make([]provider.Message, 0, len(messages))
+	for _, msg := range messages {
+		out = append(out, msg)
+	}
+	sortMessagesByDate(out)
+	if len(out) > limit {
+		out = out[len(out)-limit:]
+	}
+	return out, nil
+}
+
+func (c *Cache) RebuildConversationIndex() error {
+	rows, err := c.db.Query("SELECT id, data FROM threads")
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	type indexedThread struct {
+		id     string
+		thread provider.Thread
+	}
+	var threads []indexedThread
+	for rows.Next() {
+		var id, data string
+		if err := rows.Scan(&id, &data); err != nil {
+			return err
+		}
+		var thread provider.Thread
+		if err := json.Unmarshal([]byte(data), &thread); err != nil {
+			return err
+		}
+		threads = append(threads, indexedThread{id: id, thread: thread})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	sent, err := c.GetSentMessages(1000)
+	if err != nil {
+		return err
+	}
+
+	tx, err := c.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec("DELETE FROM conversation_messages"); err != nil {
+		return err
+	}
+	for _, item := range threads {
+		if err := indexConversationMessagesTx(tx, "thread", item.id, item.thread.Messages); err != nil {
+			return err
+		}
+	}
+	for _, msg := range sent {
+		if err := indexConversationMessagesTx(tx, "sent", "", []provider.Message{msg}); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func (c *Cache) ThreadLabels(threadID string) []string {
 	return c.labelsForThread(threadID)
+}
+
+func indexConversationMessagesTx(tx *sql.Tx, source, threadID string, messages []provider.Message) error {
+	if source != "message" && threadID != "" {
+		if _, err := tx.Exec(
+			"DELETE FROM conversation_messages WHERE source = ? AND thread_id = ?",
+			source, threadID,
+		); err != nil {
+			return err
+		}
+	}
+
+	stmt, err := tx.Prepare(
+		`INSERT OR REPLACE INTO conversation_messages
+		 (conversation_key, message_key, source, thread_id, data, date)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+	)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+
+	for _, msg := range messages {
+		messageKey := conversationMessageKey(msg)
+		if messageKey == "" {
+			continue
+		}
+		if source == "message" || source == "sent" {
+			if _, err := tx.Exec(
+				"DELETE FROM conversation_messages WHERE source = ? AND message_key = ?",
+				source, messageKey,
+			); err != nil {
+				return err
+			}
+		}
+		data, err := json.Marshal(msg)
+		if err != nil {
+			return err
+		}
+		for _, key := range conversationKeysForMessage(msg, threadID, true) {
+			if _, err := stmt.Exec(key, messageKey, source, threadID, string(data), msg.Date.Unix()); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+type conversationKeys struct {
+	messageIDs map[string]bool
+	threadIDs  map[string]bool
+	subjects   map[string]bool
+	senders    map[string]bool
+	recipients map[string]bool
+}
+
+func conversationSeedKeys(thread provider.Thread) conversationKeys {
+	keys := conversationKeys{
+		messageIDs: make(map[string]bool),
+		threadIDs:  make(map[string]bool),
+		subjects:   make(map[string]bool),
+		senders:    make(map[string]bool),
+		recipients: make(map[string]bool),
+	}
+	if thread.ID != "" {
+		keys.threadIDs[thread.ID] = true
+	}
+	if subject := normalizedConversationSubject(thread.Subject); subject != "" {
+		keys.subjects[subject] = true
+	}
+	for _, msg := range thread.Messages {
+		if msg.ThreadID != "" {
+			keys.threadIDs[msg.ThreadID] = true
+		}
+		if id := normalizedMessageID(msg.MessageID); id != "" {
+			keys.messageIDs[id] = true
+		}
+		if id := normalizedMessageID(msg.InReplyTo); id != "" {
+			keys.messageIDs[id] = true
+		}
+		for _, ref := range msg.References {
+			if id := normalizedMessageID(ref); id != "" {
+				keys.messageIDs[id] = true
+			}
+		}
+		if subject := normalizedConversationSubject(msg.Subject); subject != "" {
+			keys.subjects[subject] = true
+		}
+		if sender := normalizedEmail(msg.From); sender != "" {
+			keys.senders[sender] = true
+		}
+		for _, email := range conversationRecipientEmails(msg) {
+			keys.recipients[email] = true
+		}
+	}
+	return keys
+}
+
+func conversationKeysForThread(thread provider.Thread, includeSubject bool) []string {
+	seen := make(map[string]bool)
+	var keys []string
+	if thread.ID != "" {
+		keys = appendConversationKey(keys, seen, "thread:"+thread.ID)
+	}
+	if includeSubject {
+		if subject := normalizedConversationSubject(thread.Subject); subject != "" {
+			keys = appendConversationKey(keys, seen, "subject:"+subject)
+		}
+	}
+	for _, msg := range thread.Messages {
+		keys = append(keys, conversationKeysForMessage(msg, thread.ID, includeSubject)...)
+	}
+	return compactConversationKeys(keys)
+}
+
+func conversationKeysForMessage(msg provider.Message, fallbackThreadID string, includeSubject bool) []string {
+	seen := make(map[string]bool)
+	var keys []string
+	if msg.ThreadID != "" {
+		keys = appendConversationKey(keys, seen, "thread:"+msg.ThreadID)
+	} else if fallbackThreadID != "" {
+		keys = appendConversationKey(keys, seen, "thread:"+fallbackThreadID)
+	}
+	if id := normalizedMessageID(msg.MessageID); id != "" {
+		keys = appendConversationKey(keys, seen, "msgid:"+id)
+	}
+	if id := normalizedMessageID(msg.InReplyTo); id != "" {
+		keys = appendConversationKey(keys, seen, "msgid:"+id)
+	}
+	for _, ref := range msg.References {
+		if id := normalizedMessageID(ref); id != "" {
+			keys = appendConversationKey(keys, seen, "msgid:"+id)
+		}
+	}
+	if includeSubject {
+		if subject := normalizedConversationSubject(msg.Subject); subject != "" {
+			keys = appendConversationKey(keys, seen, "subject:"+subject)
+		}
+	}
+	return keys
+}
+
+func compactConversationKeys(keys []string) []string {
+	seen := make(map[string]bool)
+	out := keys[:0]
+	for _, key := range keys {
+		out = appendConversationKey(out, seen, key)
+	}
+	return out
+}
+
+func appendConversationKey(keys []string, seen map[string]bool, key string) []string {
+	if key == "" || seen[key] {
+		return keys
+	}
+	seen[key] = true
+	return append(keys, key)
+}
+
+func conversationMessageRelates(seed conversationKeys, seedDate time.Time, msg provider.Message, rowThreadID string, sent bool) bool {
+	if id := normalizedMessageID(msg.MessageID); id != "" && seed.messageIDs[id] {
+		return true
+	}
+	if id := normalizedMessageID(msg.InReplyTo); id != "" && seed.messageIDs[id] {
+		return true
+	}
+	for _, ref := range msg.References {
+		if id := normalizedMessageID(ref); id != "" && seed.messageIDs[id] {
+			return true
+		}
+	}
+	if msg.ThreadID != "" && seed.threadIDs[msg.ThreadID] {
+		return true
+	}
+	if rowThreadID != "" && seed.threadIDs[rowThreadID] {
+		return true
+	}
+	subject := normalizedConversationSubject(msg.Subject)
+	if subject != "" && seed.subjects[subject] && withinConversationWindow(seedDate, msg.Date) {
+		return conversationSharesCounterparty(seed, msg, sent)
+	}
+	return false
+}
+
+func conversationMessageKey(msg provider.Message) string {
+	if id := normalizedMessageID(msg.MessageID); id != "" {
+		return "message-id:" + id
+	}
+	if msg.ID != "" {
+		return "id:" + msg.ID
+	}
+	return ""
+}
+
+func normalizedMessageID(id string) string {
+	id = strings.TrimSpace(id)
+	id = strings.TrimPrefix(id, "<")
+	id = strings.TrimSuffix(id, ">")
+	return strings.ToLower(id)
+}
+
+func normalizedConversationSubject(subject string) string {
+	subject = strings.TrimSpace(subject)
+	for {
+		lower := strings.ToLower(subject)
+		switch {
+		case strings.HasPrefix(lower, "re:"):
+			subject = strings.TrimSpace(subject[3:])
+		case strings.HasPrefix(lower, "fwd:"):
+			subject = strings.TrimSpace(subject[4:])
+		case strings.HasPrefix(lower, "fw:"):
+			subject = strings.TrimSpace(subject[3:])
+		default:
+			return strings.ToLower(subject)
+		}
+	}
+}
+
+func conversationSharesCounterparty(seed conversationKeys, msg provider.Message, sent bool) bool {
+	if sent {
+		for _, email := range conversationRecipientEmails(msg) {
+			if seed.senders[email] {
+				return true
+			}
+		}
+		return false
+	}
+	sender := normalizedEmail(msg.From)
+	return sender != "" && seed.recipients[sender]
+}
+
+func normalizedEmail(addr provider.Address) string {
+	return strings.ToLower(strings.TrimSpace(addr.Email))
+}
+
+func conversationRecipientEmails(msg provider.Message) []string {
+	seen := make(map[string]bool)
+	var emails []string
+	add := func(addr provider.Address) {
+		email := normalizedEmail(addr)
+		if email == "" || seen[email] {
+			return
+		}
+		seen[email] = true
+		emails = append(emails, email)
+	}
+	for _, addr := range msg.To {
+		add(addr)
+	}
+	for _, addr := range msg.CC {
+		add(addr)
+	}
+	for _, addr := range msg.BCC {
+		add(addr)
+	}
+	return emails
+}
+
+func withinConversationWindow(a, b time.Time) bool {
+	if a.IsZero() || b.IsZero() {
+		return false
+	}
+	diff := a.Sub(b)
+	if diff < 0 {
+		diff = -diff
+	}
+	return diff <= 30*24*time.Hour
+}
+
+func richerConversationMessage(candidate, existing provider.Message) bool {
+	candidateBody := candidate.TextBody != "" || candidate.HTMLBody != ""
+	existingBody := existing.TextBody != "" || existing.HTMLBody != ""
+	if candidateBody != existingBody {
+		return candidateBody
+	}
+	if len(candidate.Attachments) != len(existing.Attachments) {
+		return len(candidate.Attachments) > len(existing.Attachments)
+	}
+	return false
+}
+
+func sortMessagesByDate(messages []provider.Message) {
+	sort.Slice(messages, func(i, j int) bool {
+		return messages[i].Date.Before(messages[j].Date)
+	})
 }
 
 // messages
@@ -986,6 +1701,12 @@ func (c *Cache) PutMessage(msg provider.Message) error {
 		"INSERT OR REPLACE INTO messages (id, thread_id, data, date, read, starred) VALUES (?, ?, ?, ?, ?, ?)",
 		msg.ID, msg.ThreadID, string(data), msg.Date.Unix(), read, starred,
 	); err != nil {
+		return err
+	}
+	if err := indexConversationMessagesTx(tx, "message", msg.ThreadID, []provider.Message{msg}); err != nil {
+		return err
+	}
+	if err := upsertContactCandidatesTx(tx, contactCandidatesFromMessage(msg)); err != nil {
 		return err
 	}
 	// replace label associations from msg.Labels
@@ -1021,29 +1742,164 @@ func (c *Cache) GetMessage(id string) (provider.Message, error) {
 
 // search cached messages
 func (c *Cache) Search(query string, limit int) ([]provider.Thread, error) {
-	pattern := "%" + query + "%"
-	rows, err := c.db.Query(
-		"SELECT data FROM threads WHERE data LIKE ? ORDER BY date DESC LIMIT ?",
-		pattern, limit,
-	)
+	parsed := parseSearchQuery(query)
+	if !parsed.structured {
+		pattern := "%" + query + "%"
+		rows, err := c.db.Query(
+			"SELECT data FROM threads WHERE data LIKE ? ORDER BY date DESC LIMIT ?",
+			pattern, limit,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		return scanThreadRows(rows)
+	}
+
+	rows, err := c.db.Query("SELECT data FROM threads ORDER BY date DESC")
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	candidates, err := scanThreadRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	var threads []provider.Thread
+	for _, thread := range candidates {
+		if parsed.matches(thread) {
+			threads = append(threads, thread)
+			if limit > 0 && len(threads) >= limit {
+				break
+			}
+		}
+	}
+	return threads, nil
+}
+
+func scanThreadRows(rows *sql.Rows) ([]provider.Thread, error) {
 	var threads []provider.Thread
 	for rows.Next() {
 		var data string
 		if err := rows.Scan(&data); err != nil {
 			return nil, err
 		}
-		var t provider.Thread
-		if err := json.Unmarshal([]byte(data), &t); err != nil {
+		var thread provider.Thread
+		if err := json.Unmarshal([]byte(data), &thread); err != nil {
 			return nil, err
 		}
-		threads = append(threads, t)
+		threads = append(threads, thread)
 	}
 	return threads, rows.Err()
+}
+
+type searchQuery struct {
+	plain      []string
+	from       []string
+	to         []string
+	subject    []string
+	structured bool
+}
+
+func parseSearchQuery(query string) searchQuery {
+	var parsed searchQuery
+	for _, token := range strings.Fields(strings.TrimSpace(query)) {
+		key, value, ok := strings.Cut(token, ":")
+		if !ok || value == "" {
+			parsed.plain = append(parsed.plain, strings.ToLower(token))
+			continue
+		}
+		value = strings.ToLower(value)
+		switch strings.ToLower(key) {
+		case "from":
+			parsed.from = append(parsed.from, value)
+			parsed.structured = true
+		case "to":
+			parsed.to = append(parsed.to, value)
+			parsed.structured = true
+		case "subject":
+			parsed.subject = append(parsed.subject, value)
+			parsed.structured = true
+		default:
+			parsed.plain = append(parsed.plain, strings.ToLower(token))
+		}
+	}
+	return parsed
+}
+
+func (q searchQuery) matches(thread provider.Thread) bool {
+	haystack := strings.ToLower(searchThreadText(thread))
+	for _, term := range q.plain {
+		if !strings.Contains(haystack, term) {
+			return false
+		}
+	}
+	for _, term := range q.subject {
+		if !strings.Contains(strings.ToLower(thread.Subject), term) && !messagesContainSubject(thread.Messages, term) {
+			return false
+		}
+	}
+	for _, term := range q.from {
+		if !messagesContainSender(thread.Messages, term) {
+			return false
+		}
+	}
+	for _, term := range q.to {
+		if !messagesContainRecipient(thread.Messages, term) {
+			return false
+		}
+	}
+	return true
+}
+
+func searchThreadText(thread provider.Thread) string {
+	var b strings.Builder
+	b.WriteString(thread.Subject)
+	b.WriteByte(' ')
+	b.WriteString(thread.Snippet)
+	for _, msg := range thread.Messages {
+		b.WriteByte(' ')
+		b.WriteString(msg.Subject)
+		b.WriteByte(' ')
+		b.WriteString(msg.From.String())
+		for _, addr := range append(append([]provider.Address{}, msg.To...), msg.CC...) {
+			b.WriteByte(' ')
+			b.WriteString(addr.String())
+		}
+		b.WriteByte(' ')
+		b.WriteString(msg.TextBody)
+	}
+	return b.String()
+}
+
+func messagesContainSubject(messages []provider.Message, term string) bool {
+	for _, msg := range messages {
+		if strings.Contains(strings.ToLower(msg.Subject), term) {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesContainSender(messages []provider.Message, term string) bool {
+	for _, msg := range messages {
+		if strings.Contains(strings.ToLower(msg.From.String()), term) {
+			return true
+		}
+	}
+	return false
+}
+
+func messagesContainRecipient(messages []provider.Message, term string) bool {
+	for _, msg := range messages {
+		for _, addr := range append(append([]provider.Address{}, msg.To...), msg.CC...) {
+			if strings.Contains(strings.ToLower(addr.String()), term) {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // stats

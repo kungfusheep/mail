@@ -6,34 +6,9 @@ import (
 
 	. "github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/mailbox"
-	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/ui"
 )
-
-func TestPreviewBodyStyleUsesReadableHierarchy(t *testing.T) {
-	palette := theme.Dark()
-
-	cases := []struct {
-		name string
-		kind preview.BlockKind
-		want Style
-	}{
-		{name: "heading", kind: preview.BlockHeading, want: Style{FG: palette.Bright, Attr: AttrBold}},
-		{name: "body", kind: preview.BlockParagraph, want: Style{FG: palette.FG}},
-		{name: "quote", kind: preview.BlockQuote, want: Style{FG: palette.Subtle, Attr: AttrItalic}},
-		{name: "image", kind: preview.BlockImage, want: Style{FG: palette.Dim, Attr: AttrDim | AttrItalic}},
-		{name: "divider", kind: preview.BlockDivider, want: Style{FG: palette.Muted, Attr: AttrDim}},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := previewBodyStyle(tc.kind, palette); !got.Equal(tc.want) {
-				t.Fatalf("previewBodyStyle = %#v, want %#v", got, tc.want)
-			}
-		})
-	}
-}
 
 func TestPreviewTemplateRendersConversationSpans(t *testing.T) {
 	messages := []mailbox.ConversationMessage{{
@@ -271,6 +246,71 @@ func TestThreadAttachmentChipsStayInsideNarrowRow(t *testing.T) {
 	}
 }
 
+func TestPreviewScrollbarUsesScrollViewScrollbarGutter(t *testing.T) {
+	model := mailbox.NewUI(mailbox.UIConfig{
+		State: mailbox.NewState(nil, "test@example.com"),
+		Theme: theme.Dark(),
+	})
+	model.PreviewScrollVisible = true
+
+	view := ScrollView.
+		Grow(1).
+		Scrollbar().
+		ScrollbarTrackStyle(&model.PreviewScrollTrack).
+		ScrollbarThumbStyle(&model.PreviewScrollThumb).
+		ScrollbarOpacity(1.0)(
+		Text("01234567890"),
+		Text("abcdefghijk"),
+		Text("extra"),
+	)
+
+	buf := NewBuffer(12, 3)
+	tmpl := Build(view)
+	tmpl.Execute(buf, 12, 3)
+	tmpl.Execute(buf, 12, 3)
+
+	if got := buf.Get(10, 0).Rune; got != '0' {
+		t.Fatalf("top preview line shifted or clipped = %q", got)
+	}
+	if got := buf.Get(10, 1).Rune; got != 'k' {
+		t.Fatalf("last content cell = %q, want k before scrollbar gutter\n%s", got, buf.String())
+	}
+	if got := buf.Get(11, 1).Rune; got == 'k' || got == ' ' {
+		t.Fatalf("scrollbar is not flush to right edge, got %q\n%s", got, buf.String())
+	}
+}
+
+func TestPreviewScrollbarGutterRemainsWhenHidden(t *testing.T) {
+	model := mailbox.NewUI(mailbox.UIConfig{
+		State: mailbox.NewState(nil, "test@example.com"),
+		Theme: theme.Dark(),
+	})
+	model.PreviewScrollVisible = false
+
+	view := VBox.PaddingTRBL(0, 0, 0, 2)(
+		ScrollView.
+			Grow(1).
+			Scrollbar().
+			ScrollbarTrackStyle(&model.PreviewScrollTrack).
+			ScrollbarThumbStyle(&model.PreviewScrollThumb).
+			ScrollbarOpacity(0.0)(
+			Text("abcdefghijk"),
+			Text("line1"),
+			Text("line2"),
+		),
+	)
+
+	buf := NewBuffer(14, 2)
+	Build(view).Execute(buf, 14, 2)
+
+	if got := buf.Get(12, 0).Rune; got != 'k' {
+		t.Fatalf("last content cell = %q, want k before hidden scrollbar gutter\n%s", got, buf.String())
+	}
+	if got := buf.Get(13, 0).Rune; got != ' ' {
+		t.Fatalf("hidden scrollbar gutter should stay blank, got %q\n%s", got, buf.String())
+	}
+}
+
 func bufferHasBG(buf *Buffer, want Color) bool {
 	for y := 0; y < buf.Height(); y++ {
 		for x := 0; x < buf.Width(); x++ {
@@ -303,9 +343,13 @@ func TestNotificationRowsRightAlignText(t *testing.T) {
 		{Text: "much longer notification", Kind: ui.NotificationError, Opacity: 1},
 	}
 	palette := theme.Dark()
+	model := mailbox.NewUI(mailbox.UIConfig{
+		State: mailbox.NewState(nil, "test@example.com"),
+		Theme: palette,
+	})
 	view := VBox.Width(49).Gap(1)(
 		ForEach(&notifications, func(item *ui.Notification) Component {
-			return notificationRow(item, palette)
+			return notificationRow(item, model)
 		}),
 	)
 

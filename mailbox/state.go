@@ -17,6 +17,11 @@ import (
 	"github.com/kungfusheep/mail/senderid"
 )
 
+const (
+	defaultThreadLimit = 25
+	threadLimitStep    = 25
+)
+
 type State struct {
 	cache *cache.Cache
 	imap  *imap.IMAP
@@ -40,10 +45,11 @@ type State struct {
 	// the UI goroutine; the cache-publish subscriber runs separately. Without
 	// this both paths race through LoadThreads + BuildThreadDisplay and can
 	// leave the display in an inconsistent (out-of-date-order) state.
-	displayMu  sync.Mutex
-	threads    []provider.Thread
-	threadRows []ThreadRow
-	selected   int
+	displayMu   sync.Mutex
+	threads     []provider.Thread
+	threadRows  []ThreadRow
+	selected    int
+	threadLimit int
 
 	previewLines []string
 	previewText  string
@@ -72,6 +78,7 @@ func (m *State) ThreadLen() int                               { return len(m.thr
 func (m *State) Selected() int                                { return m.ClampSelection(m.selected) }
 func (m *State) PreviewText() *string                         { return &m.previewText }
 func (m *State) ConversationMessages() *[]ConversationMessage { return &m.conversation }
+func (m *State) Email() string                                { return m.email }
 
 func (m *State) ThreadRowAt(sel int) *ThreadRow {
 	if sel >= 0 && sel < len(m.threadRows) {
@@ -87,7 +94,7 @@ func (m *State) SetSearchResults(results []provider.Thread) {
 }
 
 func NewState(c *cache.Cache, email string) *State {
-	return &State{cache: c, email: email}
+	return &State{cache: c, email: email, threadLimit: defaultThreadLimit}
 }
 
 func (m *State) SetLinkOpener(open LinkOpener) {
@@ -285,12 +292,10 @@ func (m *State) ActiveFolderCanonical() string {
 	return canonicalDisplayName(m.ActiveFolderID())
 }
 
-// Watch subscribes the mailbox to a cache label and keeps its thread
-// list in lockstep with cache mutations. On every publish we rerun
-// LoadThreads + BuildThreadDisplay (the invariant: threadRows mirrors
-// cache state for the active folder) and then call onRefresh for any
-// app-level work that needs to happen too — re-selecting, reloading
-// the preview, requesting a render.
+// Watch subscribes the mailbox to a cache label and notifies the caller when
+// that label changes. The callback should schedule any UI/state refresh onto
+// the UI path; mutating State directly from this watcher goroutine races with
+// key handlers.
 //
 // Returned func unsubscribes. Callers hold onto it to swap watchers
 // when the active folder changes.
@@ -301,8 +306,6 @@ func (m *State) Watch(label string, onRefresh func()) func() {
 	ch, unsub := m.cache.Subscribe(label)
 	go func() {
 		for range ch {
-			m.LoadThreads()
-			m.BuildThreadDisplay()
 			if onRefresh != nil {
 				onRefresh()
 			}
@@ -320,6 +323,59 @@ func (m *State) FolderName(idx int) string {
 		return displayFolders[idx].Name
 	}
 	return ""
+}
+
+func (m *State) MoveTargetFolders() []provider.Folder {
+	active := m.ActiveFolderID()
+	type candidate struct {
+		folder provider.Folder
+		name   string
+		rank   int
+	}
+	best := map[string]candidate{}
+	for _, folder := range m.folders {
+		if folder.ID == "" || folder.ID == active {
+			continue
+		}
+		name := canonicalDisplayName(folder.ID)
+		rank := canonicalRank(folder.ID)
+		key := name
+		if name == "" {
+			if strings.HasPrefix(folder.ID, "[Gmail]") ||
+				strings.HasPrefix(folder.ID, "[Google Mail]") ||
+				strings.HasPrefix(folder.ID, "[Airmail]") ||
+				strings.HasPrefix(folder.ID, "[Mailbox]") {
+				continue
+			}
+			name = strings.TrimSpace(folder.Name)
+			if name == "" {
+				name = folder.ID
+			}
+			key = "custom:" + folder.ID
+			rank = 1000
+		}
+		current, exists := best[key]
+		if !exists || folder.Total > current.folder.Total {
+			best[key] = candidate{folder: folder, name: name, rank: rank}
+		}
+	}
+	candidates := make([]candidate, 0, len(best))
+	for _, c := range best {
+		candidates = append(candidates, c)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].rank != candidates[j].rank {
+			return candidates[i].rank < candidates[j].rank
+		}
+		return strings.ToLower(candidates[i].name) < strings.ToLower(candidates[j].name)
+	})
+	folders := make([]provider.Folder, 0, len(candidates))
+	for _, c := range candidates {
+		folder := c.folder
+		folder.Name = c.name
+		folders = append(folders, folder)
+	}
+	return folders
 }
 
 // threads
@@ -342,7 +398,7 @@ func (m *State) LoadThreads() {
 		m.updateActiveFolderUnread()
 		return
 	}
-	threads, err := m.cache.GetThreads(m.ActiveFolderID(), 25)
+	threads, err := m.cache.GetThreads(m.ActiveFolderID(), m.threadLimit)
 	if err != nil {
 		return
 	}
@@ -350,6 +406,16 @@ func (m *State) LoadThreads() {
 	m.threads = threads
 	m.displayMu.Unlock()
 	m.updateActiveFolderUnread()
+}
+
+func (m *State) LoadMoreThreads() int {
+	if m.threadLimit <= 0 {
+		m.threadLimit = defaultThreadLimit
+	}
+	m.threadLimit += threadLimitStep
+	m.LoadThreads()
+	m.BuildThreadDisplay()
+	return m.threadLimit
 }
 
 func (m *State) updateActiveFolderUnread() {
@@ -861,6 +927,10 @@ func (m *State) ToggleThread(sel int) {
 	// if len(t.Messages) <= 1 {
 	// 	return
 	// }
+	if !row.Expanded {
+		t = m.indexedConversationThread(t)
+		m.threads[row.ThreadIdx] = t
+	}
 
 	row.Expanded = !row.Expanded
 	row.Grouped = row.Expanded
@@ -900,6 +970,45 @@ func (m *State) ToggleThread(sel int) {
 		}
 		m.threadRows = append(m.threadRows[:sel+1], m.threadRows[end:]...)
 	}
+}
+
+func (m *State) indexedConversationThread(t provider.Thread) provider.Thread {
+	if m.cache == nil || m.ActiveFolderCanonical() == "Drafts" {
+		return t
+	}
+	messages, err := m.cache.GetConversationMessages(t, 50)
+	if err != nil {
+		log.Printf("conversation index: %v", err)
+		return t
+	}
+	if len(messages) <= len(t.Messages) {
+		return t
+	}
+	return threadWithMessages(t, messages)
+}
+
+func threadWithMessages(t provider.Thread, messages []provider.Message) provider.Thread {
+	out := t
+	out.Messages = messages
+	if len(messages) == 0 {
+		return out
+	}
+	out.Date = messages[len(messages)-1].Date
+	out.Unread = 0
+	out.Participants = nil
+	seen := make(map[string]bool)
+	for _, msg := range messages {
+		if !msg.Read {
+			out.Unread++
+		}
+		key := strings.ToLower(msg.From.Email)
+		if key == "" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		out.Participants = append(out.Participants, msg.From)
+	}
+	return out
 }
 
 func (m *State) SelectedMessage(sel int) *provider.Message {
@@ -950,7 +1059,8 @@ func (m *State) LastMessage(sel int) *provider.Message {
 // convEpoch counter lets late-returning async fetch goroutines notice
 // their render was superseded and skip the writeback.
 func (m *State) LoadConversation(sel int, onUpdate func()) {
-	t := m.SelectedThread(sel)
+	t := m.selectedConversationThread(sel)
+	scanMode := m.threadScanMode(sel)
 
 	// Claim an epoch up front so any later-returning async goroutine
 	// from our own call can identify itself as "still current".
@@ -1002,6 +1112,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 		senderStyle := senderDisplayStyle(senderColor, hasSenderColor)
 
 		doc := m.renderDocument(msg)
+		calendarEvents := calendarLinkEvents(doc.PlainText(), msg)
 		unsubscribeURL := doc.UnsubscribeLink()
 		local = append(local, ConversationMessage{
 			Subject:        msg.Subject,
@@ -1019,20 +1130,23 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			UnsubscribeChip: unsubscribeChip(unsubscribeURL, func(href string) {
 				m.OpenLink(href)
 			}),
-			ToLine:         formatAddresses(msg.To),
-			HasTo:          len(msg.To) > 0,
-			CCLine:         formatAddresses(msg.CC),
-			HasCC:          len(msg.CC) > 0,
-			BCCLine:        formatAddresses(msg.BCC),
-			HasBCC:         len(msg.BCC) > 0,
-			Date:           msg.Date.Format("2 Jan 15:04"),
-			Attachments:    m.attachmentRows(msg),
-			HasAttachments: len(msg.Attachments) > 0,
-			Body:           doc.PlainText(),
-			BodySpans:      doc.GlyphSpansWithLinks(m.OpenLink),
-			BodyBlocks:     m.previewBodyBlocks(doc),
-			Segments:       doc.Segments(),
-			IsMe:           isMe,
+			ToLine:          formatAddresses(msg.To),
+			HasTo:           len(msg.To) > 0,
+			CCLine:          formatAddresses(msg.CC),
+			HasCC:           len(msg.CC) > 0,
+			BCCLine:         formatAddresses(msg.BCC),
+			HasBCC:          len(msg.BCC) > 0,
+			Date:            msg.Date.Format("2 Jan 15:04"),
+			Attachments:     m.attachmentRows(msg, attachmentSource(from, len(t.Messages) > 1)),
+			HasAttachments:  len(msg.Attachments) > 0,
+			Body:            doc.PlainText(),
+			BodySpans:       m.calendarLinkSpans(doc.GlyphSpansWithLinks(m.OpenLink), calendarEvents),
+			BodyBlocks:      m.previewBodyBlocks(doc, scanMode, calendarEvents),
+			Segments:        doc.Segments(),
+			IsMe:            isMe,
+			ThreadScanMode:  scanMode,
+			HasScanSubject:  scanMode && strings.TrimSpace(msg.Subject) != "",
+			ScanSubjectLine: msg.Subject,
 		})
 
 		if msg.TextBody == "" && msg.HTMLBody == "" {
@@ -1112,9 +1226,10 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 					continue
 				}
 				doc := m.renderDocument(thread.Messages[i])
+				calendarEvents := calendarLinkEvents(doc.PlainText(), thread.Messages[i])
 				m.conversation[i].Subject = thread.Messages[i].Subject
 				m.conversation[i].HasSubject = strings.TrimSpace(thread.Messages[i].Subject) != ""
-				m.conversation[i].Attachments = m.attachmentRows(thread.Messages[i])
+				m.conversation[i].Attachments = m.attachmentRows(thread.Messages[i], attachmentSource(m.conversation[i].Sender, len(thread.Messages) > 1))
 				m.conversation[i].HasAttachments = len(thread.Messages[i].Attachments) > 0
 				unsubscribeURL := doc.UnsubscribeLink()
 				m.conversation[i].UnsubscribeURL = unsubscribeURL
@@ -1123,8 +1238,8 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 					m.OpenLink(href)
 				})
 				m.conversation[i].Body = doc.PlainText()
-				m.conversation[i].BodySpans = doc.GlyphSpansWithLinks(m.OpenLink)
-				m.conversation[i].BodyBlocks = m.previewBodyBlocks(doc)
+				m.conversation[i].BodySpans = m.calendarLinkSpans(doc.GlyphSpansWithLinks(m.OpenLink), calendarEvents)
+				m.conversation[i].BodyBlocks = m.previewBodyBlocks(doc, m.conversation[i].ThreadScanMode, calendarEvents)
 				m.conversation[i].Segments = doc.Segments()
 			}
 			calendarTargets := calendarAttachmentTargets(m.conversation)
@@ -1133,6 +1248,27 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			m.enrichCalendarAttachments(epoch, calendarTargets, onUpdate)
 		}()
 	}
+}
+
+func (m *State) selectedConversationThread(sel int) *provider.Thread {
+	if msg := m.SelectedMessage(sel); msg != nil {
+		return &provider.Thread{
+			ID:           msg.ThreadID,
+			Subject:      msg.Subject,
+			Date:         msg.Date,
+			Messages:     []provider.Message{*msg},
+			Participants: []provider.Address{msg.From},
+		}
+	}
+	return m.SelectedThread(sel)
+}
+
+func (m *State) threadScanMode(sel int) bool {
+	if sel < 0 || sel >= len(m.threadRows) {
+		return false
+	}
+	row := m.threadRows[sel]
+	return row.MsgIdx < 0 && row.Expanded
 }
 
 func (m *State) fetchMessage(id string) (provider.Message, error) {
@@ -1309,10 +1445,13 @@ func (m *State) renderDocument(msg provider.Message) preview.Document {
 	return preview.ParseText(body)
 }
 
-func (m *State) previewBodyBlocks(doc preview.Document) []PreviewBodyBlock {
+func (m *State) previewBodyBlocks(doc preview.Document, scanMode bool, calendarEvents []calendarLinkEvent) []PreviewBodyBlock {
 	blocks := make([]PreviewBodyBlock, 0, len(doc.Blocks))
 	for _, block := range doc.Blocks {
 		if block.Empty() {
+			continue
+		}
+		if scanMode && hiddenInThreadScan(block.Kind) {
 			continue
 		}
 		blocks = append(blocks, PreviewBodyBlock{
@@ -1320,10 +1459,19 @@ func (m *State) previewBodyBlocks(doc preview.Document) []PreviewBodyBlock {
 			HasSpaceBefore:      len(blocks) > 0,
 			HasExtraSpaceBefore: len(blocks) > 0 && block.Kind == preview.BlockHeading,
 			Style:               previewBodyBlockStyle(block.Kind),
-			Spans:               block.GlyphSpansWithLinks(m.OpenLink),
+			Spans:               m.calendarLinkSpans(block.GlyphSpansWithLinks(m.OpenLink), calendarEvents),
 		})
 	}
 	return blocks
+}
+
+func hiddenInThreadScan(kind preview.BlockKind) bool {
+	switch kind {
+	case preview.BlockFooter, preview.BlockSignature, preview.BlockForwarded, preview.BlockQuote, preview.BlockDivider:
+		return true
+	default:
+		return false
+	}
 }
 
 func previewBodyBlockStyle(kind preview.BlockKind) glyph.Style {
@@ -1456,15 +1604,13 @@ func (m *State) Archive(sel int) (undo func(), desc string) {
 		return nil, "archive unavailable: no archive folder"
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	m.queueMoveCommands(t, folder, dest)
-	m.cache.RemoveThreadFromLabel(t.ID, folder)
-	m.cache.AddThreadToLabel(t.ID, dest)
 	threadIdx := m.removeThreadAtSelection(sel)
+	m.queueMoveCommands(&thread, folder, dest)
+	m.cache.MoveThreadLabel(thread.ID, folder, dest)
 
 	return func() {
 		m.cache.PutThread(thread)
-		m.cache.RemoveThreadFromLabel(thread.ID, dest)
-		m.cache.AddThreadToLabel(thread.ID, folder)
+		m.cache.MoveThreadLabel(thread.ID, dest, folder)
 		m.queueMoveCommands(&thread, dest, folder)
 		m.insertThreadAt(threadIdx, thread)
 		m.SetSelected(sel)
@@ -1482,19 +1628,73 @@ func (m *State) Delete(sel int) (undo func(), desc string) {
 		return nil, "delete unavailable: no trash folder"
 	}
 	thread, folder := *t, m.ActiveFolderID()
-	m.queueMoveCommands(t, folder, dest)
-	m.cache.RemoveThreadFromLabel(t.ID, folder)
-	m.cache.AddThreadToLabel(t.ID, dest)
 	threadIdx := m.removeThreadAtSelection(sel)
+	m.queueMoveCommands(&thread, folder, dest)
+	m.cache.MoveThreadLabel(thread.ID, folder, dest)
 
 	return func() {
 		m.cache.PutThread(thread)
-		m.cache.RemoveThreadFromLabel(thread.ID, dest)
-		m.cache.AddThreadToLabel(thread.ID, folder)
+		m.cache.MoveThreadLabel(thread.ID, dest, folder)
 		m.queueMoveCommands(&thread, dest, folder)
 		m.insertThreadAt(threadIdx, thread)
 		m.SetSelected(sel)
 	}, fmt.Sprintf("deleted '%s'", truncate(thread.Subject, 30))
+}
+
+func (m *State) Spam(sel int) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	dest := m.FolderIDByDisplayName("Spam")
+	if dest == "" {
+		log.Println("spam: no spam folder found")
+		return nil, "spam unavailable: no spam folder"
+	}
+	thread, folder := *t, m.ActiveFolderID()
+	threadIdx := m.removeThreadAtSelection(sel)
+	m.queueMoveCommands(&thread, folder, dest)
+	m.cache.MoveThreadLabel(thread.ID, folder, dest)
+
+	return func() {
+		m.cache.PutThread(thread)
+		m.cache.MoveThreadLabel(thread.ID, dest, folder)
+		m.queueMoveCommands(&thread, dest, folder)
+		m.insertThreadAt(threadIdx, thread)
+		m.SetSelected(sel)
+	}, fmt.Sprintf("moved '%s' to spam", truncate(thread.Subject, 30))
+}
+
+func (m *State) Move(sel int, dest, destName string) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	if dest == "" {
+		return nil, "move unavailable: no folder"
+	}
+	source := m.ActiveFolderID()
+	if source == dest {
+		if destName == "" {
+			destName = dest
+		}
+		return nil, "already in " + destName
+	}
+	if destName == "" {
+		destName = dest
+	}
+	thread := *t
+	threadIdx := m.removeThreadAtSelection(sel)
+	m.queueMoveCommands(&thread, source, dest)
+	m.cache.MoveThreadLabel(thread.ID, source, dest)
+
+	return func() {
+		m.cache.PutThread(thread)
+		m.cache.MoveThreadLabel(thread.ID, dest, source)
+		m.queueMoveCommands(&thread, dest, source)
+		m.insertThreadAt(threadIdx, thread)
+		m.SetSelected(sel)
+	}, fmt.Sprintf("moved '%s' to %s", truncate(thread.Subject, 30), destName)
 }
 
 func (m *State) removeThreadAtSelection(sel int) int {
@@ -1510,6 +1710,16 @@ func (m *State) removeThreadAtSelection(sel int) int {
 }
 
 func (m *State) insertThreadAt(idx int, thread provider.Thread) {
+	for i := range m.threads {
+		if m.threads[i].ID != thread.ID {
+			continue
+		}
+		m.threads = append(m.threads[:i], m.threads[i+1:]...)
+		if i < idx {
+			idx--
+		}
+		break
+	}
 	if idx < 0 {
 		idx = 0
 	}
@@ -2047,6 +2257,9 @@ type ConversationMessage struct {
 	BodyBlocks      []PreviewBodyBlock
 	Segments        []preview.Segment
 	IsMe            bool
+	ThreadScanMode  bool
+	HasScanSubject  bool
+	ScanSubjectLine string
 }
 
 type PreviewBodyBlock struct {
@@ -2070,6 +2283,7 @@ type AttachmentRow struct {
 	MessageID     string
 	Part          []int
 	Encoding      string
+	Source        string
 	Display       []glyph.Span
 }
 
@@ -2079,7 +2293,7 @@ type AttachmentChip struct {
 	FillName string
 }
 
-func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
+func (m *State) attachmentRows(msg provider.Message, source string) []AttachmentRow {
 	rows := make([]AttachmentRow, 0, len(msg.Attachments))
 	for _, a := range msg.Attachments {
 		name := a.Filename
@@ -2097,6 +2311,7 @@ func (m *State) attachmentRows(msg provider.Message) []AttachmentRow {
 			MessageID:   msg.ID,
 			Part:        append([]int(nil), a.Part...),
 			Encoding:    a.Encoding,
+			Source:      source,
 		}
 		row.Display = m.attachmentDisplay(row)
 		rows = append(rows, row)
@@ -2110,9 +2325,9 @@ func (m *State) attachmentDisplay(row AttachmentRow) []glyph.Span {
 		if title == "" {
 			title = "calendar invite"
 		}
-		secondary := row.CalendarWhen
+		secondary := attachmentSecondary(row.CalendarWhen, row.Source)
 		if secondary == "" && row.Filename != "" && row.Filename != "attachment" {
-			secondary = row.Filename
+			secondary = attachmentSecondary(row.Filename, row.Source)
 		}
 		spans := []glyph.Span{
 			{Text: row.Icon},
@@ -2133,13 +2348,31 @@ func (m *State) attachmentDisplay(row AttachmentRow) []glyph.Span {
 		{Text: " "},
 		{Text: row.Filename, Style: glyph.Style{Attr: glyph.AttrBold}, OnSelect: func() { m.OpenAttachment(row) }},
 	}
-	if row.Metadata != "" {
+	if secondary := attachmentSecondary(row.Metadata, row.Source); secondary != "" {
 		spans = append(spans,
 			glyph.Span{Text: "  "},
-			glyph.Span{Text: row.Metadata, Style: glyph.Style{Attr: glyph.AttrDim}},
+			glyph.Span{Text: secondary, Style: glyph.Style{Attr: glyph.AttrDim}},
 		)
 	}
 	return spans
+}
+
+func attachmentSource(sender string, show bool) string {
+	if !show {
+		return ""
+	}
+	return strings.TrimSpace(sender)
+}
+
+func attachmentSecondary(primary, source string) string {
+	parts := make([]string, 0, 2)
+	if primary = strings.TrimSpace(primary); primary != "" {
+		parts = append(parts, primary)
+	}
+	if source = strings.TrimSpace(source); source != "" {
+		parts = append(parts, "from "+source)
+	}
+	return strings.Join(parts, " · ")
 }
 
 func isCalendarAttachment(filename, contentType string) bool {

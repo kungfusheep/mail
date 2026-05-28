@@ -47,6 +47,11 @@ func New(duration time.Duration, bg, peak Color) *Transition {
 	}
 }
 
+func (t *Transition) SetColors(bg, peak Color) {
+	t.bg = bg
+	t.peak = peak
+}
+
 // Start begins the transition. Call immediately before switching views.
 func (t *Transition) Start() {
 	t.active = true

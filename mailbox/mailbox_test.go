@@ -2,6 +2,7 @@ package mailbox
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"strings"
 	"testing"
@@ -72,6 +73,8 @@ func newDraftsHarness(t *testing.T) *draftsHarness {
 	// just observes each completion so tests can wait deterministically.
 	refresh := make(chan struct{}, 16)
 	unsub := mb.Watch("[Gmail]/Drafts", func() {
+		mb.LoadThreads()
+		mb.BuildThreadDisplay()
 		refresh <- struct{}{}
 	})
 
@@ -86,6 +89,31 @@ func (h *draftsHarness) waitForRefresh(t *testing.T) {
 	case <-h.refresh:
 	case <-time.After(200 * time.Millisecond):
 		t.Fatal("subscriber never refreshed after draft mutation")
+	}
+}
+
+func waitForThreadRefresh(t *testing.T, ch <-chan struct{}) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("subscriber never refreshed after thread mutation")
+	}
+}
+
+func assertThreadRows(t *testing.T, mb *State, wantLabels []string, wantSelected int) {
+	t.Helper()
+	rows := *mb.ThreadRows()
+	if len(rows) != len(wantLabels) {
+		t.Fatalf("rows = %d (%#v), want %d", len(rows), rows, len(wantLabels))
+	}
+	for i, want := range wantLabels {
+		if rows[i].Label != want {
+			t.Fatalf("row %d = %q, want %q; rows=%#v", i, rows[i].Label, want, rows)
+		}
+		if rows[i].Selected != (i == wantSelected) {
+			t.Fatalf("row %d selected = %v, want %v; rows=%#v", i, rows[i].Selected, i == wantSelected, rows)
+		}
 	}
 }
 
@@ -226,6 +254,82 @@ func TestThreadNavigationResetsPreviewScroll(t *testing.T) {
 	}
 }
 
+func TestUpdatePreviewScrollTracksScrollViewLayer(t *testing.T) {
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: testCache(t),
+		State: NewState(nil, "test@example.com"),
+		Theme: theme.Dark(),
+	})
+	scroll := glyph.ScrollView()
+	scroll.Layer().SetViewport(20, 5)
+	scroll.Layer().SetBuffer(glyph.NewBuffer(20, 25))
+	scroll.Layer().ScrollTo(10)
+	model.SetConversationView(scroll)
+	model.FocusPreview()
+
+	model.UpdatePreviewScroll()
+
+	if !model.PreviewCanScroll {
+		t.Fatal("PreviewCanScroll = false, want true for overflowing preview content")
+	}
+	if !model.PreviewScrollVisible {
+		t.Fatal("PreviewScrollVisible = false, want true while preview pane is focused and scrollable")
+	}
+	if got := model.PreviewScrollPos; got != 50 {
+		t.Fatalf("PreviewScrollPos = %d, want 50", got)
+	}
+
+	scroll.Layer().SetBuffer(glyph.NewBuffer(20, 5))
+	model.UpdatePreviewScroll()
+
+	if model.PreviewCanScroll {
+		t.Fatal("PreviewCanScroll = true, want false when preview content fits")
+	}
+	if model.PreviewScrollVisible {
+		t.Fatal("PreviewScrollVisible = true, want false when preview content fits")
+	}
+	if got := model.PreviewScrollPos; got != 0 {
+		t.Fatalf("PreviewScrollPos = %d, want 0 when preview content fits", got)
+	}
+}
+
+func TestApplyThemeInvalidatesAndRepaintsPreviewLayer(t *testing.T) {
+	app := glyph.NewApp()
+	model := NewUI(UIConfig{
+		App:   app,
+		Cache: testCache(t),
+		State: NewState(nil, "test@example.com"),
+		Theme: theme.Dark(),
+	})
+	scroll := glyph.ScrollView.Fill(&model.BG)(
+		glyph.Text("preview body"),
+		glyph.SpaceH(3),
+	)
+	model.SetConversationView(scroll)
+
+	tmpl := glyph.Build(scroll)
+	tmpl.SetApp(app)
+	buf := glyph.NewBuffer(30, 5)
+	tmpl.Execute(buf, 30, 5)
+	if scroll.Layer().NeedsRender() {
+		t.Fatal("preview layer still needs render after initial execute")
+	}
+
+	light := theme.Light()
+	model.ApplyTheme(light)
+	if !scroll.Layer().NeedsRender() {
+		t.Fatal("ApplyTheme did not invalidate the preview layer")
+	}
+
+	buf = glyph.NewBuffer(30, 5)
+	tmpl.Execute(buf, 30, 5)
+	got := buf.Get(0, 1).Style.BG
+	if got != light.BG {
+		t.Fatalf("preview layer background = %#v, want light theme BG %#v", got, light.BG)
+	}
+}
+
 func TestLoadPreviewUsesDocumentModelForHTML(t *testing.T) {
 	mb := NewState(nil, "test@example.com")
 	msg := provider.Message{
@@ -337,6 +441,190 @@ func TestLoadConversationCarriesAttachmentMetadata(t *testing.T) {
 	}
 	if jumps != 1 {
 		t.Fatalf("attachment display jump callbacks = %d, want 1", jumps)
+	}
+}
+
+func TestLoadConversationShowsAttachmentSourceForThread(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "attachments",
+		Date:    now,
+		Messages: []provider.Message{
+			{
+				ID:       "m1",
+				From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+				Subject:  "first",
+				Date:     now,
+				TextBody: "first message",
+			},
+			{
+				ID:       "m2",
+				From:     provider.Address{Name: "Bob", Email: "bob@example.com"},
+				Subject:  "second",
+				Date:     now.Add(time.Minute),
+				TextBody: "see attached",
+				Attachments: []provider.Attachment{{
+					Filename:    "brief.pdf",
+					ContentType: "application/pdf",
+					Size:        153600,
+					Part:        []int{2},
+				}},
+			},
+		},
+	}})
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if len(msgs) != 2 {
+		t.Fatalf("conversation messages = %d, want 2", len(msgs))
+	}
+	if len(msgs[1].Attachments) != 1 {
+		t.Fatalf("attachments = %d, want 1", len(msgs[1].Attachments))
+	}
+	if got := msgs[1].Attachments[0].Source; got != "Bob" {
+		t.Fatalf("attachment source = %q, want Bob", got)
+	}
+	if !spansContain(msgs[1].Attachments[0].Display, "from Bob") {
+		t.Fatalf("attachment display = %#v, want source metadata", msgs[1].Attachments[0].Display)
+	}
+}
+
+func TestLoadMoreThreadsExpandsCachedWindow(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	threads := make([]provider.Thread, 60)
+	for i := range threads {
+		threads[i] = provider.Thread{
+			ID:      fmt.Sprintf("t%02d", i),
+			Subject: fmt.Sprintf("thread %02d", i),
+			Date:    now.Add(time.Duration(i) * time.Minute),
+			Messages: []provider.Message{{
+				ID:      fmt.Sprintf("m%02d", i),
+				Subject: fmt.Sprintf("thread %02d", i),
+				Date:    now.Add(time.Duration(i) * time.Minute),
+			}},
+		}
+	}
+	if err := c.ReplaceThreads("INBOX", threads); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	if got := len(mb.threads); got != defaultThreadLimit {
+		t.Fatalf("initial loaded threads = %d, want %d", got, defaultThreadLimit)
+	}
+
+	limit := mb.LoadMoreThreads()
+	if limit != defaultThreadLimit+threadLimitStep {
+		t.Fatalf("thread limit = %d, want %d", limit, defaultThreadLimit+threadLimitStep)
+	}
+	if got := len(mb.threads); got != defaultThreadLimit+threadLimitStep {
+		t.Fatalf("loaded threads after load more = %d, want %d", got, defaultThreadLimit+threadLimitStep)
+	}
+}
+
+func TestCopySenderAddressCopiesSelectedThreadSender(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "hello",
+		Date:    time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC),
+		Messages: []provider.Message{{
+			ID:   "m1",
+			From: provider.Address{Name: "Alice", Email: "alice@example.com"},
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	var copied string
+	oldCopy := copyText
+	copyText = func(text string) error {
+		copied = text
+		return nil
+	}
+	t.Cleanup(func() { copyText = oldCopy })
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: c,
+		State: mb,
+		Theme: theme.Dark(),
+	})
+	model.CopySenderAddress()
+
+	if copied != "alice@example.com" {
+		t.Fatalf("copied sender = %q, want alice@example.com", copied)
+	}
+}
+
+func TestSpamMovesThreadToSpamAndQueuesUndo(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Google Mail]/Spam", Name: "Spam"},
+	})
+	now := time.Date(2026, 5, 14, 10, 0, 0, 0, time.UTC)
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "spammy",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:      "m1",
+			Subject: "spammy",
+			Date:    now,
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	mb := NewState(c, "me@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	undo, desc := mb.Spam(0)
+	if undo == nil {
+		t.Fatal("Spam undo = nil")
+	}
+	if !strings.Contains(desc, "spam") {
+		t.Fatalf("Spam desc = %q, want spam", desc)
+	}
+	if mb.ThreadLen() != 0 {
+		t.Fatalf("rows after spam = %d, want 0", mb.ThreadLen())
+	}
+	spam, err := c.GetThreads("[Google Mail]/Spam", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(spam) != 1 || spam[0].ID != "t1" {
+		t.Fatalf("spam threads = %#v, want t1", spam)
+	}
+
+	undo()
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	if mb.ThreadLen() != 1 {
+		t.Fatalf("rows after undo = %d, want 1", mb.ThreadLen())
 	}
 }
 
@@ -511,7 +799,7 @@ func TestPreviewBodyBlocksClassifySecondaryContent(t *testing.T) {
 		<hr>
 	</body></html>`, "")
 
-	blocks := mb.previewBodyBlocks(doc)
+	blocks := mb.previewBodyBlocks(doc, false, nil)
 	if len(blocks) != 4 {
 		t.Fatalf("body blocks = %d, want 4", len(blocks))
 	}
@@ -1586,6 +1874,202 @@ func TestToggleThread_ExpandCollapse(t *testing.T) {
 	}
 }
 
+func TestLoadConversationDoesNotExpandIndexedConversation(t *testing.T) {
+	c := testCache(t)
+	now := time.Now()
+	inbox := provider.Message{
+		ID:        "inbox-1",
+		MessageID: "<inbox@test>",
+		Subject:   "Leica Q343",
+		From:      provider.Address{Name: "Leica", Email: "sales@test"},
+		To:        []provider.Address{{Email: "me@test"}},
+		Date:      now.Add(-time.Hour),
+	}
+	sent := provider.Message{
+		ID:        "sent-1",
+		MessageID: "<sent@test>",
+		Subject:   "Re: Leica Q343",
+		From:      provider.Address{Name: "Me", Email: "me@test"},
+		To:        []provider.Address{{Email: "sales@test"}},
+		Date:      now,
+		Read:      true,
+	}
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:       "inbox-thread",
+		Subject:  inbox.Subject,
+		Date:     inbox.Date,
+		Messages: []provider.Message{inbox},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutSentMessage(sent); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if got := len(msgs); got != 1 {
+		t.Fatalf("conversation messages = %d, want only selected cached thread", got)
+	}
+	if msgs[0].Subject != inbox.Subject {
+		t.Fatalf("conversation subject = %q, want %q", msgs[0].Subject, inbox.Subject)
+	}
+}
+
+func TestToggleThreadUsesConversationIndex(t *testing.T) {
+	c := testCache(t)
+	now := time.Now()
+	inbox := provider.Message{
+		ID:        "inbox-1",
+		MessageID: "<inbox@test>",
+		Subject:   "Leica Q343",
+		From:      provider.Address{Name: "Leica", Email: "sales@test"},
+		To:        []provider.Address{{Email: "me@test"}},
+		Date:      now.Add(-time.Hour),
+	}
+	sent := provider.Message{
+		ID:        "sent-1",
+		MessageID: "<sent@test>",
+		Subject:   "Re: Leica Q343",
+		From:      provider.Address{Name: "Me", Email: "me@test"},
+		To:        []provider.Address{{Email: "sales@test"}},
+		Date:      now,
+		Read:      true,
+	}
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:       "inbox-thread",
+		Subject:  inbox.Subject,
+		Date:     inbox.Date,
+		Messages: []provider.Message{inbox},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutSentMessage(sent); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	mb.ToggleThread(0)
+	if got := mb.ThreadLen(); got != 3 {
+		t.Fatalf("expanded rows = %d, want header + inbox + sent", got)
+	}
+	msg := mb.SelectedMessage(1)
+	if msg == nil {
+		t.Fatal("row 1 did not select indexed message")
+	}
+	if msg.ID != "sent-1" {
+		t.Fatalf("row 1 message = %q, want newest sent message", msg.ID)
+	}
+}
+
+func TestLoadConversationOnExpandedRowShowsSelectedMessageOnly(t *testing.T) {
+	now := time.Now()
+	mb := testState(t,
+		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
+		[]provider.Thread{{
+			ID:      "t1",
+			Subject: "thread subject",
+			Date:    now,
+			Messages: []provider.Message{
+				{
+					ID:       "old",
+					Subject:  "old message",
+					From:     provider.Address{Name: "Alice", Email: "alice@test"},
+					Date:     now.Add(-time.Hour),
+					TextBody: "old body",
+				},
+				{
+					ID:       "new",
+					Subject:  "new message",
+					From:     provider.Address{Name: "Bob", Email: "bob@test"},
+					Date:     now,
+					TextBody: "new body",
+				},
+			},
+		}},
+	)
+
+	mb.ToggleThread(0)
+	mb.LoadConversation(1, nil)
+
+	msgs := *mb.ConversationMessages()
+	if got := len(msgs); got != 1 {
+		t.Fatalf("conversation messages = %d, want selected expanded message only", got)
+	}
+	if msgs[0].Subject != "new message" {
+		t.Fatalf("conversation subject = %q, want new message", msgs[0].Subject)
+	}
+	if msgs[0].SenderEmail != "bob@test" {
+		t.Fatalf("conversation sender = %q, want bob@test", msgs[0].SenderEmail)
+	}
+}
+
+func TestExpandedThreadHeaderUsesScanMode(t *testing.T) {
+	now := time.Now()
+	mb := testState(t,
+		[]provider.Folder{{ID: "INBOX", Name: "INBOX"}},
+		[]provider.Thread{{
+			ID:      "t1",
+			Subject: "thread subject",
+			Date:    now,
+			Messages: []provider.Message{
+				{
+					ID:      "old",
+					Subject: "old message",
+					From:    provider.Address{Name: "Alice", Email: "alice@test"},
+					Date:    now.Add(-time.Hour),
+					HTMLBody: `<html><body>
+						<p>Main content</p>
+						<blockquote><p>Older reply</p></blockquote>
+						<p>Privacy policy</p>
+						<p>Example Ltd, registered in England.</p>
+					</body></html>`,
+				},
+				{
+					ID:       "new",
+					Subject:  "new message",
+					From:     provider.Address{Name: "Bob", Email: "bob@test"},
+					Date:     now,
+					TextBody: "new body",
+				},
+			},
+		}},
+	)
+
+	mb.ToggleThread(0)
+	mb.LoadConversation(0, nil)
+
+	msgs := *mb.ConversationMessages()
+	if got := len(msgs); got != 2 {
+		t.Fatalf("conversation messages = %d, want expanded thread messages", got)
+	}
+	if !msgs[0].ThreadScanMode || !msgs[0].HasScanSubject {
+		t.Fatalf("first message scan flags = scan:%v subject:%v, want both true", msgs[0].ThreadScanMode, msgs[0].HasScanSubject)
+	}
+	for _, block := range msgs[0].BodyBlocks {
+		switch block.Kind {
+		case preview.BlockQuote, preview.BlockFooter, preview.BlockSignature, preview.BlockForwarded:
+			t.Fatalf("scan mode block kind = %v, want cruft hidden", block.Kind)
+		}
+	}
+	if got := len(msgs[0].BodyBlocks); got != 1 {
+		t.Fatalf("first message body blocks = %d, want main content only", got)
+	}
+}
+
 func TestSelectedMessage_AfterExpand(t *testing.T) {
 	now := time.Now()
 	mb := testState(t,
@@ -1722,6 +2206,89 @@ func TestArchive_QueuesEveryMessageInThread(t *testing.T) {
 		if !got[id] {
 			t.Errorf("missing queued move for %s", id)
 		}
+	}
+}
+
+func TestMove_RemovesThreadAndQueuesCommandForTargetFolder(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(append(testFolders, provider.Folder{ID: "Receipts", Name: "Receipts"}))
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1", MessageID: "<m1@test>"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2", MessageID: "<m2@test>"}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	undo, _ := mb.Move(1, "Receipts", "Receipts")
+
+	if mb.ThreadLen() != 1 {
+		t.Fatalf("rows after move = %d, want 1", mb.ThreadLen())
+	}
+	cmds, _ := c.PendingCommands()
+	if len(cmds) != 1 || cmds[0].Action != "move" || cmds[0].TargetID != "m2" {
+		t.Fatalf("pending commands = %v, want move m2", cmds)
+	}
+	if cmds[0].Params["folder"] != "Receipts" {
+		t.Errorf("move folder = %q, want Receipts", cmds[0].Params["folder"])
+	}
+	if cmds[0].Params["source"] != "INBOX" {
+		t.Errorf("move source = %q, want INBOX", cmds[0].Params["source"])
+	}
+	moved, _ := c.GetThreads("Receipts", 25)
+	if len(moved) != 1 || moved[0].ID != "t2" {
+		t.Fatalf("target folder threads = %v, want t2", moved)
+	}
+
+	undo()
+	if mb.ThreadLen() != 2 {
+		t.Fatalf("after undo rows = %d, want 2", mb.ThreadLen())
+	}
+	cmds, _ = c.PendingCommands()
+	if len(cmds) != 2 {
+		t.Fatalf("after undo pending commands = %d, want 2", len(cmds))
+	}
+	inverse := cmds[1]
+	if inverse.Action != "move" || inverse.TargetID != "m2" {
+		t.Errorf("undo command = %#v, want move m2", inverse)
+	}
+	if inverse.Params["folder"] != "INBOX" || inverse.Params["source"] != "Receipts" {
+		t.Errorf("undo move = folder %q source %q, want INBOX/Receipts", inverse.Params["folder"], inverse.Params["source"])
+	}
+}
+
+func TestMoveTargetFoldersUsesDisplayNamesAndExcludesActiveFolder(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Google Mail]/Bin", Name: "Bin", Total: 1},
+		{ID: "[Gmail]/Trash", Name: "Trash", Total: 3},
+		{ID: "Receipts", Name: "Receipts"},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+
+	targets := mb.MoveTargetFolders()
+	got := map[string]string{}
+	for _, target := range targets {
+		got[target.Name] = target.ID
+		if target.ID == "INBOX" {
+			t.Fatal("move targets included active folder")
+		}
+	}
+	if got["Trash"] != "[Gmail]/Trash" {
+		t.Fatalf("trash target = %q, want [Gmail]/Trash", got["Trash"])
+	}
+	if got["Receipts"] != "Receipts" {
+		t.Fatalf("custom target = %q, want Receipts", got["Receipts"])
 	}
 }
 
@@ -1952,6 +2519,58 @@ func TestArchive_KeepsSelectionOnSameVisibleIndex(t *testing.T) {
 	}
 }
 
+func TestArchiveSelected_WithActiveWatcherKeepsSelection(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: c,
+		State: mb,
+		Theme: theme.Dark(),
+	})
+	model.ThreadSel = 1
+	mb.SetSelected(1)
+
+	refreshed := make(chan struct{}, 4)
+	unsub := mb.Watch("INBOX", func() {
+		model.QueueThreadsChanged()
+		refreshed <- struct{}{}
+	})
+	defer unsub()
+
+	model.ArchiveSelected()
+	waitForThreadRefresh(t, refreshed)
+	model.ProcessPending()
+
+	if model.ThreadSel != 1 {
+		t.Fatalf("ThreadSel after archive refresh = %d, want 1", model.ThreadSel)
+	}
+	rows := *mb.ThreadRows()
+	if len(rows) != 2 {
+		t.Fatalf("rows after archive = %d, want 2", len(rows))
+	}
+	if rows[1].Label != "third" {
+		t.Fatalf("row 1 = %q, want third shifted into archived row's index", rows[1].Label)
+	}
+	if !rows[1].Selected {
+		t.Fatalf("rows = %#v, want shifted row selected after watcher refresh", rows)
+	}
+}
+
 func TestDelete_WithExpandedThread(t *testing.T) {
 	now := time.Now()
 	c := testCache(t)
@@ -2059,6 +2678,100 @@ func TestDelete_LastRowSelectsNewLastRow(t *testing.T) {
 	if !rows[1].Selected {
 		t.Fatalf("rows after rebuild = %#v, want clamped selection to survive refresh rebuild", rows)
 	}
+}
+
+func TestDeleteUndoDeleteUndo_WithActiveWatcherKeepsSelectionAndNoDuplicates(t *testing.T) {
+	now := time.Now()
+	c := testCache(t)
+	c.PutFolders(testFolders)
+	c.ReplaceThreads("INBOX", []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now, Messages: []provider.Message{{ID: "m1"}}},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute), Messages: []provider.Message{{ID: "m2"}}},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute), Messages: []provider.Message{{ID: "m3"}}},
+	})
+
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.SelectFolder(0)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: c,
+		State: mb,
+		Theme: theme.Dark(),
+	})
+	model.ThreadSel = 1
+	mb.SetSelected(1)
+
+	refreshed := make(chan struct{}, 16)
+	unsub := mb.Watch("INBOX", func() {
+		model.QueueThreadsChanged()
+		refreshed <- struct{}{}
+	})
+	defer unsub()
+	drain := func() {
+		for {
+			select {
+			case <-refreshed:
+			default:
+				return
+			}
+		}
+	}
+
+	model.DeleteSelected()
+	waitForThreadRefresh(t, refreshed)
+	drain()
+	model.ProcessPending()
+	if model.ThreadSel != 1 {
+		t.Fatalf("ThreadSel after first delete = %d, want 1", model.ThreadSel)
+	}
+	assertThreadRows(t, mb, []string{"first", "third"}, 1)
+
+	model.UndoLast()
+	waitForThreadRefresh(t, refreshed)
+	drain()
+	model.ProcessPending()
+	if model.ThreadSel != 1 {
+		t.Fatalf("ThreadSel after first undo = %d, want 1", model.ThreadSel)
+	}
+	assertThreadRows(t, mb, []string{"first", "second", "third"}, 1)
+
+	model.DeleteSelected()
+	waitForThreadRefresh(t, refreshed)
+	drain()
+	model.ProcessPending()
+	if model.ThreadSel != 1 {
+		t.Fatalf("ThreadSel after second delete = %d, want 1", model.ThreadSel)
+	}
+	assertThreadRows(t, mb, []string{"first", "third"}, 1)
+
+	model.UndoLast()
+	waitForThreadRefresh(t, refreshed)
+	drain()
+	model.ProcessPending()
+	if model.ThreadSel != 1 {
+		t.Fatalf("ThreadSel after second undo = %d, want 1", model.ThreadSel)
+	}
+	assertThreadRows(t, mb, []string{"first", "second", "third"}, 1)
+}
+
+func TestInsertThreadAtMovesExistingThreadInsteadOfDuplicating(t *testing.T) {
+	now := time.Now()
+	mb := NewState(nil, "test@example.com")
+	mb.threads = []provider.Thread{
+		{ID: "t1", Subject: "first", Date: now},
+		{ID: "t3", Subject: "third", Date: now.Add(-2 * time.Minute)},
+		{ID: "t2", Subject: "second", Date: now.Add(-time.Minute)},
+	}
+	mb.BuildThreadDisplay()
+
+	mb.insertThreadAt(1, provider.Thread{ID: "t2", Subject: "second", Date: now.Add(-time.Minute)})
+
+	assertThreadRows(t, mb, []string{"first", "second", "third"}, 0)
 }
 
 func TestDelete_MissingTrashReportsUnavailable(t *testing.T) {

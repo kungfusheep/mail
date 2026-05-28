@@ -8,6 +8,9 @@ import (
 // RegisterNormalMode registers all pure editor keybindings on the given router.
 // Call this after any app-level bindings so they take priority.
 func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, enterInsert func(), enterVisual func()) {
+	macros := map[rune]riffkey.Macro{}
+	recordingRegister := rune('"')
+
 	// movement
 	router.Handle("h", func(m riffkey.Match) { ed.Left(m.Count) })
 	router.Handle("l", func(m riffkey.Match) { ed.Right(m.Count) })
@@ -27,6 +30,15 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("w", func(m riffkey.Match) { ed.NextWordStart(m.Count) })
 	router.Handle("b", func(m riffkey.Match) { ed.PrevWordStart(m.Count) })
 	router.Handle("e", func(m riffkey.Match) { ed.NextWordEnd(m.Count) })
+	router.Handle("W", func(m riffkey.Match) { ed.NextWordStart(m.Count) })
+	router.Handle("B", func(m riffkey.Match) { ed.PrevWordStart(m.Count) })
+	router.Handle("E", func(m riffkey.Match) { ed.NextWordEnd(m.Count) })
+	router.Handle("ge", func(m riffkey.Match) { ed.PrevWordEnd(m.Count) })
+	router.Handle("gE", func(m riffkey.Match) { ed.PrevWordEnd(m.Count) })
+	router.Handle("%", func(_ riffkey.Match) { ed.GotoMatchingPair() })
+	router.Handle("|", func(m riffkey.Match) { ed.GotoColumn(m.Count) })
+	router.Handle("_", func(m riffkey.Match) { ed.FirstNonBlankWithCount(m.Count) })
+	router.Handle("g_", func(_ riffkey.Match) { ed.LastNonBlank() })
 
 	// scrolling
 	router.Handle("<C-d>", func(_ riffkey.Match) { ed.ScrollHalfPageDown() })
@@ -38,6 +50,20 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("zz", func(_ riffkey.Match) { ed.ScrollCenter() })
 	router.Handle("zt", func(_ riffkey.Match) { ed.ScrollTop() })
 	router.Handle("zb", func(_ riffkey.Match) { ed.ScrollBottom() })
+
+	// search
+	router.Handle("n", func(m riffkey.Match) {
+		for range m.Count {
+			ed.SearchNext()
+		}
+	})
+	router.Handle("N", func(m riffkey.Match) {
+		for range m.Count {
+			ed.SearchPrev()
+		}
+	})
+	router.Handle("*", func(_ riffkey.Match) { ed.SearchWordUnderCursor(true) })
+	router.Handle("#", func(_ riffkey.Match) { ed.SearchWordUnderCursor(false) })
 
 	// view modes
 	router.Handle("zT", func(_ riffkey.Match) { ed.ToggleTypewriterMode() })
@@ -68,6 +94,11 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("v", func(_ riffkey.Match) { ed.EnterVisual(); enterVisual() })
 	router.Handle("V", func(_ riffkey.Match) { ed.EnterVisualLine(); enterVisual() })
 	router.Handle("<C-v>", func(_ riffkey.Match) { ed.EnterVisualBlock(); enterVisual() })
+	router.Handle("gv", func(_ riffkey.Match) {
+		if ed.ReselectVisual() {
+			enterVisual()
+		}
+	})
 
 	// insert mode
 	router.Handle("i", func(_ riffkey.Match) { ed.EnterInsert(); enterInsert() })
@@ -82,6 +113,26 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 		for range m.Count {
 			ed.DeleteChar()
 		}
+	})
+	router.Handle("X", func(m riffkey.Match) {
+		for range m.Count {
+			if ed.Cursor().Col == 0 {
+				return
+			}
+			pos := ed.Cursor()
+			ed.Delete(Range{
+				Start: Pos{Block: pos.Block, Col: pos.Col - 1},
+				End:   pos,
+			})
+		}
+	})
+	router.Handle("s", func(m riffkey.Match) {
+		pos := ed.Cursor()
+		ed.Change(Range{
+			Start: pos,
+			End:   Pos{Block: pos.Block, Col: pos.Col + m.Count},
+		})
+		enterInsert()
 	})
 
 	replaceRouter := riffkey.NewRouter().Name("replace").NoCounts()
@@ -127,9 +178,11 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("u", func(_ riffkey.Match) { ed.Undo() })
 	router.Handle("<C-r>", func(_ riffkey.Match) { ed.Redo() })
 	router.Handle("yy", func(_ riffkey.Match) { ed.Yank(ed.InnerBlock()) })
+	router.Handle("Y", func(_ riffkey.Match) { ed.Yank(ed.ToLineEnd()) })
 	router.Handle("p", func(_ riffkey.Match) { ed.Put() })
 	router.Handle("P", func(_ riffkey.Match) { ed.PutBefore() })
 	router.Handle("cc", func(_ riffkey.Match) { ed.Change(ed.InnerBlock()); enterInsert() })
+	router.Handle("S", func(_ riffkey.Match) { ed.Change(ed.InnerBlock()); enterInsert() })
 	router.Handle("cj", func(m riffkey.Match) {
 		for range m.Count {
 			ed.DeleteLine()
@@ -151,6 +204,17 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 		ed.Change(Range{Start: ed.Cursor(), End: Pos{Block: ed.Cursor().Block, Col: ed.CurrentBlock().Length()}})
 		enterInsert()
 	})
+	router.Handle(">>", func(m riffkey.Match) {
+		for range m.Count {
+			ed.IndentCurrentLine()
+		}
+	})
+	router.Handle("<<", func(m riffkey.Match) {
+		for range m.Count {
+			ed.DedentCurrentLine()
+		}
+	})
+	router.Handle("=", func(_ riffkey.Match) { ed.Refresh() })
 
 	// f/F/t/T
 	findChar := func(action func(rune)) {
@@ -202,6 +266,42 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("<C-a>", func(_ riffkey.Match) { ed.IncrementNumber(1) })
 	router.Handle("<C-x>", func(_ riffkey.Match) { ed.IncrementNumber(-1) })
 	router.Handle(".", func(_ riffkey.Match) { ed.RepeatLastAction() })
+	router.Handle("q", func(_ riffkey.Match) {
+		if app.Input().IsRecording() {
+			macros[recordingRegister] = app.Input().StopRecording()
+			return
+		}
+		mr := riffkey.NewRouter().Name("macro-register").NoCounts()
+		mr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+		mr.Handle("<C-[>", func(_ riffkey.Match) { app.Pop() })
+		mr.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune == 0 || k.Mod != 0 {
+				return false
+			}
+			app.Pop()
+			recordingRegister = k.Rune
+			app.Input().StartRecording()
+			macros[k.Rune] = nil
+			return true
+		})
+		app.Push(mr)
+	})
+	router.Handle("@", func(_ riffkey.Match) {
+		mr := riffkey.NewRouter().Name("macro-replay").NoCounts()
+		mr.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+		mr.Handle("<C-[>", func(_ riffkey.Match) { app.Pop() })
+		mr.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune == 0 || k.Mod != 0 {
+				return false
+			}
+			app.Pop()
+			if macro := macros[k.Rune]; len(macro) > 0 {
+				app.Input().ExecuteMacro(macro)
+			}
+			return true
+		})
+		app.Push(mr)
+	})
 
 	// sentences
 	router.Handle(")", func(m riffkey.Match) {
@@ -218,7 +318,7 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("gs(", func(_ riffkey.Match) { ed.SwapSentencePrev() })
 
 	// operator × text object combos
-	RegisterOperatorTextObjects(app, ed)
+	RegisterOperatorTextObjects(router, ed, enterInsert)
 
 	// block type
 	router.Handle("g0", func(_ riffkey.Match) { ed.SetBlockType(BlockParagraph) })
@@ -246,7 +346,7 @@ func RegisterNormalMode(router *riffkey.Router, app *glyph.App, ed *Editor, ente
 	router.Handle("gBc", func(_ riffkey.Match) { ed.ApplyBundle("creative") })
 
 	// matchers
-	RegisterMatchers(app, ed)
+	RegisterMatchers(router, ed)
 }
 
 // RegisterInsertMode creates and pushes an insert mode router.
@@ -258,18 +358,55 @@ func RegisterInsertMode(app *glyph.App, ed *Editor, onAfter func()) {
 		ed.EnterNormal()
 		app.Pop()
 	})
+	r.Handle("<C-[>", func(_ riffkey.Match) {
+		ed.EnterNormal()
+		app.Pop()
+	})
 	r.Handle("<CR>", func(_ riffkey.Match) { ed.NewLine() })
 	r.Handle("<S-CR>", func(_ riffkey.Match) { ed.YieldToNextSpeaker() })
 	r.Handle("<C-n>", func(_ riffkey.Match) { ed.YieldToNextSpeaker() })
 	r.Handle("<BS>", func(_ riffkey.Match) { ed.Backspace() })
+	r.Handle("<C-h>", func(_ riffkey.Match) { ed.Backspace() })
 	r.Handle("<Del>", func(_ riffkey.Match) { ed.DeleteChar() })
 	r.Handle("<Left>", func(_ riffkey.Match) { ed.Left(1) })
 	r.Handle("<Right>", func(_ riffkey.Match) { ed.Right(1) })
 	r.Handle("<Up>", func(_ riffkey.Match) { ed.Up(1) })
 	r.Handle("<Down>", func(_ riffkey.Match) { ed.Down(1) })
 	r.Handle("<Space>", func(_ riffkey.Match) { ed.InsertChar(' ') })
+	r.Handle("<C-o>", func(_ riffkey.Match) {
+		ed.EnterNormal()
+		one := riffkey.NewRouter().Name("insert-normal-once")
+		RegisterNormalMode(one, app, ed, func() {}, func() {})
+		one.AddOnAfter(func() {
+			app.Pop()
+			ed.EnterInsert()
+			ed.Refresh()
+			if onAfter != nil {
+				onAfter()
+			}
+		})
+		app.Push(one)
+	})
+	r.Handle("<C-r>", func(_ riffkey.Match) {
+		regRouter := riffkey.NewRouter().Name("insert-register").NoCounts()
+		regRouter.Handle("<Esc>", func(_ riffkey.Match) { app.Pop() })
+		regRouter.Handle("<C-[>", func(_ riffkey.Match) { app.Pop() })
+		regRouter.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune == 0 || k.Mod != 0 {
+				return false
+			}
+			ed.InsertRegister(k.Rune)
+			app.Pop()
+			return true
+		})
+		app.Push(regRouter)
+	})
 	r.Handle("<C-w>", func(_ riffkey.Match) { ed.DeleteWordBack() })
 	r.Handle("<C-u>", func(_ riffkey.Match) { ed.DeleteToLineStart() })
+	r.Handle("<C-y>", func(_ riffkey.Match) { ed.InsertAdjacentLineChar(-1) })
+	r.Handle("<C-e>", func(_ riffkey.Match) { ed.InsertAdjacentLineChar(1) })
+	r.Handle("<C-t>", func(_ riffkey.Match) { ed.IndentCurrentLine() })
+	r.Handle("<C-d>", func(_ riffkey.Match) { ed.DedentCurrentLine() })
 
 	r.Handle("<Tab>", func(_ riffkey.Match) {
 		b := ed.CurrentBlock()
@@ -353,8 +490,12 @@ func RegisterVisualMode(app *glyph.App, ed *Editor) {
 	r.Handle("O", func(_ riffkey.Match) { ed.SwapVisualEnds() })
 
 	RegisterVisualTextObjects(r, ed)
-	RegisterVisualOperators(r, app, ed)
+	RegisterVisualOperators(r, app.Pop, ed, func() { RegisterInsertMode(app, ed, nil) })
 
+	r.Handle(">", func(_ riffkey.Match) { ed.IndentRangeLines(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
+	r.Handle("<", func(_ riffkey.Match) { ed.DedentRangeLines(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
+	r.Handle("=", func(_ riffkey.Match) { ed.Refresh(); ed.ExitVisual(); app.Pop() })
+	r.Handle("p", func(_ riffkey.Match) { ed.PasteOverRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
 	r.Handle("~", func(_ riffkey.Match) { ed.ToggleCaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
 	r.Handle("U", func(_ riffkey.Match) { ed.UppercaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })
 	r.Handle("u", func(_ riffkey.Match) { ed.LowercaseRange(ed.VisualRange()); ed.ExitVisual(); app.Pop() })

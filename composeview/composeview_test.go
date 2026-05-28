@@ -1,6 +1,9 @@
 package composeview
 
 import (
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -107,13 +110,196 @@ func TestReplySubject(t *testing.T) {
 	}
 }
 
+func TestForwardSubject(t *testing.T) {
+	if got := forwardSubject("Invoice"); got != "Fwd: Invoice" {
+		t.Fatalf("forwardSubject = %q, want Fwd prefix", got)
+	}
+	if got := forwardSubject("Fwd: Invoice"); got != "Fwd: Invoice" {
+		t.Fatalf("forwardSubject duplicated prefix: %q", got)
+	}
+}
+
+func TestForwardedBodyIncludesMessageHeaders(t *testing.T) {
+	body := forwardedBody(provider.Message{
+		From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+		To:       []provider.Address{{Name: "Pete", Email: "pete@example.com"}},
+		Subject:  "Invoice",
+		Date:     time.Date(2026, 5, 27, 14, 30, 0, 0, time.UTC),
+		TextBody: "hello",
+	})
+
+	for _, want := range []string{
+		"---------- Forwarded message ----------",
+		"From: Alice <alice@example.com>",
+		"Date: 27 May 2026 14:30",
+		"Subject: Invoice",
+		"To: Pete <pete@example.com>",
+		"hello",
+	} {
+		if !strings.Contains(body, want) {
+			t.Fatalf("forwardedBody missing %q in:\n%s", want, body)
+		}
+	}
+}
+
+func TestReplyAllHeadersDedupesAndExcludesMe(t *testing.T) {
+	to, cc := replyAllHeaders(provider.Message{
+		From: provider.Address{Name: "Alice", Email: "alice@example.com"},
+		To: []provider.Address{
+			{Name: "Me", Email: "me@example.com"},
+			{Name: "Bob", Email: "bob@example.com"},
+		},
+		CC: []provider.Address{
+			{Name: "Bob", Email: "bob@example.com"},
+			{Name: "Carol", Email: "carol@example.com"},
+		},
+	}, "me@example.com")
+
+	if to != "Alice <alice@example.com>" {
+		t.Fatalf("reply-all to = %q, want Alice", to)
+	}
+	if cc != "Bob <bob@example.com>, Carol <carol@example.com>" {
+		t.Fatalf("reply-all cc = %q, want Bob and Carol", cc)
+	}
+}
+
+func TestReplyAllHeadersWhenIAmSender(t *testing.T) {
+	to, cc := replyAllHeaders(provider.Message{
+		From: provider.Address{Name: "Me", Email: "me@example.com"},
+		To: []provider.Address{
+			{Name: "Alice", Email: "alice@example.com"},
+		},
+		CC: []provider.Address{
+			{Name: "Carol", Email: "carol@example.com"},
+		},
+	}, "me@example.com")
+
+	if to != "Alice <alice@example.com>" {
+		t.Fatalf("reply-all sent-message to = %q, want Alice", to)
+	}
+	if cc != "Carol <carol@example.com>" {
+		t.Fatalf("reply-all sent-message cc = %q, want Carol", cc)
+	}
+}
+
+func TestLocalAttachmentCapturesFileMetadata(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "invoice.pdf")
+	if err := os.WriteFile(path, []byte("%PDF-1.4"), 0600); err != nil {
+		t.Fatal(err)
+	}
+
+	attachment, err := localAttachment(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.Filename != "invoice.pdf" {
+		t.Fatalf("filename = %q, want invoice.pdf", attachment.Filename)
+	}
+	if attachment.ContentType != "application/pdf" {
+		t.Fatalf("content type = %q, want application/pdf", attachment.ContentType)
+	}
+	if attachment.Size != 8 {
+		t.Fatalf("size = %d, want 8", attachment.Size)
+	}
+	if attachment.LocalPath != path {
+		t.Fatalf("local path = %q, want %q", attachment.LocalPath, path)
+	}
+}
+
+func TestLocalAttachmentRejectsDirectories(t *testing.T) {
+	_, err := localAttachment(t.TempDir())
+	if err == nil {
+		t.Fatal("localAttachment err = nil, want directory error")
+	}
+}
+
+func TestComposeAttachmentRowUsesFileTypeIcon(t *testing.T) {
+	row := composeAttachmentRow(provider.Attachment{
+		Filename:    "invite.ics",
+		ContentType: "text/calendar",
+	})
+	if row != "󰃭 invite.ics" {
+		t.Fatalf("composeAttachmentRow = %q, want calendar icon row", row)
+	}
+}
+
+func TestInlineReplyRendersOverlayControl(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, controls := setupTestComposeApp(t, db)
+	controls.OpenInlineReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:      "message-1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "Hello",
+		}},
+	})
+
+	ref := NodeRef{X: 0, Y: 0, W: 90, H: 24}
+	buf := NewBuffer(100, 30)
+	Build(VBox(controls.InlineView(&ref))).Execute(buf, 100, 30)
+
+	out := buf.String()
+	if !strings.Contains(out, "reply") {
+		t.Fatalf("inline reply overlay missing title:\n%s", out)
+	}
+	if !strings.Contains(out, "Alice <alice@example.com>") {
+		t.Fatalf("inline reply overlay missing recipient:\n%s", out)
+	}
+	if !strings.Contains(out, "c-o full") {
+		t.Fatalf("inline reply overlay missing full-compose shortcut:\n%s", out)
+	}
+}
+
+func TestInlineReplyCursorComesFromOverlayLayer(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	app, controls := setupTestComposeApp(t, db)
+	controls.OpenInlineReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:      "message-1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "Hello",
+		}},
+	})
+
+	ref := NodeRef{X: 30, Y: 0, W: 50, H: 20}
+	app.SetView(VBox(controls.InlineView(&ref)))
+	app.RenderNow()
+
+	cursor := app.Cursor()
+	if !cursor.Visible {
+		t.Fatalf("inline reply cursor is not visible")
+	}
+	if cursor.X <= ref.X {
+		t.Fatalf("inline reply cursor x = %d, want it translated into overlay beyond x=%d", cursor.X, ref.X)
+	}
+}
+
 func setupTestCompose(t *testing.T, db *cache.Cache) mailbox.ComposeControls {
+	_, controls := setupTestComposeApp(t, db)
+	return controls
+}
+
+func setupTestComposeApp(t *testing.T, db *cache.Cache) (*App, mailbox.ComposeControls) {
 	t.Helper()
 	palette := theme.Dark()
+	app := NewApp()
 	ed := compose.NewEditor(compose.NewDocument(), "")
 	ed.SetTheme(theme.ComposeTheme(palette))
-	return Setup(
-		NewApp(),
+	return app, Setup(
+		app,
 		ed,
 		mailbox.NewState(db, "me@example.test"),
 		nil,

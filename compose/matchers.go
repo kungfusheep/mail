@@ -203,14 +203,14 @@ type MapEntry struct {
 // =============================================================================
 
 // registerBlockNavigation sets up ]x/[x navigation for all block matchers
-func RegisterBlockNavigation(app *glyph.App, ed *Editor) {
+func RegisterBlockNavigation(router *riffkey.Router, ed *Editor) {
 	for _, def := range blockMatchers {
 		d := def // capture
-		app.Handle("]"+d.Key, func(_ riffkey.Match) {
+		router.Handle("]"+d.Key, func(_ riffkey.Match) {
 			lastMatcher = lastMatcherState{isBlock: true, block: d.Matcher, name: d.Name}
 			ed.NextBlockMatching(d.Matcher)
 		})
-		app.Handle("["+d.Key, func(_ riffkey.Match) {
+		router.Handle("["+d.Key, func(_ riffkey.Match) {
 			lastMatcher = lastMatcherState{isBlock: true, block: d.Matcher, name: d.Name}
 			ed.PrevBlockMatching(d.Matcher)
 		})
@@ -218,14 +218,14 @@ func RegisterBlockNavigation(app *glyph.App, ed *Editor) {
 }
 
 // registerTextNavigation sets up ]x/[x navigation for all text matchers
-func RegisterTextNavigation(app *glyph.App, ed *Editor) {
+func RegisterTextNavigation(router *riffkey.Router, ed *Editor) {
 	for _, def := range textMatchers {
 		d := def // capture
-		app.Handle("]"+d.Key, func(_ riffkey.Match) {
+		router.Handle("]"+d.Key, func(_ riffkey.Match) {
 			lastMatcher = lastMatcherState{isBlock: false, text: d.Matcher, name: d.Name}
 			ed.NextTextMatching(d.Matcher)
 		})
-		app.Handle("["+d.Key, func(_ riffkey.Match) {
+		router.Handle("["+d.Key, func(_ riffkey.Match) {
 			lastMatcher = lastMatcherState{isBlock: false, text: d.Matcher, name: d.Name}
 			ed.PrevTextMatching(d.Matcher)
 		})
@@ -233,11 +233,11 @@ func RegisterTextNavigation(app *glyph.App, ed *Editor) {
 }
 
 // registerRepeatNavigation sets up } and { to repeat the last matcher navigation
-func RegisterRepeatNavigation(app *glyph.App, ed *Editor) {
-	app.Handle("}", func(_ riffkey.Match) {
+func RegisterRepeatNavigation(router *riffkey.Router, ed *Editor) {
+	router.Handle("}", func(_ riffkey.Match) {
 		ed.RepeatMatcherNext()
 	})
-	app.Handle("{", func(_ riffkey.Match) {
+	router.Handle("{", func(_ riffkey.Match) {
 		ed.RepeatMatcherPrev()
 	})
 }
@@ -267,18 +267,18 @@ func (e *Editor) RepeatMatcherPrev() {
 }
 
 // registerMatchers sets up all matcher-based navigation
-func RegisterMatchers(app *glyph.App, ed *Editor) {
-	RegisterBlockNavigation(app, ed)
-	RegisterTextNavigation(app, ed)
-	RegisterRepeatNavigation(app, ed)
+func RegisterMatchers(router *riffkey.Router, ed *Editor) {
+	RegisterBlockNavigation(router, ed)
+	RegisterTextNavigation(router, ed)
+	RegisterRepeatNavigation(router, ed)
 }
 
 // registerDocumentMappers sets up gm{x} commands for document mapping
-func RegisterDocumentMappers(app *glyph.App, ed *Editor) {
+func RegisterDocumentMappers(router *riffkey.Router, app *glyph.App, ed *Editor) {
 	// block mappers: gmh, gml, gmq, gmc, gmt
 	for _, def := range blockMatchers {
 		d := def // capture
-		app.Handle("gm"+d.Key, func(_ riffkey.Match) {
+		router.Handle("gm"+d.Key, func(_ riffkey.Match) {
 			openBlockMap(app, ed, d.Name, d.Icon, d.Matcher, nil)
 		})
 	}
@@ -286,7 +286,7 @@ func RegisterDocumentMappers(app *glyph.App, ed *Editor) {
 	// text mappers: gmf
 	for _, def := range textMatchers {
 		d := def // capture
-		app.Handle("gm"+d.Key, func(_ riffkey.Match) {
+		router.Handle("gm"+d.Key, func(_ riffkey.Match) {
 			openTextMap(app, ed, d.Name, d.Icon, d.Matcher, nil)
 		})
 	}

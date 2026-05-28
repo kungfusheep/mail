@@ -3,6 +3,9 @@ package composeview
 import (
 	"fmt"
 	"log"
+	"mime"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -36,11 +39,110 @@ func replySubject(subject string) string {
 	return "Re: " + subject
 }
 
+func forwardSubject(subject string) string {
+	if strings.HasPrefix(strings.ToLower(subject), "fwd:") {
+		return subject
+	}
+	return "Fwd: " + subject
+}
+
+func replyAllHeaders(msg provider.Message, myEmail string) (string, string) {
+	seen := make(map[string]bool)
+	add := func(list *[]provider.Address, addr provider.Address) {
+		email := strings.ToLower(strings.TrimSpace(addr.Email))
+		if email == "" || email == strings.ToLower(strings.TrimSpace(myEmail)) || seen[email] {
+			return
+		}
+		seen[email] = true
+		*list = append(*list, addr)
+	}
+
+	var to, cc []provider.Address
+	if !strings.EqualFold(msg.From.Email, myEmail) {
+		add(&to, msg.From)
+	}
+	for _, addr := range msg.To {
+		if len(to) == 0 {
+			add(&to, addr)
+		} else {
+			add(&cc, addr)
+		}
+	}
+	for _, addr := range msg.CC {
+		add(&cc, addr)
+	}
+	return addressesString(to), addressesString(cc)
+}
+
+func addressesString(addrs []provider.Address) string {
+	parts := make([]string, 0, len(addrs))
+	for _, addr := range addrs {
+		if text := strings.TrimSpace(addr.String()); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, ", ")
+}
+
+func forwardedBody(msg provider.Message) string {
+	body := msg.TextBody
+	if body == "" && msg.HTMLBody != "" {
+		body = msg.HTMLBody
+	}
+	var b strings.Builder
+	b.WriteString("---------- Forwarded message ----------\n")
+	if msg.From.Email != "" {
+		b.WriteString("From: ")
+		b.WriteString(msg.From.String())
+		b.WriteByte('\n')
+	}
+	if !msg.Date.IsZero() {
+		b.WriteString("Date: ")
+		b.WriteString(msg.Date.Format("2 Jan 2006 15:04"))
+		b.WriteByte('\n')
+	}
+	if msg.Subject != "" {
+		b.WriteString("Subject: ")
+		b.WriteString(msg.Subject)
+		b.WriteByte('\n')
+	}
+	if len(msg.To) > 0 {
+		b.WriteString("To: ")
+		b.WriteString(addressesString(msg.To))
+		b.WriteByte('\n')
+	}
+	b.WriteByte('\n')
+	b.WriteString(body)
+	return b.String()
+}
+
+func quotedDocument(body string) *compose.Document {
+	doc := compose.NewDocument()
+	doc.Blocks = []compose.Block{
+		{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
+		{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
+	}
+	for _, line := range strings.Split(body, "\n") {
+		doc.Blocks = append(doc.Blocks, compose.Block{
+			Type: compose.BlockQuote,
+			Runs: []compose.Run{{Text: line}},
+		})
+	}
+	return doc
+}
+
 func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) mailbox.ComposeControls {
 	if notify == nil {
 		notify = func(string) {}
 	}
+	inlineEd := compose.NewEditor(compose.NewDocument(), "")
+	inlineEd.SetTheme(theme.ComposeTheme(palette))
+	inlineEd.SetApp(app)
+
 	var to, cc, subject string
+	var attachments []provider.Attachment
+	var attachmentRows []string
+	var hasAttachments bool
 	var replyMsg *provider.Message
 
 	var fieldTo, fieldCC, fieldSubject InputState
@@ -54,9 +156,12 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	var showSending bool
 	var sendingStatus string
 	var composeActive bool
+	var inlineActive bool
+	var inlineRouterActive bool
 
 	var searchQuery, searchPrompt string
 	var searchFwd bool
+	var attachPath string
 
 	var currentDraftID string
 	var draftSaveTimer *time.Timer
@@ -101,8 +206,24 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		return x, y, cursorColor(ed), true
 	})
 
+	syncInlineCursor := func() {
+		if !inlineActive {
+			inlineEd.Layer().HideCursor()
+			return
+		}
+		x, y := inlineEd.CursorScreenPos()
+		inlineEd.Layer().SetCursor(x, y)
+		inlineEd.Layer().SetCursorStyle(CursorBlock)
+		inlineEd.Layer().ShowCursor()
+		app.SetCursorColor(cursorColor(inlineEd))
+		app.HideCursor()
+	}
+
 	reset := func() {
 		replyMsg = nil
+		attachments = nil
+		attachmentRows = nil
+		hasAttachments = false
 		setHeaderFields("", "", "")
 		fieldFocus.Current = -1
 		focused = false
@@ -111,13 +232,20 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		draftTouched = false
 	}
 
+	activeEditor := func() *compose.Editor {
+		if inlineActive {
+			return inlineEd
+		}
+		return ed
+	}
+
 	snapshotDraft := func() cache.Draft {
 		return cache.Draft{
 			ThreadID: currentDraftID,
 			To:       fieldTo.Value,
 			Cc:       fieldCC.Value,
 			Subject:  fieldSubject.Value,
-			Body:     ed.Markdown(),
+			Body:     activeEditor().Markdown(),
 		}
 	}
 
@@ -135,7 +263,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	}
 
 	scheduleDraftSave := func() {
-		if !composeActive || db == nil {
+		if (!composeActive && !inlineActive) || db == nil {
 			return
 		}
 		draftTouched = true
@@ -145,7 +273,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		draftSaveTimer = time.AfterFunc(time.Second, saveDraft)
 	}
 
-	loadDraft := func(threadID string) bool {
+	loadDraftInto := func(threadID string, target *compose.Editor) bool {
 		if db == nil {
 			return false
 		}
@@ -154,22 +282,29 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			return false
 		}
 		setHeaderFields(d.To, d.Cc, d.Subject)
-		ed.LoadMarkdown(d.Body)
+		target.LoadMarkdown(d.Body)
 		return true
 	}
 
-	send := func() {
+	loadDraft := func(threadID string) bool {
+		return loadDraftInto(threadID, ed)
+	}
+
+	sendFrom := func(sendEd *compose.Editor, onSent func()) {
 		log.Printf("sendMessage: to=%q cc=%q subject=%q", to, cc, subject)
 		if smtpClient == nil {
 			log.Println("sendMessage: no smtp configured")
+			notify("send unavailable: smtp not configured")
+			app.RequestRender()
 			return
 		}
 		msg := provider.Message{
-			To:       provider.ParseAddressList(to),
-			CC:       provider.ParseAddressList(cc),
-			Subject:  subject,
-			HTMLBody: ed.ToHTML(),
-			TextBody: ed.ToPlainText(),
+			To:          provider.ParseAddressList(to),
+			CC:          provider.ParseAddressList(cc),
+			Subject:     subject,
+			HTMLBody:    sendEd.ToHTML(),
+			TextBody:    sendEd.ToPlainText(),
+			Attachments: append([]provider.Attachment(nil), attachments...),
 		}
 		if replyMsg != nil {
 			msg.InReplyTo = replyMsg.MessageID
@@ -198,12 +333,20 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 			log.Printf("sendMessage: sent to %s (msgid=%s)", to, msg.MessageID)
 			notify(fmt.Sprintf("sent to %s", to))
+			if onSent != nil {
+				onSent()
+			}
+			app.RequestRender()
+		}()
+	}
+
+	send := func() {
+		sendFrom(ed, func() {
 			composeActive = false
 			reset()
 			app.HideCursor()
 			app.Go("main")
-			app.RequestRender()
-		}()
+		})
 	}
 
 	var enterInsertMode func()
@@ -247,6 +390,10 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			VBox(
 				SpaceH(1),
 				HBox(Space(), VBox.Width(64)(
+					HBox.Gap(1)(
+						Text("FROM").FG(palette.Muted),
+						Text(mb.Email()).Dim(),
+					),
 					HBox.Gap(1).NodeRef(&toFieldRef)(
 						Text("TO").FG(&labelTo),
 						Input().Field(&fieldTo).FocusGroup(&fieldFocus, 0).
@@ -261,6 +408,13 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 						Text("SUBJECT").FG(&labelSub),
 						Input().Field(&fieldSubject).FocusGroup(&fieldFocus, 2).
 							Placeholder("·····").PlaceholderStyle(Style{Attr: AttrDim}),
+					),
+					If(&hasAttachments).Then(
+						VBox.PaddingTRBL(1, 0, 0, 0)(
+							ForEach(&attachmentRows, func(row *string) Component {
+								return Text(row).Dim()
+							}),
+						),
 					),
 				), Space()),
 				SpaceH(1),
@@ -315,6 +469,17 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	}
 	ed.Layer().AlwaysRender = true
 
+	inlineEd.Layer().Render = func() {
+		w := inlineEd.Layer().ViewportWidth()
+		h := inlineEd.Layer().ViewportHeight()
+		if w > 0 && h > 0 {
+			inlineEd.SetSize(w, h)
+			inlineEd.UpdateDisplay()
+			syncInlineCursor()
+		}
+	}
+	inlineEd.Layer().AlwaysRender = true
+
 	go func() {
 		ticker := time.NewTicker(60 * time.Second)
 		defer ticker.Stop()
@@ -360,10 +525,59 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		}).
 		NoCounts()
 
+	app.View("compose-attach",
+		VBox(
+			HBox(
+				Text("attach ").Bold(),
+				Text(&attachPath),
+			),
+		),
+	).
+		Handle("<CR>", func() {
+			path := attachPath
+			attachPath = ""
+			app.ShowCursor()
+			app.PopView()
+			attachment, err := localAttachment(path)
+			if err != nil {
+				notify(fmt.Sprintf("attach: %v", err))
+				app.RequestRender()
+				return
+			}
+			attachments = append(attachments, attachment)
+			attachmentRows = append(attachmentRows, composeAttachmentRow(attachment))
+			hasAttachments = len(attachmentRows) > 0
+			notify(fmt.Sprintf("attached %s", attachment.Filename))
+			app.RequestRender()
+		}).
+		Handle("<Esc>", func() {
+			attachPath = ""
+			app.ShowCursor()
+			app.PopView()
+		}).
+		Handle("<BS>", func() {
+			if len(attachPath) > 0 {
+				runes := []rune(attachPath)
+				attachPath = string(runes[:len(runes)-1])
+			}
+		}).
+		NoCounts()
+
 	if searchRouter, ok := app.ViewRouter("compose-search"); ok {
 		searchRouter.HandleUnmatched(func(k riffkey.Key) bool {
 			if k.Rune != 0 && k.Mod == 0 {
 				searchQuery += string(k.Rune)
+				app.RequestRender()
+				return true
+			}
+			return false
+		})
+	}
+
+	if attachRouter, ok := app.ViewRouter("compose-attach"); ok {
+		attachRouter.HandleUnmatched(func(k riffkey.Key) bool {
+			if k.Rune != 0 && k.Mod == 0 {
+				attachPath += string(k.Rune)
 				app.RequestRender()
 				return true
 			}
@@ -552,6 +766,11 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 				send()
 			}
 		})
+		router.Handle(":attach<CR>", func(_ riffkey.Match) {
+			attachPath = ""
+			app.HideCursor()
+			app.PushView("compose-attach")
+		})
 
 		composeStartSearch := func(forward bool) {
 			if forward {
@@ -587,6 +806,117 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		})
 	}
 
+	var closeInlineReply func(save bool)
+	closeInlineReply = func(save bool) {
+		if !inlineActive {
+			return
+		}
+		if save && draftTouched {
+			saveDraft()
+			go mb.ProcessPendingCommands()
+		}
+		inlineActive = false
+		inlineEd.Layer().HideCursor()
+		if inlineRouterActive {
+			app.Pop()
+			inlineRouterActive = false
+		}
+		reset()
+		app.HideCursor()
+		app.RequestRender()
+	}
+
+	promoteInlineReply := func() {
+		if !inlineActive {
+			return
+		}
+		if inlineRouterActive {
+			app.Pop()
+			inlineRouterActive = false
+		}
+		ed.LoadMarkdown(inlineEd.Markdown())
+		inlineEd.Layer().HideCursor()
+		ed.SetTypewriterMode(true)
+		composeActive = true
+		inlineActive = false
+		pendingCursorShow = true
+		tr.Start()
+		app.Go("compose")
+	}
+
+	enterInlineInsert := func() {
+		compose.RegisterInsertMode(app, inlineEd, func() {
+			syncInlineCursor()
+			scheduleDraftSave()
+			app.RequestRender()
+		})
+	}
+
+	pushInlineRouter := func() {
+		if inlineRouterActive {
+			return
+		}
+		r := riffkey.NewRouter().Name("inline-reply")
+		r.Handle("<Esc>", func(_ riffkey.Match) { closeInlineReply(true) })
+		r.Handle("<C-q>", func(_ riffkey.Match) { closeInlineReply(true) })
+		r.Handle("<C-s>", func(_ riffkey.Match) {
+			if strings.TrimSpace(to) != "" {
+				sendFrom(inlineEd, func() {
+					inlineActive = false
+					inlineEd.Layer().HideCursor()
+					if inlineRouterActive {
+						app.Pop()
+						inlineRouterActive = false
+					}
+					reset()
+					app.HideCursor()
+				})
+			}
+		})
+		r.Handle("<C-o>", func(_ riffkey.Match) { promoteInlineReply() })
+		compose.RegisterNormalMode(r, app, inlineEd,
+			enterInlineInsert,
+			func() { compose.RegisterVisualMode(app, inlineEd) },
+		)
+		r.AddOnAfter(func() {
+			if !inlineActive {
+				return
+			}
+			inlineEd.UpdateDisplay()
+			syncInlineCursor()
+			scheduleDraftSave()
+			app.RequestRender()
+		})
+		app.Push(r)
+		inlineRouterActive = true
+	}
+
+	setupInlineReply := func(thread provider.Thread) {
+		reset()
+		currentDraftID = thread.ID
+		lastMsg := thread.Messages[len(thread.Messages)-1]
+		replyMsg = &lastMsg
+
+		if loadDraftInto(thread.ID, inlineEd) {
+			if repairMissingReplyHeaders(lastMsg) {
+				saveDraft()
+			}
+		} else {
+			setHeaderFields(lastMsg.From.String(), "", replySubject(lastMsg.Subject))
+			inlineEd.ResetEmpty()
+		}
+
+		inlineEd.SetTypewriterMode(false)
+		inlineActive = true
+		draftTouched = false
+		pushInlineRouter()
+		inlineEd.EnterInsert()
+		enterInlineInsert()
+		inlineEd.UpdateDisplay()
+		syncInlineCursor()
+		app.RequestRender()
+	}
+
 	return mailbox.ComposeControls{
 		Open: func() {
 			reset()
@@ -620,18 +950,57 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			if body == "" && lastMsg.HTMLBody != "" {
 				body = lastMsg.HTMLBody
 			}
-			doc := compose.NewDocument()
-			doc.Blocks = []compose.Block{
-				{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
-				{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: ""}}},
-			}
-			for _, line := range strings.Split(body, "\n") {
-				doc.Blocks = append(doc.Blocks, compose.Block{
-					Type: compose.BlockQuote,
-					Runs: []compose.Run{{Text: line}},
-				})
-			}
+			doc := quotedDocument(body)
 			ed.ResetDocument(doc)
+		},
+		SetupReplyAll: func(thread provider.Thread) {
+			currentDraftID = thread.ID
+			lastMsg := thread.Messages[len(thread.Messages)-1]
+			replyMsg = &lastMsg
+
+			if loadDraft(thread.ID) {
+				return
+			}
+
+			replyTo, replyCC := replyAllHeaders(lastMsg, mb.Email())
+			setHeaderFields(replyTo, replyCC, replySubject(lastMsg.Subject))
+
+			body := lastMsg.TextBody
+			if body == "" && lastMsg.HTMLBody != "" {
+				body = lastMsg.HTMLBody
+			}
+			doc := quotedDocument(body)
+			ed.ResetDocument(doc)
+		},
+		SetupForward: func(thread provider.Thread) {
+			lastMsg := thread.Messages[len(thread.Messages)-1]
+			replyMsg = nil
+			setHeaderFields("", "", forwardSubject(lastMsg.Subject))
+			doc := quotedDocument(forwardedBody(lastMsg))
+			ed.ResetDocument(doc)
+		},
+		OpenInlineReply: setupInlineReply,
+		InlineView: func(previewRef *NodeRef) Component {
+			return If(&inlineActive).Then(
+				Overlay.OnTop(previewRef)(
+					VBox(
+						Space().Grow(1),
+						HBox.PaddingTRBL(0, 2, 1, 2)(
+							VBox.Width(72).Border(BorderSoft).BorderFG(&palette.Muted).Fill(&palette.BG).PaddingTRBL(1, 1, 1, 1)(
+								HBox(
+									Text("reply").FG(&palette.Bright).Bold(),
+									SpaceW(1),
+									Text(&to).FG(&palette.Subtle),
+									Space(),
+									Text("i edit  c-s send  c-o full  esc close").FG(&palette.Muted),
+								),
+								SpaceH(1),
+								LayerView(inlineEd.Layer()).Height(7),
+							),
+						),
+					),
+				),
+			)
 		},
 		ResumeLast: func() {
 			if db == nil {
@@ -688,4 +1057,33 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			app.Go("compose")
 		},
 	}
+}
+
+func localAttachment(path string) (provider.Attachment, error) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return provider.Attachment{}, fmt.Errorf("missing path")
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return provider.Attachment{}, err
+	}
+	if info.IsDir() {
+		return provider.Attachment{}, fmt.Errorf("%s is a directory", path)
+	}
+	name := filepath.Base(path)
+	contentType := mime.TypeByExtension(strings.ToLower(filepath.Ext(name)))
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	return provider.Attachment{
+		Filename:    name,
+		ContentType: contentType,
+		Size:        info.Size(),
+		LocalPath:   path,
+	}, nil
+}
+
+func composeAttachmentRow(attachment provider.Attachment) string {
+	return fmt.Sprintf("%s %s", provider.AttachmentIcon(attachment.Filename, attachment.ContentType), attachment.Filename)
 }

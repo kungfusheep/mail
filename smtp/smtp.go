@@ -3,9 +3,13 @@ package smtp
 import (
 	"crypto/rand"
 	"crypto/tls"
+	"encoding/base64"
 	"fmt"
+	"mime"
 	"net"
 	"net/smtp"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -54,7 +58,10 @@ func (s *SMTP) Send(msg *provider.Message) error {
 		return fmt.Errorf("no recipients")
 	}
 
-	raw := buildMessage(s.config.Email, *msg)
+	raw, err := buildMessage(s.config.Email, *msg)
+	if err != nil {
+		return err
+	}
 
 	// connect with STARTTLS
 	conn, err := net.DialTimeout("tcp", s.config.Server, 10*time.Second)
@@ -105,7 +112,7 @@ func (s *SMTP) Send(msg *provider.Message) error {
 	return c.Quit()
 }
 
-func buildMessage(from string, msg provider.Message) string {
+func buildMessage(from string, msg provider.Message) (string, error) {
 	var b strings.Builder
 
 	b.WriteString("From: " + from + "\r\n")
@@ -128,8 +135,27 @@ func buildMessage(from string, msg provider.Message) string {
 
 	b.WriteString("MIME-Version: 1.0\r\n")
 
+	if len(msg.Attachments) > 0 {
+		boundary := fmt.Sprintf("mixed_%d", time.Now().UnixNano())
+		b.WriteString("Content-Type: multipart/mixed; boundary=" + boundary + "\r\n\r\n")
+		b.WriteString("--" + boundary + "\r\n")
+		writeMessageBody(&b, msg)
+		for _, attachment := range msg.Attachments {
+			if err := writeAttachmentPart(&b, boundary, attachment); err != nil {
+				return "", err
+			}
+		}
+		b.WriteString("--" + boundary + "--\r\n")
+		return b.String(), nil
+	}
+
+	writeMessageBody(&b, msg)
+	return b.String(), nil
+}
+
+func writeMessageBody(b *strings.Builder, msg provider.Message) {
 	if msg.HTMLBody != "" {
-		boundary := fmt.Sprintf("boundary_%d", time.Now().UnixNano())
+		boundary := fmt.Sprintf("alternative_%d", time.Now().UnixNano())
 		b.WriteString("Content-Type: multipart/alternative; boundary=" + boundary + "\r\n\r\n")
 
 		if msg.TextBody != "" {
@@ -146,8 +172,50 @@ func buildMessage(from string, msg provider.Message) string {
 		b.WriteString("Content-Type: text/plain; charset=UTF-8\r\n\r\n")
 		b.WriteString(msg.TextBody + "\r\n")
 	}
+}
 
-	return b.String()
+func writeAttachmentPart(b *strings.Builder, boundary string, attachment provider.Attachment) error {
+	if attachment.LocalPath == "" {
+		return fmt.Errorf("attachment %q has no local path", attachment.Filename)
+	}
+	data, err := os.ReadFile(attachment.LocalPath)
+	if err != nil {
+		return fmt.Errorf("read attachment %s: %w", attachment.LocalPath, err)
+	}
+	filename := attachment.Filename
+	if filename == "" {
+		filename = filepath.Base(attachment.LocalPath)
+	}
+	contentType := attachment.ContentType
+	if contentType == "" {
+		contentType = mime.TypeByExtension(strings.ToLower(filepath.Ext(filename)))
+	}
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	b.WriteString("--" + boundary + "\r\n")
+	b.WriteString("Content-Type: " + contentType + "; name=" + quoteHeader(filename) + "\r\n")
+	b.WriteString("Content-Disposition: attachment; filename=" + quoteHeader(filename) + "\r\n")
+	b.WriteString("Content-Transfer-Encoding: base64\r\n\r\n")
+	writeBase64Lines(b, data)
+	b.WriteString("\r\n")
+	return nil
+}
+
+func writeBase64Lines(b *strings.Builder, data []byte) {
+	encoded := base64.StdEncoding.EncodeToString(data)
+	for len(encoded) > 76 {
+		b.WriteString(encoded[:76] + "\r\n")
+		encoded = encoded[76:]
+	}
+	if encoded != "" {
+		b.WriteString(encoded + "\r\n")
+	}
+}
+
+func quoteHeader(s string) string {
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(s) + `"`
 }
 
 func formatAddresses(addrs []provider.Address) string {

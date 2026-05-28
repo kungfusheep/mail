@@ -21,7 +21,6 @@ import (
 	"github.com/kungfusheep/mail/mailbox"
 	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/omnibox"
-	"github.com/kungfusheep/mail/preview"
 	"github.com/kungfusheep/mail/senderid"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
@@ -113,6 +112,7 @@ func main() {
 		State: mb,
 		Theme: t,
 	})
+	model.ThemeName = "dark"
 	mb.SetNotifiers(model.Notify, model.NotifyError)
 
 	// continuous frame requests for time-based animation
@@ -146,9 +146,20 @@ func main() {
 		App:   app,
 		Theme: t,
 		Model: model,
+		ApplyTheme: func(name string, palette theme.Theme) {
+			model.ThemeName = name
+			model.ApplyTheme(palette)
+			composeTransition.SetColors(palette.BG, Hex(0x3a3a3a))
+			editor.SetTheme(theme.ComposeTheme(palette))
+			app.RequestRender()
+		},
 	})
 
-	app.OnBeforeRender(omniBox.BeforeRender)
+	app.OnBeforeRender(func() {
+		model.ProcessPending()
+		omniBox.BeforeRender()
+		model.UpdatePreviewScroll()
+	})
 
 	app.OnResize(func(width, height int) {
 		omniBox.Resize(width, height)
@@ -166,7 +177,7 @@ func main() {
 		Dodge(&model.HelpRef, omniBox.Ref())
 
 	app.View("main",
-		VBox.PaddingTRBL(0, 2, 0, 2)(
+		VBox.PaddingTRBL(0, 0, 0, 2)(
 
 			ScreenEffect(composeTransition.SourceEffect()),
 			ScreenEffect(composeTransition.TargetEffect()),
@@ -203,10 +214,10 @@ func main() {
 				),
 
 				// threads list
-				VBox.Grow(3).Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.ThreadPaneRef).CascadeStyle(&model.ThreadStyle)(
+				VBox.Grow(3).Fill(&model.ThreadBG).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.ThreadPaneRef).CascadeStyle(&model.ThreadStyle)(
 					HBox(
 						SpaceW(3),
-						Text(&model.FolderTitle).FG(t.Accent).Bold(),
+						Text(&model.FolderTitle).FG(&model.Accent).Bold(),
 						SpaceW(1),
 						Text(&model.ThreadUnreadText).Dim(),
 						Space(),
@@ -220,20 +231,20 @@ func main() {
 						SelectedStyle(Style{}).
 						Marker("  ").
 						Render(func(row *mailbox.ThreadRow) Component {
-							itemBG := If(&row.Selected).Then(t.SelBG).Else(
+							itemBG := If(&row.Selected).Then(&model.SelBG).Else(
 								If(&row.Grouped).
-									Then(t.GroupBG).
-									Else(t.ThreadBG),
+									Then(&model.GroupBG).
+									Else(&model.ThreadBG),
 							)
-							return VBox.Fill(t.ThreadBG).PaddingTRBL(0, 1, 0, 0)(
+							return VBox.Fill(&model.ThreadBG).PaddingTRBL(0, 1, 0, 0)(
 								If(&row.HasGroup).Then(
-									VBox.Fill(t.ThreadBG).PaddingTRBL(1, 0, 0, 1)(
-										Text(&row.GroupLabel).FG(t.Accent).Dim().Bold(),
+									VBox.Fill(&model.ThreadBG).PaddingTRBL(1, 0, 0, 1)(
+										Text(&row.GroupLabel).FG(&model.Accent).Dim().Bold(),
 									),
 								),
 								VBox.Fill(itemBG).PaddingVH(1, 2)(
 									HBox(
-										If(&row.Unread).Then(Text("●").FG(t.Accent)).Else(Text(" ")),
+										If(&row.Unread).Then(Text("●").FG(&model.Accent)).Else(Text(" ")),
 										SpaceW(1),
 										HBox.Grow(1)(
 											Text(&row.Label).Style(
@@ -241,7 +252,7 @@ func main() {
 													Then(Style{Attr: AttrBold}).
 													Else(Style{})),
 											SpaceW(1),
-											If(&row.Starred).Then(Text("★").FG(t.Accent)),
+											If(&row.Starred).Then(Text("★").FG(&model.Accent)),
 										),
 										SpaceW(2),
 										Text(&row.Date).Dim(),
@@ -256,14 +267,14 @@ func main() {
 										),
 										Text(&row.Sender).Dim(),
 										SpaceW(2),
-										If(&row.HasDraft).Then(Text("draft").FG(t.Accent).Italic()),
+										If(&row.HasDraft).Then(Text("draft").FG(&model.Accent).Italic()),
 									),
 									If(&row.HasAttachments).Then(
 										HBox.Gap(1).Fill(itemBG).PaddingTRBL(0, 0, 0, 2)(
 											ForEach(&row.Attachments, func(chip *mailbox.AttachmentChip) Component {
 												return HBox.Width(22).Border(BorderSoft).BorderFG(
-													If(&row.Selected).Then(t.SelBG).Else(
-														If(&row.Grouped).Then(t.GroupBG).Else(t.ThreadBG),
+													If(&row.Selected).Then(&model.SelBG).Else(
+														If(&row.Grouped).Then(&model.GroupBG).Else(&model.ThreadBG),
 													),
 												).Fill(attachmentFill(&chip.FillName, t)).PaddingVH(0, 1)(
 													Text(&chip.Icon),
@@ -273,10 +284,10 @@ func main() {
 											}),
 											If(&row.HasAttachmentOverflow).Then(
 												HBox.Width(5).Border(BorderSoft).BorderFG(
-													If(&row.Selected).Then(t.SelBG).Else(
-														If(&row.Grouped).Then(t.GroupBG).Else(t.ThreadBG),
+													If(&row.Selected).Then(&model.SelBG).Else(
+														If(&row.Grouped).Then(&model.GroupBG).Else(&model.ThreadBG),
 													),
-												).Fill(t.GroupBG).PaddingVH(0, 1)(
+												).Fill(&model.GroupBG).PaddingVH(0, 1)(
 													Text(&row.AttachmentOverflow).Bold(),
 												),
 											),
@@ -306,38 +317,64 @@ func main() {
 				// preview window
 				VBox.Grow(3).PaddingTRBL(1, 0, 0, 0).NodeRef(&model.PreviewPaneRef).CascadeStyle(&model.PreviewStyle)(
 
-					ScrollView.Grow(1).Ref(func(sv *ScrollViewC) {
-						model.SetConversationView(sv)
-					})(
+					ScrollView.
+						Grow(1).
+						Fill(&model.BG).
+						Scrollbar().
+						ScrollbarTrackStyle(&model.PreviewScrollTrack).
+						ScrollbarThumbStyle(&model.PreviewScrollThumb).
+						ScrollbarOpacity(Animate(If(&model.PreviewScrollVisible).Then(1.0).Else(0.0))).
+						Ref(func(sv *ScrollViewC) {
+							model.SetConversationView(sv)
+						})(
 						SpaceH(2),
 						ForEach(mb.ConversationMessages(), func(msg *mailbox.ConversationMessage) Component {
 							return VBox(
-								VBox(
-									If(&msg.HasSubject).Then(
-										Text(&msg.Subject).FG(t.Bright).Bold(),
-									),
-									headerMetaRow("at", &msg.Date, t),
-									HBox(
-										Text("from").FG(t.Dim),
-										SpaceW(1),
-										If(&msg.HasSenderColor).Then(
-											HBox(
-												Text("▐").Style(&msg.SenderStyle),
-												SpaceW(1),
+								If(&msg.ThreadScanMode).Then(
+									VBox(
+										HBox(
+											If(&msg.HasSenderColor).Then(
+												HBox(
+													Text("▐").Style(&msg.SenderStyle),
+													SpaceW(1),
+												),
 											),
+											Text(&msg.Sender).FG(&model.Bright).Bold(),
+											SpaceW(2),
+											Text(&msg.Date).Dim(),
 										),
-										Text(&msg.FromLine).FG(t.Subtle),
-										If(&msg.HasUnsubscribe).Then(SpaceW(1)),
-										If(&msg.HasUnsubscribe).Then(Rich(&msg.UnsubscribeChip)),
+										If(&msg.HasScanSubject).Then(
+											Text(&msg.ScanSubjectLine).FG(&model.Subtle),
+										),
 									),
-									If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine, t)),
-									If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine, t)),
-									If(&msg.HasBCC).Then(headerMetaRow("bcc", &msg.BCCLine, t)),
+								).Else(
+									VBox(
+										If(&msg.HasSubject).Then(
+											Text(&msg.Subject).FG(&model.Bright).Bold(),
+										),
+										headerMetaRow("at", &msg.Date, model),
+										HBox(
+											Text("from").FG(&model.Dim),
+											SpaceW(1),
+											If(&msg.HasSenderColor).Then(
+												HBox(
+													Text("▐").Style(&msg.SenderStyle),
+													SpaceW(1),
+												),
+											),
+											Text(&msg.FromLine).FG(&model.Subtle),
+											If(&msg.HasUnsubscribe).Then(SpaceW(1)),
+											If(&msg.HasUnsubscribe).Then(Rich(&msg.UnsubscribeChip)),
+										),
+										If(&msg.HasTo).Then(headerMetaRow("to", &msg.ToLine, model)),
+										If(&msg.HasCC).Then(headerMetaRow("cc", &msg.CCLine, model)),
+										If(&msg.HasBCC).Then(headerMetaRow("bcc", &msg.BCCLine, model)),
+									),
 								),
 								If(&msg.HasAttachments).Then(
 									VBox.PaddingTRBL(1, 0, 0, 0).Gap(1)(
 										ForEach(&msg.Attachments, func(attachment *mailbox.AttachmentRow) Component {
-											return HBox.Border(BorderSoft).BorderFG(t.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1)(
+											return HBox.Border(BorderSoft).BorderFG(&model.BG).Fill(attachmentFill(&attachment.Filename, t)).PaddingVH(0, 1)(
 												Rich(&attachment.Display),
 											)
 										}),
@@ -346,7 +383,7 @@ func main() {
 								SpaceH(1),
 								VBox(
 									ForEach(&msg.BodyBlocks, func(block *mailbox.PreviewBodyBlock) Component {
-										return previewBodyBlock(block, t)
+										return previewBodyBlock(block)
 									}),
 								),
 								SpaceH(1),
@@ -367,12 +404,14 @@ func main() {
 				),
 			),
 
+			model.Compose.InlineView(&model.PreviewPaneRef),
+
 			// notifications
 			If(&model.StatusVisible).Then(
 				Overlay.BottomRight().Offset(-2, -1)(
 					VBox.Width(49).Gap(1)(
 						ForEach(model.StatusItems(), func(item *ui.Notification) Component {
-							return notificationRow(item, t)
+							return notificationRow(item, model)
 						}),
 					),
 				),
@@ -403,7 +442,7 @@ func main() {
 	app.View("search",
 		VBox(
 			HBox(
-				Text("/").FG(t.Bright).Bold(),
+				Text("/").FG(&model.Bright).Bold(),
 				Text(&model.SearchQuery),
 			),
 			On(
@@ -424,7 +463,7 @@ func main() {
 	}, mailruntime.Callbacks{
 		Status:         model.NotifyRuntime,
 		FoldersChanged: model.FoldersChanged,
-		ThreadsChanged: model.ThreadsChanged,
+		ThreadsChanged: model.QueueThreadsChanged,
 		Render:         app.RequestRender,
 	})
 	model.SetRuntime(rt.WatchActiveFolder, rt.SyncActiveFolder)
@@ -443,18 +482,18 @@ func main() {
 	}
 }
 
-func notificationRow(item *ui.Notification, t theme.Theme) Component {
+func notificationRow(item *ui.Notification, model *mailbox.UI) Component {
 	return HBox.Width(49).Opacity(&item.Opacity)(
 		Space(),
 		Text("● ").FG(
 			Match(&item.Kind,
-				Eq(ui.NotificationSuccess, t.Success),
-				Eq(ui.NotificationWarning, t.Warning),
-				Eq(ui.NotificationError, t.Error),
-				Eq(ui.NotificationAction, t.Accent),
-			).Default(t.Info),
+				Eq(ui.NotificationSuccess, &model.Success),
+				Eq(ui.NotificationWarning, &model.Warning),
+				Eq(ui.NotificationError, &model.Error),
+				Eq(ui.NotificationAction, &model.Accent),
+			).Default(&model.Info),
 		),
-		Text(&item.Text).FG(t.Bright),
+		Text(&item.Text).FG(&model.Bright),
 	)
 }
 
@@ -566,41 +605,8 @@ func formatCLITime(t time.Time) string {
 	return t.Format(time.RFC3339)
 }
 
-func previewBodyBlock(block *mailbox.PreviewBodyBlock, t theme.Theme) Component {
-	heading := previewBodyStyle(preview.BlockHeading, t)
-	quote := previewBodyStyle(preview.BlockQuote, t)
-	secondary := previewBodyStyle(preview.BlockSignature, t)
-	image := previewBodyStyle(preview.BlockImage, t)
-	divider := previewBodyStyle(preview.BlockDivider, t)
-	body := previewBodyStyle(preview.BlockParagraph, t)
-
-	return If(&block.Kind).Eq(preview.BlockHeading).
-		Then(previewBodyBlockFrame(block, &heading)).
-		Else(
-			If(&block.Kind).Eq(preview.BlockQuote).
-				Then(previewBodyBlockFrame(block, &quote)).
-				Else(
-					If(&block.Kind).Eq(preview.BlockImage).
-						Then(previewBodyBlockFrame(block, &image)).
-						Else(
-							If(&block.Kind).Eq(preview.BlockDivider).
-								Then(previewBodyBlockFrame(block, &divider)).
-								Else(
-									If(&block.Kind).Eq(preview.BlockSignature).
-										Then(previewBodyBlockFrame(block, &secondary)).
-										Else(
-											If(&block.Kind).Eq(preview.BlockFooter).
-												Then(previewBodyBlockFrame(block, &secondary)).
-												Else(
-													If(&block.Kind).Eq(preview.BlockForwarded).
-														Then(previewBodyBlockFrame(block, &secondary)).
-														Else(previewBodyBlockFrame(block, &body)),
-												),
-										),
-								),
-						),
-				),
-		)
+func previewBodyBlock(block *mailbox.PreviewBodyBlock) Component {
+	return previewBodyBlockFrame(block, &block.Style)
 }
 
 func previewBodyBlockFrame(block *mailbox.PreviewBodyBlock, style *Style) Component {
@@ -615,32 +621,11 @@ func previewBodyBlockFrame(block *mailbox.PreviewBodyBlock, style *Style) Compon
 	)
 }
 
-func previewBodyStyle(kind preview.BlockKind, t theme.Theme) Style {
-	switch kind {
-	case preview.BlockHeading:
-		return Style{FG: t.Bright, Attr: AttrBold}
-	case preview.BlockQuote:
-		return Style{FG: t.Subtle, Attr: AttrItalic}
-	case preview.BlockSignature, preview.BlockFooter, preview.BlockForwarded:
-		return Style{FG: t.Dim, Attr: AttrDim}
-	case preview.BlockImage:
-		return Style{FG: t.Dim, Attr: AttrDim | AttrItalic}
-	case preview.BlockDivider:
-		return Style{FG: t.Muted, Attr: AttrDim}
-	case preview.BlockListItem:
-		return Style{FG: t.FG}
-	case preview.BlockCode, preview.BlockTable:
-		return Style{FG: t.FG}
-	default:
-		return Style{FG: t.FG}
-	}
-}
-
-func headerMetaRow(label string, value *string, t theme.Theme) Component {
+func headerMetaRow(label string, value *string, model *mailbox.UI) Component {
 	return HBox(
-		Text(label).FG(t.Dim),
+		Text(label).FG(&model.Dim),
 		SpaceW(1),
-		Text(value).FG(t.Subtle),
+		Text(value).FG(&model.Subtle),
 	)
 }
 

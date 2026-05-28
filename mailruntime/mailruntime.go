@@ -161,7 +161,12 @@ func (r *Runtime) cacheContacts() {
 	all := contacts.All()
 	log.Printf("contacts: loaded %d, caching", len(all))
 	if len(all) > 0 {
-		r.db.PutContacts(all)
+		if err := r.db.PutContacts(all); err != nil {
+			log.Printf("contacts: cache: %v", err)
+		}
+	}
+	if err := r.db.RebuildContactIndex(); err != nil {
+		log.Printf("contacts: rebuild index: %v", err)
 	}
 }
 
@@ -198,7 +203,6 @@ func (r *Runtime) enrichVisibleSenders() {
 		changed = true
 	}
 	if changed {
-		r.mb.BuildThreadDisplay()
 		r.threadsChanged()
 		r.render()
 	}

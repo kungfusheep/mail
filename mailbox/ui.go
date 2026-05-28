@@ -3,6 +3,7 @@ package mailbox
 import (
 	"fmt"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/kungfusheep/glyph"
@@ -27,10 +28,14 @@ type UIConfig struct {
 }
 
 type ComposeControls struct {
-	Open        func()
-	SetupReply  func(provider.Thread)
-	ResumeLast  func()
-	ResumeDraft func(threadID string)
+	Open            func()
+	SetupReply      func(provider.Thread)
+	SetupReplyAll   func(provider.Thread)
+	SetupForward    func(provider.Thread)
+	OpenInlineReply func(provider.Thread)
+	InlineView      func(*glyph.NodeRef) glyph.Component
+	ResumeLast      func()
+	ResumeDraft     func(threadID string)
 }
 
 type undoItem struct {
@@ -39,29 +44,49 @@ type undoItem struct {
 }
 
 type UI struct {
-	App     *glyph.App
-	Cache   *cache.Cache
-	State   *State
-	Theme   theme.Theme
-	Compose ComposeControls
+	App       *glyph.App
+	Cache     *cache.Cache
+	State     *State
+	Theme     theme.Theme
+	ThemeName string
+	Compose   ComposeControls
 
 	WatchActiveFolder func()
 	SyncActiveFolder  func()
 
-	FolderSel        int
-	ThreadSel        int
-	LabelsOpen       bool
-	HelpOpen         bool
-	HelpRef          glyph.NodeRef
-	FolderPaneRef    glyph.NodeRef
-	ThreadPaneRef    glyph.NodeRef
-	PreviewPaneRef   glyph.NodeRef
-	Frame            int
-	FolderTitle      string
-	SearchQuery      string
-	ThreadUnreadText string
-	StatusVisible    bool
-	Pane             int
+	FolderSel            int
+	ThreadSel            int
+	LabelsOpen           bool
+	HelpOpen             bool
+	HelpRef              glyph.NodeRef
+	FolderPaneRef        glyph.NodeRef
+	ThreadPaneRef        glyph.NodeRef
+	PreviewPaneRef       glyph.NodeRef
+	Frame                int
+	FolderTitle          string
+	SearchQuery          string
+	ThreadUnreadText     string
+	StatusVisible        bool
+	Pane                 int
+	PreviewCanScroll     bool
+	PreviewScrollVisible bool
+	PreviewScrollPos     int
+	PreviewScrollTrack   glyph.Style
+	PreviewScrollThumb   glyph.Style
+	BG                   glyph.Color
+	Bright               glyph.Color
+	FG                   glyph.Color
+	Subtle               glyph.Color
+	Dim                  glyph.Color
+	Muted                glyph.Color
+	Accent               glyph.Color
+	Info                 glyph.Color
+	Success              glyph.Color
+	Warning              glyph.Color
+	Error                glyph.Color
+	SelBG                glyph.Color
+	GroupBG              glyph.Color
+	ThreadBG             glyph.Color
 
 	FolderStyle     glyph.Style
 	ThreadStyle     glyph.Style
@@ -74,6 +99,8 @@ type UI struct {
 
 	statusFeed *ui.Feed
 	undoStack  []undoItem
+
+	pendingThreadsChanged atomic.Bool
 }
 
 func NewUI(cfg UIConfig) *UI {
@@ -82,14 +109,42 @@ func NewUI(cfg UIConfig) *UI {
 		Cache:       cfg.Cache,
 		State:       cfg.State,
 		Theme:       cfg.Theme,
+		ThemeName:   "dark",
 		FolderTitle: "Inbox",
 		Pane:        ThreadPane,
 		statusFeed:  ui.NewFeed(time.Now),
 	}
-	m.UpdateFocus()
+	m.ApplyTheme(cfg.Theme)
 	m.UpdateThreadHeader()
 	m.UpdateStatusOverlay()
 	return m
+}
+
+func (m *UI) ApplyTheme(t theme.Theme) {
+	m.Theme = t
+	m.BG = t.BG
+	m.Bright = t.Bright
+	m.FG = t.FG
+	m.Subtle = t.Subtle
+	m.Dim = t.Dim
+	m.Muted = t.Muted
+	m.Accent = t.Accent
+	m.Info = t.Info
+	m.Success = t.Success
+	m.Warning = t.Warning
+	m.Error = t.Error
+	m.SelBG = t.SelBG
+	m.GroupBG = t.GroupBG
+	m.ThreadBG = t.ThreadBG
+	m.PreviewScrollTrack = glyph.Style{FG: t.Muted}
+	m.PreviewScrollThumb = glyph.Style{FG: t.Subtle}
+	if m.App != nil {
+		m.App.SetDefaultStyle(glyph.Style{FG: t.FG, BG: t.BG})
+	}
+	if m.ConvView != nil {
+		m.ConvView.Layer().Invalidate()
+	}
+	m.UpdateFocus()
 }
 
 func (m *UI) SetCompose(comp ComposeControls) {
@@ -112,6 +167,25 @@ func (m *UI) StatusItems() *[]ui.Notification {
 func (m *UI) UpdateStatusOverlay() {
 	m.statusFeed.Update()
 	m.StatusVisible = len(*m.statusFeed.Items()) > 0
+}
+
+func (m *UI) UpdatePreviewScroll() {
+	m.PreviewCanScroll = false
+	m.PreviewScrollVisible = false
+	m.PreviewScrollPos = 0
+	if m.ConvView == nil {
+		return
+	}
+	layer := m.ConvView.Layer()
+	maxScroll := layer.MaxScroll()
+	viewHeight := layer.ViewportHeight()
+	contentHeight := layer.ContentHeight()
+	if maxScroll <= 0 || viewHeight <= 0 || contentHeight <= viewHeight {
+		return
+	}
+	m.PreviewCanScroll = true
+	m.PreviewScrollVisible = m.Pane == PreviewPane
+	m.PreviewScrollPos = (layer.ScrollY() * 100) / maxScroll
 }
 
 func (m *UI) Notify(text string) {
@@ -354,12 +428,23 @@ func (m *UI) FoldersChanged() {
 }
 
 func (m *UI) ThreadsChanged() {
+	m.State.LoadThreads()
 	m.State.BuildFolderDisplay(m.LabelsOpen)
 	m.State.BuildThreadDisplay()
 	m.ThreadSel = m.State.Selected()
 	m.State.SetSelected(m.ThreadSel)
 	m.UpdateThreadHeader()
 	m.LoadPreview()
+}
+
+func (m *UI) QueueThreadsChanged() {
+	m.pendingThreadsChanged.Store(true)
+}
+
+func (m *UI) ProcessPending() {
+	if m.pendingThreadsChanged.Swap(false) {
+		m.ThreadsChanged()
+	}
 }
 
 func (m *UI) FolderDown() {
@@ -407,12 +492,14 @@ func (m *UI) ThreadBottom() {
 func (m *UI) PreviewDown() {
 	if m.ConvView != nil {
 		m.ConvView.Layer().ScrollDown(1)
+		m.UpdatePreviewScroll()
 	}
 }
 
 func (m *UI) PreviewUp() {
 	if m.ConvView != nil {
 		m.ConvView.Layer().ScrollUp(1)
+		m.UpdatePreviewScroll()
 	}
 }
 
@@ -421,6 +508,7 @@ func (m *UI) PreviewHalfPageUp() {
 		return
 	}
 	m.ConvView.Layer().HalfPageUp()
+	m.UpdatePreviewScroll()
 }
 
 func (m *UI) PreviewHalfPageDown() {
@@ -428,6 +516,7 @@ func (m *UI) PreviewHalfPageDown() {
 		return
 	}
 	m.ConvView.Layer().HalfPageDown()
+	m.UpdatePreviewScroll()
 }
 
 func (m *UI) PreviewTop() {
@@ -435,6 +524,7 @@ func (m *UI) PreviewTop() {
 		return
 	}
 	m.ConvView.Layer().ScrollToTop()
+	m.UpdatePreviewScroll()
 }
 
 func (m *UI) PreviewBottom() {
@@ -442,6 +532,7 @@ func (m *UI) PreviewBottom() {
 		return
 	}
 	m.ConvView.Layer().ScrollToEnd()
+	m.UpdatePreviewScroll()
 }
 
 func (m *UI) FocusRight() {
@@ -518,8 +609,40 @@ func (m *UI) ReplySelected() {
 				m.Compose.ResumeDraft(t.ID)
 				return
 			}
+			if m.Compose.OpenInlineReply != nil {
+				m.Compose.OpenInlineReply(*t)
+				return
+			}
 			m.Compose.Open()
 			m.Compose.SetupReply(*t)
+		}
+	}
+}
+
+func (m *UI) ReplyAllSelected() {
+	if t := m.State.SelectedThread(m.ThreadSel); t != nil {
+		if row := m.State.ThreadRowAt(m.ThreadSel); row != nil && row.MsgIdx < 0 {
+			if m.State.ActiveFolderCanonical() == "Drafts" {
+				m.Compose.ResumeDraft(t.ID)
+				return
+			}
+			m.Compose.Open()
+			if m.Compose.SetupReplyAll != nil {
+				m.Compose.SetupReplyAll(*t)
+				return
+			}
+			m.Compose.SetupReply(*t)
+		}
+	}
+}
+
+func (m *UI) ForwardSelected() {
+	if t := m.State.SelectedThread(m.ThreadSel); t != nil {
+		if row := m.State.ThreadRowAt(m.ThreadSel); row != nil && row.MsgIdx < 0 {
+			m.Compose.Open()
+			if m.Compose.SetupForward != nil {
+				m.Compose.SetupForward(*t)
+			}
 		}
 	}
 }
@@ -538,6 +661,24 @@ func (m *UI) Delete() {
 	sel := m.ThreadSel
 	m.PushUndo(m.State.Delete(m.ThreadSel))
 	m.afterThreadAction(sel)
+}
+
+func (m *UI) Spam() {
+	sel := m.ThreadSel
+	m.PushUndo(m.State.Spam(m.ThreadSel))
+	m.afterThreadAction(sel)
+}
+
+func (m *UI) MoveSelectedToFolder(folderID, folderName string) {
+	m.ThreadAction("move", func() {
+		sel := m.ThreadSel
+		m.PushUndo(m.State.Move(m.ThreadSel, folderID, folderName))
+		m.afterThreadAction(sel)
+	})
+}
+
+func (m *UI) MoveTargetFolders() []provider.Folder {
+	return m.State.MoveTargetFolders()
 }
 
 func (m *UI) DeleteSelected() {
@@ -580,6 +721,35 @@ func (m *UI) RefreshMail() {
 	if m.SyncActiveFolder != nil {
 		m.SyncActiveFolder()
 	}
+}
+
+func (m *UI) LoadMoreThreads() {
+	limit := m.State.LoadMoreThreads()
+	if m.ThreadSel >= m.State.ThreadLen() {
+		m.ThreadSel = m.State.ThreadLen() - 1
+	}
+	if m.ThreadSel < 0 {
+		m.ThreadSel = 0
+	}
+	m.State.SetSelected(m.ThreadSel)
+	m.LoadPreview()
+	m.Notify(fmt.Sprintf("showing %d cached threads", limit))
+}
+
+func (m *UI) CopySenderAddress() {
+	msg := m.State.SelectedMessage(m.ThreadSel)
+	if msg == nil {
+		msg = m.State.LastMessage(m.ThreadSel)
+	}
+	if msg == nil || strings.TrimSpace(msg.From.Email) == "" {
+		m.NotifyWarning("copy sender: no sender")
+		return
+	}
+	if err := copyText(msg.From.Email); err != nil {
+		m.NotifyError(fmt.Sprintf("copy sender: %v", err))
+		return
+	}
+	m.Notify(fmt.Sprintf("copied %s", msg.From.Email))
 }
 
 func (m *UI) ShowKeyboardHelp() {

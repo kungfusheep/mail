@@ -57,12 +57,8 @@ func (f FocusShade) Apply(buf *Buffer, ctx PostContext) {
 				continue
 			}
 
-			attachmentFill := isAttachmentFill(cell.Style.BG)
 			if cell.Rune != ' ' && !isSoftBorder(cell.Rune) {
 				cell.Style.FG = shadeColor(cell.Style.FG, black, cellStrength)
-			}
-			if attachmentFill {
-				cell.Style.BG = shadeColor(cell.Style.BG, black, cellStrength)
 			}
 			buf.Set(x, y, cell)
 		}
@@ -87,15 +83,6 @@ func shadeColor(c Color, target Color, strength float64) Color {
 		return c
 	}
 	return Lerp(c, target, strength)
-}
-
-func isAttachmentFill(c Color) bool {
-	if c.Mode == ColorDefault {
-		return false
-	}
-	minC := min(c.R, min(c.G, c.B))
-	maxC := max(c.R, max(c.G, c.B))
-	return maxC-minC >= 20
 }
 
 func isSoftBorder(r rune) bool {

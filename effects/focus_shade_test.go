@@ -6,7 +6,7 @@ import (
 	. "github.com/kungfusheep/glyph"
 )
 
-func TestFocusShadeDimsTextAndAttachmentFill(t *testing.T) {
+func TestFocusShadeDimsTextWithoutChangingBackgrounds(t *testing.T) {
 	buf := NewBuffer(8, 2)
 	attachment := Hex(0x6f3d3d)
 	neutral := Hex(0x302f2c)
@@ -35,8 +35,8 @@ func TestFocusShadeDimsTextAndAttachmentFill(t *testing.T) {
 	if border.Style.FG != attachment {
 		t.Fatalf("attachment soft border fg = %v, want unchanged", border.Style.FG)
 	}
-	if border.Style.BG != RGB(56, 31, 31) {
-		t.Fatalf("soft border bg = %v, want shaded", border.Style.BG)
+	if border.Style.BG != attachment {
+		t.Fatalf("soft border bg = %v, want unchanged", border.Style.BG)
 	}
 
 	neutralBorder := buf.Get(4, 0)
@@ -48,13 +48,46 @@ func TestFocusShadeDimsTextAndAttachmentFill(t *testing.T) {
 	}
 
 	padded := buf.Get(3, 1)
-	if padded.Style.BG != RGB(56, 31, 31) {
-		t.Fatalf("padding bg = %v, want shaded", padded.Style.BG)
+	if padded.Style.BG != attachment {
+		t.Fatalf("padding bg = %v, want unchanged", padded.Style.BG)
 	}
 
 	outside := buf.Get(7, 1)
 	if outside.Style.BG != attachment {
 		t.Fatalf("outside bg = %v, want unchanged", outside.Style.BG)
+	}
+}
+
+func TestFocusShadeDoesNotShadeTintedThemeBackgrounds(t *testing.T) {
+	for name, bg := range map[string]Color{
+		"mfd":         Hex(0x151413),
+		"gbl-light":   Hex(0x02b582),
+		"gbl-dark":    Hex(0x001b1a),
+		"lumon":       Hex(0xf7f2dc),
+		"nerv":        Hex(0x100616),
+		"blackout":    Hex(0x000000),
+		"flir-fusion": Hex(0x2d1b69),
+	} {
+		t.Run(name, func(t *testing.T) {
+			fg := Hex(0xd8d4ce)
+			buf := NewBuffer(2, 1)
+			buf.Set(0, 0, Cell{Rune: ' ', Style: Style{BG: bg}})
+			buf.Set(1, 0, Cell{Rune: 'X', Style: Style{FG: fg, BG: bg}})
+
+			effect := NewFocusShade(&NodeRef{X: 0, Y: 0, W: 2, H: 1}).Strength(0.5)
+			effect = effect.CompileEffect(testEffectCompiler{}).(FocusShade)
+			effect.Apply(buf, PostContext{Width: 2, Height: 1})
+
+			if got := buf.Get(0, 0).Style.BG; got != bg {
+				t.Fatalf("blank bg = %v, want unchanged %v", got, bg)
+			}
+			if got := buf.Get(1, 0).Style.BG; got != bg {
+				t.Fatalf("text bg = %v, want unchanged %v", got, bg)
+			}
+			if got := buf.Get(1, 0).Style.FG; got == fg {
+				t.Fatalf("text fg = %v, want shaded", got)
+			}
+		})
 	}
 }
 

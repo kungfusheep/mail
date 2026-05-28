@@ -83,8 +83,12 @@ type Editor struct {
 	cursor Pos
 
 	// visual mode
-	visualMode  VisualMode
-	visualStart Pos
+	visualMode       VisualMode
+	visualStart      Pos
+	lastVisualMode   VisualMode
+	lastVisualStart  Pos
+	lastVisualCursor Pos
+	hasLastVisual    bool
 
 	// viewport
 	topLine      int // first visible screen line (for scrolling)
@@ -1436,6 +1440,113 @@ func (e *Editor) NextWordEnd(n int) Pos {
 	return e.cursor
 }
 
+func (e *Editor) PrevWordEnd(n int) Pos {
+	for i := 0; i < n; i++ {
+		e.wordEndBackward()
+	}
+	return e.cursor
+}
+
+func (e *Editor) GotoColumn(n int) Pos {
+	b := e.CurrentBlock()
+	if b == nil {
+		return e.cursor
+	}
+	col := n - 1
+	if col < 0 {
+		col = 0
+	}
+	if col >= b.Length() {
+		col = b.Length() - 1
+	}
+	if col < 0 {
+		col = 0
+	}
+	e.moveCursor(Pos{Block: e.cursor.Block, Col: col})
+	return e.cursor
+}
+
+func (e *Editor) FirstNonBlankWithCount(n int) Pos {
+	if n < 1 {
+		n = 1
+	}
+	for range n - 1 {
+		e.BlockDown(1)
+	}
+	return e.FirstNonBlank()
+}
+
+func (e *Editor) LastNonBlank() Pos {
+	b := e.CurrentBlock()
+	if b == nil {
+		return e.cursor
+	}
+	runes := []rune(b.Text())
+	col := len(runes) - 1
+	for col > 0 && isWhitespace(runes[col]) {
+		col--
+	}
+	if col < 0 {
+		col = 0
+	}
+	e.moveCursor(Pos{Block: e.cursor.Block, Col: col})
+	return e.cursor
+}
+
+func (e *Editor) GotoMatchingPair() bool {
+	b := e.CurrentBlock()
+	if b == nil {
+		return false
+	}
+	runes := []rune(b.Text())
+	if len(runes) == 0 {
+		return false
+	}
+	pairs := map[rune]rune{'(': ')', '[': ']', '{': '}', ')': '(', ']': '[', '}': '{'}
+	opening := map[rune]bool{'(': true, '[': true, '{': true}
+	col := e.cursor.Col
+	for col < len(runes) {
+		if _, ok := pairs[runes[col]]; ok {
+			break
+		}
+		col++
+	}
+	if col >= len(runes) {
+		return false
+	}
+	ch := runes[col]
+	match := pairs[ch]
+	depth := 0
+	if opening[ch] {
+		for i := col; i < len(runes); i++ {
+			switch runes[i] {
+			case ch:
+				depth++
+			case match:
+				depth--
+				if depth == 0 {
+					e.moveCursor(Pos{Block: e.cursor.Block, Col: i})
+					return true
+				}
+			}
+		}
+		return false
+	}
+	for i := col; i >= 0; i-- {
+		switch runes[i] {
+		case ch:
+			depth++
+		case match:
+			depth--
+			if depth == 0 {
+				e.moveCursor(Pos{Block: e.cursor.Block, Col: i})
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // wordForward moves to start of next word (internal helper)
 func (e *Editor) wordForward() {
 	b := e.CurrentBlock()
@@ -1527,6 +1638,38 @@ func (e *Editor) wordEnd() {
 	}
 
 	e.SetCursorQuiet(e.cursor) // clamp
+}
+
+func (e *Editor) wordEndBackward() {
+	b := e.CurrentBlock()
+	if b == nil {
+		return
+	}
+	runes := []rune(b.Text())
+	if e.cursor.Col == 0 && e.cursor.Block > 0 {
+		e.cursor.Block--
+		b = e.CurrentBlock()
+		if b != nil {
+			e.cursor.Col = b.Length()
+			runes = []rune(b.Text())
+		}
+	}
+	if e.cursor.Col > len(runes) {
+		e.cursor.Col = len(runes)
+	}
+	if e.cursor.Col > 0 {
+		e.cursor.Col--
+	}
+	for e.cursor.Col > 0 && isWhitespace(runes[e.cursor.Col]) {
+		e.cursor.Col--
+	}
+	for e.cursor.Col > 0 && !isWhitespace(runes[e.cursor.Col-1]) {
+		e.cursor.Col--
+	}
+	for e.cursor.Col < len(runes)-1 && !isWhitespace(runes[e.cursor.Col+1]) {
+		e.cursor.Col++
+	}
+	e.SetCursorQuiet(e.cursor)
 }
 
 func isWhitespace(r rune) bool {
@@ -1862,6 +2005,15 @@ func (e *Editor) SearchPrev() bool {
 		return false
 	}
 	return e.doSearch(e.searchDirection != 1)
+}
+
+// SearchWordUnderCursor searches for the word under the cursor using * or #.
+func (e *Editor) SearchWordUnderCursor(forward bool) bool {
+	word := strings.TrimSpace(e.textInRange(e.InnerWord()))
+	if word == "" {
+		return false
+	}
+	return e.Search(word, forward)
 }
 
 func (e *Editor) doSearch(forward bool) bool {
@@ -2287,6 +2439,70 @@ func (e *Editor) DeleteToLineStart() {
 		b.Runs = []Run{{Text: newText, Style: StyleNone}}
 	}
 	e.cursor.Col = 0
+}
+
+func (e *Editor) InsertRegister(reg rune) bool {
+	switch reg {
+	case '"', '0', '+', '*':
+		if e.yankText == "" {
+			return false
+		}
+		e.InsertText(e.yankText)
+		return true
+	default:
+		return false
+	}
+}
+
+func (e *Editor) InsertAdjacentLineChar(delta int) bool {
+	idx := e.cursor.Block + delta
+	if idx < 0 || idx >= len(e.doc.Blocks) {
+		return false
+	}
+	runes := []rune(e.doc.Blocks[idx].Text())
+	if e.cursor.Col < 0 || e.cursor.Col >= len(runes) {
+		return false
+	}
+	e.InsertChar(runes[e.cursor.Col])
+	return true
+}
+
+func (e *Editor) IndentCurrentLine() {
+	if e.CurrentBlock() == nil {
+		return
+	}
+	pos := e.cursor
+	e.cursor.Col = 0
+	e.InsertText("    ")
+	e.cursor = Pos{Block: pos.Block, Col: pos.Col + 4}
+	e.InvalidateCache()
+}
+
+func (e *Editor) DedentCurrentLine() {
+	b := e.CurrentBlock()
+	if b == nil {
+		return
+	}
+	runes := []rune(b.Text())
+	remove := 0
+	for remove < len(runes) && remove < 4 && runes[remove] == ' ' {
+		remove++
+	}
+	if remove == 0 {
+		return
+	}
+	pos := e.cursor
+	e.Delete(Range{
+		Start: Pos{Block: e.cursor.Block, Col: 0},
+		End:   Pos{Block: e.cursor.Block, Col: remove},
+	})
+	col := pos.Col - remove
+	if col < 0 {
+		col = 0
+	}
+	e.cursor = Pos{Block: pos.Block, Col: col}
+	e.mode = ModeInsert
+	e.InvalidateCache()
 }
 
 // =============================================================================
@@ -3547,8 +3763,26 @@ func (e *Editor) EnterVisualBlock() {
 
 // ExitVisual returns to normal mode
 func (e *Editor) ExitVisual() {
+	if e.visualMode != VisualNone {
+		e.lastVisualMode = e.visualMode
+		e.lastVisualStart = e.visualStart
+		e.lastVisualCursor = e.cursor
+		e.hasLastVisual = true
+	}
 	e.mode = ModeNormal
 	e.visualMode = VisualNone
+}
+
+func (e *Editor) ReselectVisual() bool {
+	if !e.hasLastVisual {
+		return false
+	}
+	e.mode = ModeVisual
+	e.visualMode = e.lastVisualMode
+	e.visualStart = e.lastVisualStart
+	e.cursor = e.lastVisualCursor
+	e.SetCursorQuiet(e.cursor)
+	return true
 }
 
 // SwapVisualEnds swaps cursor to other end of selection (o, O in visual mode)
@@ -3589,6 +3823,28 @@ func (e *Editor) SelectVisualRange(r Range) {
 // CurrentVisualMode returns the current visual mode
 func (e *Editor) CurrentVisualMode() VisualMode {
 	return e.visualMode
+}
+
+func (e *Editor) IndentRangeLines(r Range) {
+	for block := r.Start.Block; block <= r.End.Block && block < len(e.doc.Blocks); block++ {
+		e.cursor = Pos{Block: block, Col: 0}
+		e.IndentCurrentLine()
+	}
+}
+
+func (e *Editor) DedentRangeLines(r Range) {
+	for block := r.Start.Block; block <= r.End.Block && block < len(e.doc.Blocks); block++ {
+		e.cursor = Pos{Block: block, Col: 0}
+		e.DedentCurrentLine()
+	}
+}
+
+func (e *Editor) PasteOverRange(r Range) {
+	if e.yankText == "" {
+		return
+	}
+	e.Delete(r)
+	e.InsertText(e.yankText)
 }
 
 // SetVisualMode changes the visual mode type (for switching between v, V, Ctrl-V)
@@ -3846,19 +4102,53 @@ func (e *Editor) Change(r Range) {
 	e.mode = ModeInsert
 }
 
+func (e *Editor) textInRange(r Range) string {
+	if len(e.doc.Blocks) == 0 {
+		return ""
+	}
+	if r.Start.Block < 0 {
+		r.Start.Block = 0
+	}
+	if r.End.Block >= len(e.doc.Blocks) {
+		r.End.Block = len(e.doc.Blocks) - 1
+	}
+	if r.Start.Block > r.End.Block {
+		r.Start, r.End = r.End, r.Start
+	}
+
+	lineText := func(blockIdx, start, end int) string {
+		runes := []rune(e.doc.Blocks[blockIdx].Text())
+		if start < 0 {
+			start = 0
+		}
+		if end > len(runes) {
+			end = len(runes)
+		}
+		if start > end {
+			start = end
+		}
+		return string(runes[start:end])
+	}
+
+	if r.Start.Block == r.End.Block {
+		return lineText(r.Start.Block, r.Start.Col, r.End.Col)
+	}
+
+	lines := make([]string, 0, r.End.Block-r.Start.Block+1)
+	lines = append(lines, lineText(r.Start.Block, r.Start.Col, len([]rune(e.doc.Blocks[r.Start.Block].Text()))))
+	for blockIdx := r.Start.Block + 1; blockIdx < r.End.Block; blockIdx++ {
+		lines = append(lines, e.doc.Blocks[blockIdx].Text())
+	}
+	lines = append(lines, lineText(r.End.Block, 0, r.End.Col))
+	return strings.Join(lines, "\n")
+}
+
 // Yank copies text in range to register
 func (e *Editor) Yank(r Range) {
-	if r.Start.Block == r.End.Block {
-		b := &e.doc.Blocks[r.Start.Block]
-		text := b.Text()
-		start := r.Start.Col
-		end := r.End.Col
-		if end > len(text) {
-			end = len(text)
-		}
-		e.yankText = text[start:end]
+	e.yankText = e.textInRange(r)
+	if e.yankText != "" {
+		_ = copyText(e.yankText)
 	}
-	// TODO: multi-block yank
 }
 
 // Put inserts yanked text after cursor (p)
@@ -3874,25 +4164,14 @@ func (e *Editor) Put() {
 	}
 
 	runes := []rune(b.Text())
-	col := e.cursor.Col + 1 // insert after cursor
+	col := e.cursor.Col + 1
 	if col > len(runes) {
 		col = len(runes)
 	}
 
-	newText := string(runes[:col]) + e.yankText + string(runes[col:])
-
-	// update the block (simplified: single run)
-	if len(b.Runs) == 1 {
-		b.Runs[0].Text = newText
-	} else {
-		b.Runs = []Run{{Text: newText, Style: StyleNone}}
-	}
-
-	// move cursor to end of pasted text
-	yankRunes := []rune(e.yankText)
-	e.cursor.Col = col + len(yankRunes) - 1
+	e.cursor.Col = col
 	e.SetCursorQuiet(e.cursor)
-	e.InvalidateCache()
+	e.InsertText(e.yankText)
 }
 
 // PutBefore inserts yanked text before cursor (P)
@@ -3907,25 +4186,8 @@ func (e *Editor) PutBefore() {
 		return
 	}
 
-	runes := []rune(b.Text())
-	col := e.cursor.Col
-	if col > len(runes) {
-		col = len(runes)
-	}
-
-	newText := string(runes[:col]) + e.yankText + string(runes[col:])
-
-	if len(b.Runs) == 1 {
-		b.Runs[0].Text = newText
-	} else {
-		b.Runs = []Run{{Text: newText, Style: StyleNone}}
-	}
-
-	// move cursor to end of pasted text
-	yankRunes := []rune(e.yankText)
-	e.cursor.Col = col + len(yankRunes) - 1
 	e.SetCursorQuiet(e.cursor)
-	e.InvalidateCache()
+	e.InsertText(e.yankText)
 }
 
 // ApplyStyle applies a style to range (wed-specific operator)

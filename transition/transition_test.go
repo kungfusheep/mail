@@ -99,3 +99,32 @@ func TestSourceTransitionCapturesFakeCursorWithoutMutatingLiveBuffer(t *testing.
 		t.Fatalf("captured cursor BG = %#v, want cursor %#v", captured.Style.BG, cursor)
 	}
 }
+
+func TestTransitionSetColorsUpdatesFadeBackground(t *testing.T) {
+	darkBG := Hex(0x101010)
+	lightBG := Hex(0xf6f6f6)
+	textFG := Hex(0xa0b0c0)
+	textBG := Hex(0x304050)
+
+	tr := New(time.Second, darkBG, Hex(0x3a3a3a))
+	tr.SetColors(lightBG, Hex(0xdddddd))
+	tr.active = true
+	tr.startTime = time.Now().Add(-225 * time.Millisecond)
+	tr.oldW = 1
+	tr.oldH = 1
+	tr.oldCells = []Cell{{
+		Rune:  'x',
+		Style: Style{FG: textFG, BG: textBG},
+	}}
+
+	buf := NewBuffer(1, 1)
+	targetTransitionEffect{tr: tr}.Apply(buf, PostContext{Width: 1, Height: 1})
+
+	got := buf.Get(0, 0)
+	const phase1End = 0.45
+	p1 := 0.225 / phase1End
+	eased := p1 * p1 * (3 - 2*p1)
+
+	assertColorNear(t, got.Style.FG, lerpTestColor(textFG, lightBG, eased))
+	assertColorNear(t, got.Style.BG, lerpTestColor(textBG, lightBG, eased))
+}

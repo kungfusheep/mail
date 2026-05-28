@@ -1,7 +1,6 @@
 package compose
 
 import (
-	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/riffkey"
 )
 
@@ -128,13 +127,13 @@ var EditOperators = []EditOperatorDef{
 
 // registerOperatorTextObjects sets up all operator+textobject combinations
 // this is the cartesian product: N operators x M text objects = N*M handlers
-func RegisterOperatorTextObjects(app *glyph.App, ed *Editor) {
+func RegisterOperatorTextObjects(router *riffkey.Router, ed *Editor, enterInsert func()) {
 	// style operators (gb, gi, gu, gs, gc) + text objects
 	for _, op := range StyleOperators {
 		for _, obj := range TextObjects {
 			pattern := op.Key + obj.Key
 			opFn, objFn := op.Apply, obj.Fn
-			app.Handle(pattern, func(_ riffkey.Match) {
+			router.Handle(pattern, func(_ riffkey.Match) {
 				opFn(ed, objFn(ed))
 			})
 		}
@@ -145,10 +144,10 @@ func RegisterOperatorTextObjects(app *glyph.App, ed *Editor) {
 		for _, obj := range TextObjects {
 			pattern := op.Key + obj.Key
 			opFn, objFn, enterIns := op.Apply, obj.Fn, op.EnterInsert
-			app.Handle(pattern, func(_ riffkey.Match) {
+			router.Handle(pattern, func(_ riffkey.Match) {
 				opFn(ed, objFn(ed))
 				if enterIns {
-					enterInsertMode(app, ed)
+					enterInsert()
 				}
 			})
 		}
@@ -167,14 +166,14 @@ func RegisterVisualTextObjects(router *riffkey.Router, ed *Editor) {
 }
 
 // registerVisualOperators sets up operators that work on visual selection
-func RegisterVisualOperators(router *riffkey.Router, app *glyph.App, ed *Editor) {
+func RegisterVisualOperators(router *riffkey.Router, appPop func(), ed *Editor, enterInsert func()) {
 	// style operators on selection
 	for _, op := range StyleOperators {
 		opFn := op.Apply
 		router.Handle(op.Key, func(_ riffkey.Match) {
 			opFn(ed, ed.VisualRange())
 			ed.ExitVisual()
-			app.Pop()
+			appPop()
 		})
 	}
 
@@ -184,9 +183,9 @@ func RegisterVisualOperators(router *riffkey.Router, app *glyph.App, ed *Editor)
 		router.Handle(op.Key, func(_ riffkey.Match) {
 			opFn(ed, ed.VisualRange())
 			ed.ExitVisual()
-			app.Pop()
+			appPop()
 			if enterIns {
-				enterInsertMode(app, ed)
+				enterInsert()
 			}
 		})
 	}
@@ -195,6 +194,6 @@ func RegisterVisualOperators(router *riffkey.Router, app *glyph.App, ed *Editor)
 	router.Handle("x", func(_ riffkey.Match) {
 		ed.Delete(ed.VisualRange())
 		ed.ExitVisual()
-		app.Pop()
+		appPop()
 	})
 }

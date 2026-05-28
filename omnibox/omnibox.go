@@ -9,9 +9,10 @@ import (
 )
 
 type Config struct {
-	App   *App
-	Theme theme.Theme
-	Model *mailbox.UI
+	App        *App
+	Theme      theme.Theme
+	Model      *mailbox.UI
+	ApplyTheme func(name string, palette theme.Theme)
 }
 
 type OmniBox struct {
@@ -25,6 +26,13 @@ type OmniBox struct {
 	items   []command
 	list    *FilterListC[command]
 	ref     NodeRef
+
+	mode            string
+	title           string
+	lastQuery       string
+	themeBeforeName string
+	themeBefore     theme.Theme
+	themeCommitted  bool
 }
 
 func New(cfg Config) *OmniBox {
@@ -33,6 +41,8 @@ func New(cfg Config) *OmniBox {
 		t:     cfg.Theme,
 		cfg:   cfg,
 		empty: true,
+		mode:  "commands",
+		title: "commands",
 	}
 	box.items = buildCommands(box.actions())
 
@@ -51,8 +61,14 @@ func (b *OmniBox) Open() {
 	if b.open {
 		return
 	}
+	b.mode = "commands"
+	b.title = "commands"
+	b.items = buildCommands(b.actions())
+	b.lastQuery = ""
 	if b.list != nil {
 		b.list.Clear()
+		b.list.Refresh()
+		b.resetSelection()
 	}
 	b.refresh()
 	b.open = true
@@ -64,11 +80,19 @@ func (b *OmniBox) Close() {
 	if !b.open {
 		return
 	}
+	if b.mode == "themes" && !b.themeCommitted {
+		b.applyTheme(b.themeBeforeName, b.themeBefore)
+	}
 	if b.list != nil {
 		b.list.Clear()
+		b.resetSelection()
 	}
+	b.lastQuery = ""
 	b.refresh()
 	b.open = false
+	b.mode = "commands"
+	b.title = "commands"
+	b.themeCommitted = false
 	b.app.HideCursor()
 	b.app.RequestRender()
 }
@@ -88,22 +112,26 @@ func (b *OmniBox) Resize(width, height int) {
 }
 
 func (b *OmniBox) View() Component {
+	model := b.cfg.Model
 	b.list = FilterList(&b.items, commandSearchText).
 		Placeholder("type a command").
 		MaxVisible(b.maxRows).
 		Marker("  ").
-		Style(Style{BG: b.t.BG}).
-		SelectedStyle(Style{FG: b.t.Bright, BG: b.t.SelBG}).
+		Style(Style{BG: model.BG}).
+		SelectedStyle(Style{FG: model.Bright, BG: model.SelBG}).
+		OnSelect(func(cmd *command) {
+			b.previewCommand(cmd)
+		}).
 		Render(func(cmd *command) Component {
 			return VBox.PaddingVH(1, 2)(
 				HBox(
-					Text(&cmd.Label).FG(b.t.Bright),
+					Text(&cmd.Label).FG(&model.Bright),
 					Space(),
-					Text(&cmd.Key).FG(b.t.Subtle),
+					Text(&cmd.Key).FG(&model.Subtle),
 				),
 				HBox(
-					Text(&cmd.Section).FG(b.t.Accent).Width(12),
-					Text(&cmd.Description).FG(b.t.Subtle),
+					Text(&cmd.Section).FG(&model.Accent).Width(12),
+					Text(&cmd.Description).FG(&model.Subtle),
 				),
 			)
 		})
@@ -114,7 +142,7 @@ func (b *OmniBox) View() Component {
 			VBox.
 				Width(86).
 				FitContent().
-				Fill(b.t.BG).
+				Fill(&model.BG).
 				PaddingTRBL(1, 2, 1, 2).
 				Opacity(In(1).Out(Animate.Duration(500*time.Millisecond)(0.0))).
 				NodeRef(&b.ref)(
@@ -137,19 +165,19 @@ func (b *OmniBox) View() Component {
 					Key("<C-G>", b.last),
 				),
 				HBox(
-					Text("mail").FG(b.t.Bright).Bold(),
+					Text("mail").FG(&model.Bright).Bold(),
 					SpaceW(1),
-					Text("commands").FG(b.t.Subtle),
+					Text(&b.title).FG(&model.Subtle),
 					Space(),
-					Text("j/k").FG(b.t.Muted),
+					Text("j/k").FG(&model.Muted),
 					SpaceW(2),
-					Text("<esc>").FG(b.t.Muted),
+					Text("<esc>").FG(&model.Muted),
 				),
 				SpaceH(1),
 				b.list,
 				If(&b.empty).Then(
-					VBox.Fill(b.t.BG).PaddingTRBL(1, 1, 1, 1)(
-						Text("no commands").FG(b.t.Subtle),
+					VBox.Fill(&model.BG).PaddingTRBL(1, 1, 1, 1)(
+						Text("no commands").FG(&model.Subtle),
 					),
 				),
 				ScreenEffect(
@@ -165,6 +193,25 @@ func (b *OmniBox) View() Component {
 
 func (b *OmniBox) refresh() {
 	b.empty = b.list == nil || b.list.Filter().Len() == 0
+	if b.list != nil {
+		query := b.list.Query()
+		if query != b.lastQuery {
+			b.resetSelection()
+			b.lastQuery = query
+			b.previewSelected()
+		}
+		b.list.Style(Style{BG: b.cfg.Model.BG})
+		b.list.SelectedStyle(Style{FG: b.cfg.Model.Bright, BG: b.cfg.Model.SelBG})
+	}
+}
+
+func (b *OmniBox) resetSelection() {
+	if b.list == nil {
+		return
+	}
+	for range b.list.Filter().Len() {
+		b.list.SelectPrev()
+	}
 }
 
 func (b *OmniBox) exec() {
@@ -176,6 +223,9 @@ func (b *OmniBox) exec() {
 		return
 	}
 	action := cmd.Action
+	if b.mode == "themes" {
+		b.themeCommitted = true
+	}
 	b.Close()
 	if action != nil {
 		action()
@@ -194,6 +244,7 @@ func (b *OmniBox) move(delta int) {
 				b.list.SelectPrev()
 			}
 		}
+		b.previewSelected()
 		return
 	}
 	b.list.SelectPrev()
@@ -202,6 +253,7 @@ func (b *OmniBox) move(delta int) {
 			b.list.SelectNext()
 		}
 	}
+	b.previewSelected()
 }
 
 func (b *OmniBox) page(delta int) {
@@ -210,9 +262,11 @@ func (b *OmniBox) page(delta int) {
 	}
 	if delta > 0 {
 		b.list.PageDown()
+		b.previewSelected()
 		return
 	}
 	b.list.PageUp()
+	b.previewSelected()
 }
 
 func (b *OmniBox) first() {
@@ -222,6 +276,7 @@ func (b *OmniBox) first() {
 	for range b.list.Filter().Len() {
 		b.list.SelectPrev()
 	}
+	b.previewSelected()
 }
 
 func (b *OmniBox) last() {
@@ -231,26 +286,46 @@ func (b *OmniBox) last() {
 	for range b.list.Filter().Len() {
 		b.list.SelectNext()
 	}
+	b.previewSelected()
 }
 
 func (b *OmniBox) actions() commandActions {
 	model := b.cfg.Model
+	moveTargets := []moveTarget{}
+	for _, folder := range model.MoveTargetFolders() {
+		moveTargets = append(moveTargets, moveTarget{
+			ID:   folder.ID,
+			Name: folder.Name,
+		})
+	}
 	return commandActions{
-		ComposeNew:    model.ComposeNew,
-		ResumeDraft:   model.ResumeDraft,
-		ReplySelected: model.ReplySelected,
-		RefreshMail:   model.RefreshMail,
-		ToggleFolders: model.ToggleFolders,
-		FocusFolders:  model.FocusFolders,
-		FocusThreads:  model.FocusThreads,
-		FocusPreview:  model.FocusPreview,
-		SearchMail:    model.StartSearch,
-		OpenSelected:  model.Enter,
+		ComposeNew:       model.ComposeNew,
+		ResumeDraft:      model.ResumeDraft,
+		ReplySelected:    model.ReplySelected,
+		ReplyAllSelected: model.ReplyAllSelected,
+		ForwardSelected:  model.ForwardSelected,
+		RefreshMail:      model.RefreshMail,
+		ToggleFolders:    model.ToggleFolders,
+		FocusFolders:     model.FocusFolders,
+		FocusThreads:     model.FocusThreads,
+		FocusPreview:     model.FocusPreview,
+		SearchMail:       model.StartSearch,
+		LoadMoreThreads: func() {
+			model.LoadMoreThreads()
+		},
+		OpenSelected: model.Enter,
 		ArchiveSelected: func() {
 			model.ThreadAction("archive", model.Archive)
 		},
 		DeleteSelected: func() {
 			model.ThreadAction("delete", model.Delete)
+		},
+		SpamSelected: func() {
+			model.ThreadAction("spam", model.Spam)
+		},
+		MoveTargets: moveTargets,
+		MoveSelectedTo: func(folderID, folderName string) {
+			model.MoveSelectedToFolder(folderID, folderName)
 		},
 		ToggleStar: func() {
 			model.ThreadAction("star", model.ToggleStar)
@@ -258,10 +333,81 @@ func (b *OmniBox) actions() commandActions {
 		ToggleRead: func() {
 			model.ThreadAction("read", model.ToggleRead)
 		},
+		CopySender:       model.CopySenderAddress,
 		UndoLast:         model.UndoLast,
 		ShowKeyboardHelp: model.ShowKeyboardHelp,
+		SwitchTheme:      b.OpenThemePicker,
 		Quit:             func() { b.app.Stop() },
 	}
+}
+
+func (b *OmniBox) OpenThemePicker() {
+	model := b.cfg.Model
+	b.mode = "themes"
+	b.title = "themes"
+	b.themeBeforeName = model.ThemeName
+	b.themeBefore = model.Theme
+	b.themeCommitted = false
+	b.items = b.themeCommands()
+	b.lastQuery = ""
+	if b.list != nil {
+		b.list.Clear()
+		b.list.Refresh()
+		b.resetSelection()
+	}
+	b.refresh()
+	b.open = true
+	b.previewSelected()
+	b.app.HideCursor()
+	b.app.RequestRender()
+}
+
+func (b *OmniBox) themeCommands() []command {
+	themes := theme.All()
+	commands := make([]command, 0, len(themes))
+	for _, named := range themes {
+		commands = append(commands, b.themeCommand(named))
+	}
+	return commands
+}
+
+func (b *OmniBox) themeCommand(named theme.NamedTheme) command {
+	return command{
+		Label:       named.Label,
+		Description: "preview and apply the " + named.Name + " palette",
+		Key:         named.Name,
+		Section:     "theme",
+		Preview: func() {
+			b.applyTheme(named.Name, named.Palette)
+		},
+		Action: func() {
+			b.applyTheme(named.Name, named.Palette)
+		},
+	}
+}
+
+func (b *OmniBox) previewSelected() {
+	if b.mode != "themes" || b.list == nil {
+		return
+	}
+	b.previewCommand(b.list.Selected())
+}
+
+func (b *OmniBox) previewCommand(cmd *command) {
+	if b.mode != "themes" || cmd == nil || cmd.Preview == nil {
+		return
+	}
+	cmd.Preview()
+	b.app.RequestRender()
+}
+
+func (b *OmniBox) applyTheme(name string, palette theme.Theme) {
+	if b.cfg.ApplyTheme != nil {
+		b.cfg.ApplyTheme(name, palette)
+		return
+	}
+	b.cfg.Model.ThemeName = name
+	b.cfg.Model.ApplyTheme(palette)
 }
 
 func commandSearchText(cmd *command) string {
