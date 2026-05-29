@@ -2080,6 +2080,60 @@ func TestToggleThreadUsesConversationIndex(t *testing.T) {
 	}
 }
 
+func TestSyncResultKeepsThreadLeanAndExpansionUsesConversationIndex(t *testing.T) {
+	c := testCache(t)
+	now := time.Now()
+	inbox := provider.Message{
+		ID:        "inbox-1",
+		MessageID: "<inbox@test>",
+		Subject:   "Leica Q343",
+		From:      provider.Address{Name: "Leica", Email: "sales@test"},
+		To:        []provider.Address{{Email: "me@test"}},
+		Date:      now.Add(-time.Hour),
+	}
+	sent := provider.Message{
+		ID:        "sent-1",
+		MessageID: "<sent@test>",
+		Subject:   "Re: Leica Q343",
+		From:      provider.Address{Name: "Me", Email: "me@test"},
+		To:        []provider.Address{{Email: "sales@test"}},
+		Date:      now,
+		Read:      true,
+	}
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	if err := c.PutSentMessage(sent); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.applySyncResult("INBOX", []provider.Thread{{
+		ID:       "inbox-thread",
+		Subject:  inbox.Subject,
+		Date:     inbox.Date,
+		Messages: []provider.Message{inbox},
+	}})
+
+	stored, err := c.GetThread("inbox-thread")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(stored.Messages); got != 1 {
+		t.Fatalf("stored thread messages = %d, want lean synced thread without foreground sent merge", got)
+	}
+
+	mb.BuildThreadDisplay()
+	mb.ToggleThread(0)
+	if got := mb.ThreadLen(); got != 3 {
+		t.Fatalf("expanded rows = %d, want header + inbox + sent from index", got)
+	}
+	msg := mb.SelectedMessage(1)
+	if msg == nil || msg.ID != "sent-1" {
+		t.Fatalf("expanded indexed message = %#v, want sent-1", msg)
+	}
+}
+
 func TestLoadConversationOnExpandedRowShowsSelectedMessageOnly(t *testing.T) {
 	now := time.Now()
 	mb := testState(t,

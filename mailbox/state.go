@@ -550,7 +550,6 @@ func (m *State) applySyncResult(folderID string, threads []provider.Thread) {
 		m.LoadThreads()
 		return
 	}
-	threads = m.mergeWithSentMessages(threads)
 	m.preserveCachedBodies(folderID, threads)
 	m.cache.ReplaceThreads(folderID, threads)
 	m.LoadThreads()
@@ -701,79 +700,6 @@ func (m *State) preserveCachedBodies(folder string, threads []provider.Thread) {
 			}
 		}
 	}
-}
-
-func (m *State) mergeWithSentMessages(threads []provider.Thread) []provider.Thread {
-	sent, err := m.cache.GetSentMessages(50)
-	if err != nil || len(sent) == 0 {
-		return threads
-	}
-
-	// build set of known MessageIDs across all threads
-	known := make(map[string]bool)
-	for _, t := range threads {
-		for _, msg := range t.Messages {
-			if msg.MessageID != "" {
-				known[msg.MessageID] = true
-			}
-		}
-	}
-
-	// match sent messages to threads by InReplyTo OR normalized subject
-	for i := range threads {
-		threadSubj := normalizeSubject(threads[i].Subject)
-		for j := range sent {
-			if known[sent[j].MessageID] {
-				continue
-			}
-			sentSubj := normalizeSubject(sent[j].Subject)
-
-			matched := false
-			// check InReplyTo links
-			for _, msg := range threads[i].Messages {
-				if msg.InReplyTo == sent[j].MessageID || sent[j].InReplyTo == msg.MessageID {
-					matched = true
-					break
-				}
-			}
-			// fallback: subject match within 7 days of thread date
-			if !matched && sentSubj != "" && sentSubj == threadSubj {
-				diff := threads[i].Date.Sub(sent[j].Date)
-				if diff < 0 {
-					diff = -diff
-				}
-				if diff < 7*24*time.Hour {
-					matched = true
-				}
-			}
-			if matched {
-				threads[i].Messages = append(threads[i].Messages, sent[j])
-				known[sent[j].MessageID] = true
-			}
-		}
-	}
-
-	merged := 0
-	for _, t := range threads {
-		if len(t.Messages) > 1 {
-			merged++
-			log.Printf("merge: thread %q now has %d messages", t.Subject, len(t.Messages))
-		}
-	}
-	log.Printf("merge: %d sent messages checked, %d threads enriched", len(sent), merged)
-
-	// sort messages within each thread chronologically
-	for i := range threads {
-		sort.Slice(threads[i].Messages, func(a, b int) bool {
-			return threads[i].Messages[a].Date.Before(threads[i].Messages[b].Date)
-		})
-		// update thread metadata
-		if len(threads[i].Messages) > 0 {
-			threads[i].Date = threads[i].Messages[len(threads[i].Messages)-1].Date
-		}
-	}
-
-	return threads
 }
 
 func (m *State) BuildThreadDisplay() {
