@@ -9,16 +9,19 @@ require (
 	github.com/kungfusheep/riffkey v0.0.0-20260424163050-c13d19def76f
 	github.com/mattn/go-runewidth v0.0.21
 	github.com/mattn/go-sqlite3 v1.14.37
+	github.com/olebedev/when v1.1.0
 	golang.org/x/net v0.6.0
 )
 
 require (
+	github.com/AlekSi/pointer v1.0.0 // indirect
 	github.com/BurntSushi/toml v1.6.0 // indirect
 	github.com/clipperhouse/stringish v0.1.1 // indirect
 	github.com/clipperhouse/uax29/v2 v2.4.0 // indirect
 	github.com/emersion/go-sasl v0.0.0-20241020182733-b788ff22d5a6 // indirect
 	github.com/junegunn/fzf v0.67.0 // indirect
 	github.com/mattn/go-isatty v0.0.20 // indirect
+	github.com/pkg/errors v0.8.1 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	golang.org/x/sys v0.42.0 // indirect
 	golang.org/x/text v0.28.0 // indirect

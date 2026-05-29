@@ -8,12 +8,14 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/kungfusheep/glyph"
 	"github.com/kungfusheep/mail/provider"
+	"github.com/olebedev/when"
 )
 
 type calendarLinkEvent struct {
@@ -21,64 +23,195 @@ type calendarLinkEvent struct {
 	Source   string
 	Start    time.Time
 	End      time.Time
+	AllDay   bool
 	Triggers []string
 }
 
+type calendarDateCandidate struct {
+	Start int
+	End   int
+	Text  string
+	Date  time.Time
+}
+
 var (
-	calendarDateRE    = regexp.MustCompile(`(?i)\b(?:(?:mon|monday|tue|tues|tuesday|wed|wednesday|thu|thur|thurs|thursday|fri|friday|sat|saturday|sun|sunday)\s+)?\d{1,2}(?:st|nd|rd|th)?\s+(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{4}\*?`)
-	calendarTimeRE    = regexp.MustCompile(`(?i)\bbetween\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\s+and\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b`)
-	calendarOrdinalRE = regexp.MustCompile(`(?i)(\d{1,2})(st|nd|rd|th)`)
+	calendarDateRE       = regexp.MustCompile(`(?i)\b(?:(?:monday|mon|tuesday|tues|tue|wednesday|wed|thursday|thurs|thur|thu|friday|fri|saturday|sat|sunday|sun)\s+)?\d{1,2}(?:st|nd|rd|th)?\s+(?:january|jan|february|feb|march|mar|april|apr|may|june|jun|july|jul|august|aug|september|sept|sep|october|oct|november|nov|december|dec)(?:\s+\d{4})?\*?`)
+	calendarTimeRangeRE  = regexp.MustCompile(`(?i)\bbetween\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\s+and\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)\b`)
+	calendarSingleTimeRE = regexp.MustCompile(`(?i)\bat\s+(\d{1,2})(?:[:.](\d{2}))?\s*(am|pm)?\b`)
+	calendarOrdinalRE    = regexp.MustCompile(`(?i)(\d{1,2})(st|nd|rd|th)`)
+	calendarMonthWordRE  = regexp.MustCompile(`(?i)\b(?:january|jan\.?|february|feb\.?|march|mar\.?|april|apr\.?|may|june|jun\.?|july|jul\.?|august|aug\.?|september|sept?\.?|october|oct\.?|november|nov\.?|december|dec\.?)\b`)
+	calendarDigitRE      = regexp.MustCompile(`\d`)
+	calendarRangeJoinRE  = regexp.MustCompile(`(?i)^\s*(?:to|until|through|-|–|—)\s*$`)
 )
 
 func calendarLinkEvents(text string, msg provider.Message) []calendarLinkEvent {
 	if strings.TrimSpace(text) == "" {
 		return nil
 	}
-	dateMatches := calendarDateRE.FindAllStringIndex(text, -1)
-	if len(dateMatches) == 0 {
+	candidates := calendarDateCandidates(text, msg.Date)
+	if len(candidates) == 0 {
 		return nil
 	}
 
-	events := make([]calendarLinkEvent, 0, len(dateMatches))
+	events := make([]calendarLinkEvent, 0, len(candidates))
 	seen := make(map[string]bool)
-	for _, dateMatch := range dateMatches {
-		dateText := text[dateMatch[0]:dateMatch[1]]
-		date, ok := parseBodyCalendarDate(dateText)
+	consumed := make(map[int]bool)
+	for i, candidate := range candidates {
+		if consumed[candidate.Start] {
+			continue
+		}
+
+		if endDate, rangeTrigger, endStart, ok := calendarDateRangeEnd(text, candidate, candidates[i+1:]); ok {
+			start := time.Date(candidate.Date.Year(), candidate.Date.Month(), candidate.Date.Day(), 0, 0, 0, 0, time.Local)
+			end := time.Date(endDate.Year(), endDate.Month(), endDate.Day(), 0, 0, 0, 0, time.Local).AddDate(0, 0, 1)
+			if addCalendarLinkEvent(&events, seen, calendarLinkEvent{
+				Summary:  calendarLinkSummary(text, msg),
+				Source:   strings.TrimSpace(msg.Subject),
+				Start:    start,
+				End:      end,
+				AllDay:   true,
+				Triggers: []string{rangeTrigger},
+			}) {
+				consumed[candidate.Start] = true
+				consumed[endStart] = true
+			}
+			continue
+		}
+
+		windowEnd := min(len(text), candidate.End+220)
+		nearby := text[candidate.Start:windowEnd]
+		date := candidate.Date
+		start, end, rangeText, ok := parseBodyCalendarTime(date, nearby)
+		allDay := false
 		if !ok {
-			continue
+			if !calendarDateOnlyContext(text, []int{candidate.Start, candidate.End}) {
+				continue
+			}
+			start = time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, time.Local)
+			end = start.AddDate(0, 0, 1)
+			rangeText = ""
+			allDay = true
 		}
 
-		windowEnd := min(len(text), dateMatch[1]+220)
-		nearby := text[dateMatch[1]:windowEnd]
-		timeMatch := calendarTimeRE.FindStringSubmatchIndex(nearby)
-		if timeMatch == nil {
-			continue
-		}
-
-		rangeText := nearby[timeMatch[0]:timeMatch[1]]
-		start, end, ok := parseBodyCalendarRange(date, nearby, timeMatch)
-		if !ok {
-			continue
-		}
-
-		key := start.Format(time.RFC3339) + "|" + end.Format(time.RFC3339)
-		if seen[key] {
-			continue
-		}
-		seen[key] = true
-
-		events = append(events, calendarLinkEvent{
+		addCalendarLinkEvent(&events, seen, calendarLinkEvent{
 			Summary:  calendarLinkSummary(text, msg),
 			Source:   strings.TrimSpace(msg.Subject),
 			Start:    start,
 			End:      end,
-			Triggers: []string{dateText, rangeText},
+			AllDay:   allDay,
+			Triggers: calendarLinkTriggers(candidate.Text, rangeText),
 		})
 	}
 	return events
 }
 
-func parseBodyCalendarDate(text string) (time.Time, bool) {
+func addCalendarLinkEvent(events *[]calendarLinkEvent, seen map[string]bool, event calendarLinkEvent) bool {
+	key := event.Start.Format(time.RFC3339) + "|" + event.End.Format(time.RFC3339)
+	if seen[key] {
+		return false
+	}
+	seen[key] = true
+	*events = append(*events, event)
+	return true
+}
+
+func calendarDateCandidates(text string, reference time.Time) []calendarDateCandidate {
+	candidates := make([]calendarDateCandidate, 0)
+	for _, match := range calendarDateRE.FindAllStringIndex(text, -1) {
+		dateText := text[match[0]:match[1]]
+		date, ok := parseBodyCalendarDate(dateText, reference)
+		if !ok {
+			continue
+		}
+		candidates = append(candidates, calendarDateCandidate{
+			Start: match[0],
+			End:   match[1],
+			Text:  dateText,
+			Date:  date,
+		})
+	}
+	for _, candidate := range whenCalendarDateCandidates(text, reference) {
+		if calendarCandidateOverlaps(candidates, candidate) {
+			continue
+		}
+		candidates = append(candidates, candidate)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].Start < candidates[j].Start
+	})
+	return candidates
+}
+
+func whenCalendarDateCandidates(text string, reference time.Time) []calendarDateCandidate {
+	base := reference
+	if base.IsZero() {
+		base = time.Now()
+	}
+	candidates := make([]calendarDateCandidate, 0)
+	offset := 0
+	for offset < len(text) {
+		result, err := when.EN.Parse(text[offset:], base)
+		if err != nil || result == nil {
+			break
+		}
+		start := offset + result.Index
+		end := start + len(result.Text)
+		if calendarWhenDateText(result.Text) {
+			candidates = append(candidates, calendarDateCandidate{
+				Start: start,
+				End:   end,
+				Text:  strings.TrimSpace(result.Text),
+				Date:  result.Time,
+			})
+		}
+		if end <= offset {
+			offset++
+			continue
+		}
+		offset = end
+	}
+	return candidates
+}
+
+func calendarWhenDateText(text string) bool {
+	return calendarDigitRE.MatchString(text) && calendarMonthWordRE.MatchString(text)
+}
+
+func calendarCandidateOverlaps(candidates []calendarDateCandidate, candidate calendarDateCandidate) bool {
+	for _, existing := range candidates {
+		if candidate.Start < existing.End && candidate.End > existing.Start {
+			return true
+		}
+	}
+	return false
+}
+
+func calendarDateRangeEnd(text string, start calendarDateCandidate, candidates []calendarDateCandidate) (time.Time, string, int, bool) {
+	for _, candidate := range candidates {
+		if candidate.Start-start.End > 40 {
+			return time.Time{}, "", 0, false
+		}
+		between := strings.TrimSpace(text[start.End:candidate.Start])
+		if !calendarRangeJoinRE.MatchString(between) {
+			continue
+		}
+		endDate := time.Date(candidate.Date.Year(), candidate.Date.Month(), candidate.Date.Day(), 0, 0, 0, 0, time.Local)
+		startDate := time.Date(start.Date.Year(), start.Date.Month(), start.Date.Day(), 0, 0, 0, 0, time.Local)
+		if !endDate.Before(startDate) {
+			return candidate.Date, strings.TrimSpace(text[start.Start:candidate.End]), candidate.Start, true
+		}
+	}
+	return time.Time{}, "", 0, false
+}
+
+func calendarLinkTriggers(dateText, rangeText string) []string {
+	if rangeText == "" {
+		return []string{dateText}
+	}
+	return []string{dateText, rangeText}
+}
+
+func parseBodyCalendarDate(text string, reference time.Time) (time.Time, bool) {
 	clean := strings.TrimSuffix(strings.TrimSpace(text), "*")
 	clean = calendarOrdinalRE.ReplaceAllString(clean, "$1")
 	fields := strings.Fields(clean)
@@ -96,7 +229,79 @@ func parseBodyCalendarDate(text string) (time.Time, bool) {
 			}
 		}
 	}
+
+	year := time.Now().In(time.Local).Year()
+	if !reference.IsZero() {
+		year = reference.In(time.Local).Year()
+	}
+	noYearLayouts := []string{"Monday 2 January", "Mon 2 January", "2 January", "Monday 2 Jan", "Mon 2 Jan", "2 Jan"}
+	for _, layout := range noYearLayouts {
+		t, err := time.ParseInLocation(layout, clean, time.Local)
+		if err != nil {
+			continue
+		}
+		t = time.Date(year, t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+		if !reference.IsZero() {
+			refDay := time.Date(reference.In(time.Local).Year(), reference.In(time.Local).Month(), reference.In(time.Local).Day(), 0, 0, 0, 0, time.Local)
+			if t.Before(refDay.AddDate(0, 0, -1)) {
+				t = t.AddDate(1, 0, 0)
+			}
+		}
+		return t, true
+	}
+	if len(fields) > 2 {
+		withoutWeekday := strings.Join(fields[1:], " ")
+		for _, layout := range []string{"2 January", "2 Jan"} {
+			t, err := time.ParseInLocation(layout, withoutWeekday, time.Local)
+			if err != nil {
+				continue
+			}
+			t = time.Date(year, t.Month(), t.Day(), 0, 0, 0, 0, time.Local)
+			if !reference.IsZero() {
+				refDay := time.Date(reference.In(time.Local).Year(), reference.In(time.Local).Month(), reference.In(time.Local).Day(), 0, 0, 0, 0, time.Local)
+				if t.Before(refDay.AddDate(0, 0, -1)) {
+					t = t.AddDate(1, 0, 0)
+				}
+			}
+			return t, true
+		}
+	}
 	return time.Time{}, false
+}
+
+func parseBodyCalendarTime(date time.Time, text string) (time.Time, time.Time, string, bool) {
+	if match := calendarTimeRangeRE.FindStringSubmatchIndex(text); match != nil {
+		start, end, ok := parseBodyCalendarRange(date, text, match)
+		return start, end, text[match[0]:match[1]], ok
+	}
+	if match := calendarSingleTimeRE.FindStringSubmatchIndex(text); match != nil {
+		start, end, ok := parseBodyCalendarSingleTime(date, text, match)
+		return start, end, text[match[0]:match[1]], ok
+	}
+	return time.Time{}, time.Time{}, "", false
+}
+
+func calendarDateOnlyContext(text string, match []int) bool {
+	beforeStart := max(0, match[0]-90)
+	afterEnd := min(len(text), match[1]+60)
+	context := strings.ToLower(text[beforeStart:afterEnd])
+	keywords := []string{
+		"appointment",
+		"booking",
+		"deadline",
+		"due",
+		"expires",
+		"expiry",
+		"renew",
+		"renewal",
+		"valid until",
+	}
+	for _, keyword := range keywords {
+		if strings.Contains(context, keyword) {
+			return true
+		}
+	}
+	return false
 }
 
 func parseBodyCalendarRange(date time.Time, text string, match []int) (time.Time, time.Time, bool) {
@@ -116,9 +321,18 @@ func parseBodyCalendarRange(date time.Time, text string, match []int) (time.Time
 	return start, end, true
 }
 
+func parseBodyCalendarSingleTime(date time.Time, text string, match []int) (time.Time, time.Time, bool) {
+	hour, minute, ok := parseBodyClock(text[match[2]:match[3]], submatchText(text, match[4], match[5]), submatchText(text, match[6], match[7]))
+	if !ok {
+		return time.Time{}, time.Time{}, false
+	}
+	start := time.Date(date.Year(), date.Month(), date.Day(), hour, minute, 0, 0, time.Local)
+	return start, start.Add(time.Hour), true
+}
+
 func parseBodyClock(hourText, minuteText, meridiem string) (int, int, bool) {
 	hour, err := strconv.Atoi(hourText)
-	if err != nil || hour < 1 || hour > 12 {
+	if err != nil {
 		return 0, 0, false
 	}
 	minute := 0
@@ -129,11 +343,21 @@ func parseBodyClock(hourText, minuteText, meridiem string) (int, int, bool) {
 		}
 	}
 	switch strings.ToLower(meridiem) {
+	case "":
+		if hour < 0 || hour > 23 {
+			return 0, 0, false
+		}
 	case "am":
+		if hour < 1 || hour > 12 {
+			return 0, 0, false
+		}
 		if hour == 12 {
 			hour = 0
 		}
 	case "pm":
+		if hour < 1 || hour > 12 {
+			return 0, 0, false
+		}
 		if hour != 12 {
 			hour += 12
 		}
@@ -221,7 +445,7 @@ func nextCalendarTrigger(text string, events []calendarLinkEvent) (int, string, 
 				continue
 			}
 			idx := strings.Index(text, trigger)
-			if idx >= 0 && idx < bestIdx {
+			if idx >= 0 && (idx < bestIdx || idx == bestIdx && len(trigger) > len(bestTrigger)) {
 				bestIdx = idx
 				bestTrigger = trigger
 				bestEvent = event
@@ -291,8 +515,13 @@ func renderCalendarEventICS(event calendarLinkEvent) string {
 	b.WriteString("BEGIN:VEVENT\r\n")
 	b.WriteString("UID:" + uid + "\r\n")
 	b.WriteString("DTSTAMP:" + now + "\r\n")
-	b.WriteString("DTSTART:" + event.Start.Format("20060102T150405") + "\r\n")
-	b.WriteString("DTEND:" + event.End.Format("20060102T150405") + "\r\n")
+	if event.AllDay {
+		b.WriteString("DTSTART;VALUE=DATE:" + event.Start.Format("20060102") + "\r\n")
+		b.WriteString("DTEND;VALUE=DATE:" + event.End.Format("20060102") + "\r\n")
+	} else {
+		b.WriteString("DTSTART:" + event.Start.Format("20060102T150405") + "\r\n")
+		b.WriteString("DTEND:" + event.End.Format("20060102T150405") + "\r\n")
+	}
 	b.WriteString("SUMMARY:" + escapeCalendarEventText(event.Summary) + "\r\n")
 	if event.Source != "" && event.Source != event.Summary {
 		b.WriteString("DESCRIPTION:" + escapeCalendarEventText(event.Source) + "\r\n")
