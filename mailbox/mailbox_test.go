@@ -1375,6 +1375,50 @@ func TestLoadConversation_DraftsEmptyBodyNoPanic(t *testing.T) {
 	// If we got here without panicking, the guards held.
 }
 
+func TestLoadConversationAsyncFetchUsesThreadSnapshot(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}})
+	now := time.Now()
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "thread-1",
+		Subject: "shrinking thread",
+		Date:    now,
+		Messages: []provider.Message{
+			{ID: "m1", Subject: "one", Date: now.Add(-time.Minute)},
+			{ID: "m2", Subject: "two", Date: now},
+		},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@example.com")
+	started := make(chan string, 2)
+	release := make(chan struct{})
+	mb.messageFetcher = func(id string) (provider.Message, error) {
+		started <- id
+		<-release
+		return provider.Message{ID: id, TextBody: "body " + id}, nil
+	}
+	updated := make(chan struct{}, 1)
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+	mb.LoadConversation(0, func() { updated <- struct{}{} })
+
+	if got := <-started; got != "m1" {
+		t.Fatalf("first fetched id = %q, want m1", got)
+	}
+	mb.threads[0].Messages = mb.threads[0].Messages[:1]
+	close(release)
+
+	select {
+	case <-updated:
+	case <-time.After(time.Second):
+		t.Fatal("async conversation fetch did not complete")
+	}
+}
+
 // When the active folder is Drafts, LoadThreads must project from the
 // drafts table — not from the stale threads-table snapshot. This is the
 // fix for the "edit a draft, reopen, see old version" bug: local saves

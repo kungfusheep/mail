@@ -22,6 +22,7 @@ import (
 	"github.com/kungfusheep/mail/mailruntime"
 	"github.com/kungfusheep/mail/omnibox"
 	"github.com/kungfusheep/mail/senderid"
+	"github.com/kungfusheep/mail/settings"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
@@ -49,7 +50,20 @@ func main() {
 	}
 	log.Println("starting mail")
 
-	themet := theme.Dark()
+	userSettings, err := settings.Load()
+	if err != nil {
+		log.Printf("settings: load failed: %v", err)
+	}
+	themeName := userSettings.Theme
+	if themeName == "" {
+		themeName = "dark"
+	}
+	themet, ok := theme.ByName(themeName)
+	if !ok {
+		log.Printf("settings: unknown theme %q, using dark", themeName)
+		themeName = "dark"
+		themet = theme.Dark()
+	}
 
 	app := NewApp()
 	app.SetDefaultStyle(Style{FG: themet.FG, BG: themet.BG})
@@ -112,7 +126,7 @@ func main() {
 		State: mb,
 		Theme: t,
 	})
-	model.ThemeName = "dark"
+	model.ThemeName = themeName
 	mb.SetNotifiers(model.Notify, model.NotifyError)
 
 	// continuous frame requests for time-based animation
@@ -151,7 +165,17 @@ func main() {
 			model.ApplyTheme(palette)
 			composeTransition.SetColors(palette.BG, Hex(0x3a3a3a))
 			editor.SetTheme(theme.ComposeTheme(palette))
+			if model.Compose.ApplyTheme != nil {
+				model.Compose.ApplyTheme(palette)
+			}
 			app.RequestRender()
+		},
+		SaveTheme: func(name string) {
+			userSettings.Theme = name
+			if err := settings.Save(userSettings); err != nil {
+				log.Printf("settings: save theme %q failed: %v", name, err)
+				model.NotifyError("settings save failed")
+			}
 		},
 	})
 

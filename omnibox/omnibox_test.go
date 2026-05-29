@@ -36,6 +36,7 @@ func TestThemePickerPreviewsRevertsAndCommits(t *testing.T) {
 		Theme: theme.Dark(),
 	})
 	applied := []string{}
+	saved := []string{}
 	box := New(Config{
 		App:   model.App,
 		Theme: theme.Dark(),
@@ -44,6 +45,9 @@ func TestThemePickerPreviewsRevertsAndCommits(t *testing.T) {
 			model.ThemeName = name
 			model.ApplyTheme(palette)
 			applied = append(applied, name)
+		},
+		SaveTheme: func(name string) {
+			saved = append(saved, name)
 		},
 	})
 	box.View()
@@ -61,6 +65,9 @@ func TestThemePickerPreviewsRevertsAndCommits(t *testing.T) {
 	if last(applied) != "dark" || model.ThemeName != "dark" {
 		t.Fatalf("theme picker cancel left theme = %q/%q, want dark", last(applied), model.ThemeName)
 	}
+	if len(saved) != 0 {
+		t.Fatalf("theme picker saved on preview/cancel = %#v, want none", saved)
+	}
 
 	box.OpenThemePicker()
 	renderOmnibox(box)
@@ -68,6 +75,9 @@ func TestThemePickerPreviewsRevertsAndCommits(t *testing.T) {
 	box.exec()
 	if last(applied) != "light" || model.ThemeName != "light" {
 		t.Fatalf("theme picker commit left theme = %q/%q, want light", last(applied), model.ThemeName)
+	}
+	if last(saved) != "light" {
+		t.Fatalf("theme picker saved = %#v, want light", saved)
 	}
 }
 

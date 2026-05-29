@@ -148,7 +148,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	var fieldTo, fieldCC, fieldSubject InputState
 	var fieldFocus FocusGroup
 	var focused bool
-	labelTo, labelCC, labelSub := palette.Muted, palette.Muted, palette.Muted
+	labelFrom, labelTo, labelCC, labelSub := palette.Muted, palette.Muted, palette.Muted, palette.Muted
 	var toFieldRef, ccFieldRef NodeRef
 	var contactResults []string
 	var contactSel int
@@ -168,6 +168,25 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 	var draftTouched bool
 
 	var pendingCursorShow bool
+
+	syncLabels := func() {
+		labelFrom = palette.Muted
+		for i, l := range []*Color{&labelTo, &labelCC, &labelSub} {
+			if focused && fieldFocus.Current == i {
+				*l = palette.Bright
+			} else {
+				*l = palette.Muted
+			}
+		}
+	}
+
+	applyPalette := func(next theme.Theme) {
+		palette = next
+		ed.SetTheme(theme.ComposeTheme(palette))
+		inlineEd.SetTheme(theme.ComposeTheme(palette))
+		syncLabels()
+		app.RequestRender()
+	}
 
 	setHeaderFields := func(nextTo, nextCC, nextSubject string) {
 		to = nextTo
@@ -391,8 +410,8 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 				SpaceH(1),
 				HBox(Space(), VBox.Width(64)(
 					HBox.Gap(1)(
-						Text("FROM").FG(palette.Muted),
-						Text(mb.Email()).Dim(),
+						Text("FROM").FG(&labelFrom),
+						Text(mb.Email()).FG(&palette.Subtle),
 					),
 					HBox.Gap(1).NodeRef(&toFieldRef)(
 						Text("TO").FG(&labelTo),
@@ -585,6 +604,8 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		})
 	}
 
+	var demoteFullReply func()
+
 	if router, ok := app.ViewRouter("compose"); ok {
 		exitCompose := func() {
 			if draftSaveTimer != nil {
@@ -609,17 +630,6 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		})
 
 		fieldStates := []*InputState{&fieldTo, &fieldCC, &fieldSubject}
-		labels := []*Color{&labelTo, &labelCC, &labelSub}
-
-		syncLabels := func() {
-			for i, l := range labels {
-				if focused && fieldFocus.Current == i {
-					*l = palette.Bright
-				} else {
-					*l = palette.Muted
-				}
-			}
-		}
 
 		var lastContactQuery string
 
@@ -766,6 +776,8 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 				send()
 			}
 		})
+		router.Handle("<C-o>", func(_ riffkey.Match) { demoteFullReply() })
+		router.Handle(":inline<CR>", func(_ riffkey.Match) { demoteFullReply() })
 		router.Handle(":attach<CR>", func(_ riffkey.Match) {
 			attachPath = ""
 			app.HideCursor()
@@ -826,6 +838,9 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		app.RequestRender()
 	}
 
+	var enterInlineInsert func()
+	var pushInlineRouter func()
+
 	promoteInlineReply := func() {
 		if !inlineActive {
 			return
@@ -844,7 +859,30 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		app.Go("compose")
 	}
 
-	enterInlineInsert := func() {
+	demoteFullReply = func() {
+		if !composeActive || replyMsg == nil {
+			return
+		}
+		if inlineRouterActive {
+			app.Pop()
+			inlineRouterActive = false
+		}
+		inlineEd.LoadMarkdown(ed.Markdown())
+		inlineEd.SetTypewriterMode(false)
+		ed.Layer().HideCursor()
+		composeActive = false
+		inlineActive = true
+		pendingCursorShow = false
+		pushInlineRouter()
+		inlineEd.EnterInsert()
+		enterInlineInsert()
+		inlineEd.UpdateDisplay()
+		syncInlineCursor()
+		app.Go("main")
+		app.RequestRender()
+	}
+
+	enterInlineInsert = func() {
 		compose.RegisterInsertMode(app, inlineEd, func() {
 			syncInlineCursor()
 			scheduleDraftSave()
@@ -852,7 +890,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		})
 	}
 
-	pushInlineRouter := func() {
+	pushInlineRouter = func() {
 		if inlineRouterActive {
 			return
 		}
@@ -945,13 +983,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 
 			setHeaderFields(lastMsg.From.String(), "", replySubject(lastMsg.Subject))
-
-			body := lastMsg.TextBody
-			if body == "" && lastMsg.HTMLBody != "" {
-				body = lastMsg.HTMLBody
-			}
-			doc := quotedDocument(body)
-			ed.ResetDocument(doc)
+			ed.ResetEmpty()
 		},
 		SetupReplyAll: func(thread provider.Thread) {
 			currentDraftID = thread.ID
@@ -964,13 +996,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 
 			replyTo, replyCC := replyAllHeaders(lastMsg, mb.Email())
 			setHeaderFields(replyTo, replyCC, replySubject(lastMsg.Subject))
-
-			body := lastMsg.TextBody
-			if body == "" && lastMsg.HTMLBody != "" {
-				body = lastMsg.HTMLBody
-			}
-			doc := quotedDocument(body)
-			ed.ResetDocument(doc)
+			ed.ResetEmpty()
 		},
 		SetupForward: func(thread provider.Thread) {
 			lastMsg := thread.Messages[len(thread.Messages)-1]
@@ -980,6 +1006,8 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			ed.ResetDocument(doc)
 		},
 		OpenInlineReply: setupInlineReply,
+		ToggleInline:    demoteFullReply,
+		ApplyTheme:      applyPalette,
 		InlineView: func(previewRef *NodeRef) Component {
 			return If(&inlineActive).Then(
 				Overlay.OnTop(previewRef)(

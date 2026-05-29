@@ -101,6 +101,81 @@ func TestSetupReplyPreservesExistingDraftHeaders(t *testing.T) {
 	}
 }
 
+func TestSetupReplyStartsWithBlankBody(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(compose.NewDocument(), "")
+	controls := Setup(
+		app,
+		ed,
+		mailbox.NewState(db, "me@example.test"),
+		nil,
+		db,
+		func(string) {},
+		new(int),
+		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
+		palette,
+	)
+
+	controls.SetupReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:       "message-1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject:  "Hello",
+			TextBody: "original message should not be inserted",
+		}},
+	})
+
+	if got := ed.Markdown(); strings.Contains(got, "original message") {
+		t.Fatalf("reply editor body contains original message:\n%s", got)
+	}
+}
+
+func TestSetupReplyAllStartsWithBlankBody(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(compose.NewDocument(), "")
+	controls := Setup(
+		app,
+		ed,
+		mailbox.NewState(db, "me@example.test"),
+		nil,
+		db,
+		func(string) {},
+		new(int),
+		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
+		palette,
+	)
+
+	controls.SetupReplyAll(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:       "message-1",
+			From:     provider.Address{Name: "Alice", Email: "alice@example.com"},
+			To:       []provider.Address{{Email: "me@example.test"}},
+			Subject:  "Hello",
+			TextBody: "original message should not be inserted",
+		}},
+	})
+
+	if got := ed.Markdown(); strings.Contains(got, "original message") {
+		t.Fatalf("reply-all editor body contains original message:\n%s", got)
+	}
+}
+
 func TestReplySubject(t *testing.T) {
 	if got := replySubject("Leica Q343"); got != "Re: Leica Q343" {
 		t.Fatalf("replySubject = %q", got)
@@ -287,9 +362,99 @@ func TestInlineReplyCursorComesFromOverlayLayer(t *testing.T) {
 	}
 }
 
+func TestComposeControlsApplyThemeUpdatesInlineReplyChrome(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	_, controls := setupTestComposeApp(t, db)
+	controls.OpenInlineReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:      "message-1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "Hello",
+		}},
+	})
+	controls.ApplyTheme(theme.Light())
+
+	ref := NodeRef{X: 0, Y: 0, W: 90, H: 24}
+	buf := NewBuffer(100, 30)
+	Build(VBox(controls.InlineView(&ref))).Execute(buf, 100, 30)
+
+	x, y := findText(buf, "reply")
+	if x < 0 {
+		t.Fatalf("inline reply overlay missing title:\n%s", buf.String())
+	}
+	if got := buf.Get(x, y).Style.FG; got != theme.Light().Bright {
+		t.Fatalf("reply title fg = %v, want light bright %v\n%s", got, theme.Light().Bright, buf.String())
+	}
+}
+
+func TestFullReplyCanToggleBackToInlineReply(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(compose.NewDocument(), "")
+	controls := Setup(
+		app,
+		ed,
+		mailbox.NewState(db, "me@example.test"),
+		nil,
+		db,
+		func(string) {},
+		new(int),
+		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
+		palette,
+	)
+	controls.Open()
+	controls.SetupReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:      "message-1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "Hello",
+		}},
+	})
+	ed.LoadMarkdown("draft reply body")
+
+	controls.ToggleInline()
+
+	ref := NodeRef{X: 0, Y: 0, W: 90, H: 24}
+	buf := NewBuffer(100, 30)
+	Build(VBox(controls.InlineView(&ref))).Execute(buf, 100, 30)
+
+	out := buf.String()
+	if !strings.Contains(out, "reply") {
+		t.Fatalf("inline reply did not render after full-compose toggle:\n%s", out)
+	}
+	if !strings.Contains(out, "Alice <alice@example.com>") {
+		t.Fatalf("inline reply lost recipient after full-compose toggle:\n%s", out)
+	}
+}
+
 func setupTestCompose(t *testing.T, db *cache.Cache) mailbox.ComposeControls {
 	_, controls := setupTestComposeApp(t, db)
 	return controls
+}
+
+func findText(buf *Buffer, text string) (int, int) {
+	for y := 0; y < buf.Height(); y++ {
+		line := buf.GetLine(y)
+		for x := 0; x+len(text) <= len(line); x++ {
+			if line[x:x+len(text)] == text {
+				return x, y
+			}
+		}
+	}
+	return -1, -1
 }
 
 func setupTestComposeApp(t *testing.T, db *cache.Cache) (*App, mailbox.ComposeControls) {

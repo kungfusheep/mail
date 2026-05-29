@@ -13,6 +13,7 @@ type Config struct {
 	Theme      theme.Theme
 	Model      *mailbox.UI
 	ApplyTheme func(name string, palette theme.Theme)
+	SaveTheme  func(name string)
 }
 
 type OmniBox struct {
@@ -382,6 +383,9 @@ func (b *OmniBox) themeCommand(named theme.NamedTheme) command {
 		},
 		Action: func() {
 			b.applyTheme(named.Name, named.Palette)
+			if b.cfg.SaveTheme != nil {
+				b.cfg.SaveTheme(named.Name)
+			}
 		},
 	}
 }

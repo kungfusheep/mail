@@ -34,6 +34,8 @@ type ComposeControls struct {
 	SetupForward    func(provider.Thread)
 	OpenInlineReply func(provider.Thread)
 	InlineView      func(*glyph.NodeRef) glyph.Component
+	ToggleInline    func()
+	ApplyTheme      func(theme.Theme)
 	ResumeLast      func()
 	ResumeDraft     func(threadID string)
 }

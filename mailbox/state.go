@@ -1180,7 +1180,8 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 	// Also avoids corrupting the threads table via the PutThread call
 	// below with a synthesised drafts projection.
 	if len(needFetch) > 0 && (m.imap != nil || m.messageFetcher != nil) && onUpdate != nil && m.ActiveFolderCanonical() != "Drafts" {
-		thread := t
+		thread := *t
+		thread.Messages = append([]provider.Message(nil), t.Messages...)
 		folder := m.ActiveFolderID()
 		targets := append([]int(nil), needFetch...)
 		go func() {
@@ -1192,6 +1193,9 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 			}
 			changed := false
 			for _, i := range targets {
+				if i < 0 || i >= len(thread.Messages) {
+					continue
+				}
 				full, err := m.fetchMessage(thread.Messages[i].ID)
 				if err != nil {
 					log.Printf("conversation: fetch message %s: %v", thread.Messages[i].ID, err)
@@ -1210,7 +1214,7 @@ func (m *State) LoadConversation(sel int, onUpdate func()) {
 				return
 			}
 			if m.cache != nil {
-				m.cache.PutThread(*thread)
+				m.cache.PutThread(thread)
 			}
 			// Write back under the same lock, and only if our render is
 			// still current. A later LoadConversation (folder switch,
