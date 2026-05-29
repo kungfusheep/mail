@@ -131,10 +131,11 @@ func quotedDocument(body string) *compose.Document {
 	return doc
 }
 
-func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme) mailbox.ComposeControls {
+func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme, signature string) mailbox.ComposeControls {
 	if notify == nil {
 		notify = func(string) {}
 	}
+	signature = strings.TrimRight(signature, "\r\n")
 	inlineEd := compose.NewEditor(compose.NewDocument(), "")
 	inlineEd.SetTheme(theme.ComposeTheme(palette))
 	inlineEd.SetApp(app)
@@ -249,6 +250,25 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		ed.ResetEmpty()
 		currentDraftID = ""
 		draftTouched = false
+	}
+
+	resetWithSignature := func(target *compose.Editor) {
+		if signature == "" {
+			target.ResetEmpty()
+			return
+		}
+		target.LoadMarkdown(signature)
+	}
+
+	signedBody := func(body string) string {
+		body = strings.TrimLeft(body, "\r\n")
+		if signature == "" {
+			return body
+		}
+		if body == "" {
+			return signature
+		}
+		return signature + "\n\n" + body
 	}
 
 	activeEditor := func() *compose.Editor {
@@ -941,7 +961,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 		} else {
 			setHeaderFields(lastMsg.From.String(), "", replySubject(lastMsg.Subject))
-			inlineEd.ResetEmpty()
+			resetWithSignature(inlineEd)
 		}
 
 		inlineEd.SetTypewriterMode(false)
@@ -964,6 +984,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 				return
 			}
 			currentDraftID = id
+			resetWithSignature(ed)
 			ed.SetTypewriterMode(true)
 			composeActive = true
 			pendingCursorShow = true
@@ -983,7 +1004,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 
 			setHeaderFields(lastMsg.From.String(), "", replySubject(lastMsg.Subject))
-			ed.ResetEmpty()
+			resetWithSignature(ed)
 		},
 		SetupReplyAll: func(thread provider.Thread) {
 			currentDraftID = thread.ID
@@ -996,13 +1017,13 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 
 			replyTo, replyCC := replyAllHeaders(lastMsg, mb.Email())
 			setHeaderFields(replyTo, replyCC, replySubject(lastMsg.Subject))
-			ed.ResetEmpty()
+			resetWithSignature(ed)
 		},
 		SetupForward: func(thread provider.Thread) {
 			lastMsg := thread.Messages[len(thread.Messages)-1]
 			replyMsg = nil
 			setHeaderFields("", "", forwardSubject(lastMsg.Subject))
-			doc := quotedDocument(forwardedBody(lastMsg))
+			doc := quotedDocument(signedBody(forwardedBody(lastMsg)))
 			ed.ResetDocument(doc)
 		},
 		OpenInlineReply: setupInlineReply,

@@ -8,7 +8,8 @@ import (
 )
 
 type Settings struct {
-	Theme string `json:"theme,omitempty"`
+	Theme     string `json:"theme,omitempty"`
+	Signature string `json:"signature,omitempty"`
 }
 
 func Load() (Settings, error) {

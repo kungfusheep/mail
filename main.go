@@ -152,7 +152,7 @@ func main() {
 	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := composeview.Setup(app, editor, mb, smtpClient, db, model.NotifyCompose, &model.Frame, composeTransition, t)
+	comp := composeview.Setup(app, editor, mb, smtpClient, db, model.NotifyCompose, &model.Frame, composeTransition, t, userSettings.Signature)
 	model.SetCompose(comp)
 
 	var rt *mailruntime.Runtime

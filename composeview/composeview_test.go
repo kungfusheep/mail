@@ -121,6 +121,7 @@ func TestSetupReplyStartsWithBlankBody(t *testing.T) {
 		new(int),
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
+		"",
 	)
 
 	controls.SetupReply(provider.Thread{
@@ -158,6 +159,7 @@ func TestSetupReplyAllStartsWithBlankBody(t *testing.T) {
 		new(int),
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
+		"",
 	)
 
 	controls.SetupReplyAll(provider.Thread{
@@ -173,6 +175,86 @@ func TestSetupReplyAllStartsWithBlankBody(t *testing.T) {
 
 	if got := ed.Markdown(); strings.Contains(got, "original message") {
 		t.Fatalf("reply-all editor body contains original message:\n%s", got)
+	}
+}
+
+func TestComposeSignatureSeedsNewDrafts(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(compose.NewDocument(), "")
+	controls := Setup(
+		app,
+		ed,
+		mailbox.NewState(db, "me@example.test"),
+		nil,
+		db,
+		func(string) {},
+		new(int),
+		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
+		palette,
+		"Pete Griffiths",
+	)
+
+	controls.Open()
+
+	if got := ed.Markdown(); !strings.Contains(got, "Pete Griffiths") {
+		t.Fatalf("new compose body = %q, want configured signature", got)
+	}
+}
+
+func TestComposeSignatureDoesNotOverwriteExistingReplyDraft(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+
+	if err := db.PutDraft(cache.Draft{
+		ThreadID: "thread-1",
+		To:       "alice@example.com",
+		Subject:  "Re: Hello",
+		Body:     "existing reply body",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(compose.NewDocument(), "")
+	controls := Setup(
+		app,
+		ed,
+		mailbox.NewState(db, "me@example.test"),
+		nil,
+		db,
+		func(string) {},
+		new(int),
+		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
+		palette,
+		"Pete Griffiths",
+	)
+
+	controls.SetupReply(provider.Thread{
+		ID: "thread-1",
+		Messages: []provider.Message{{
+			ID:      "message-1",
+			From:    provider.Address{Name: "Alice", Email: "alice@example.com"},
+			Subject: "Hello",
+		}},
+	})
+
+	got := ed.Markdown()
+	if !strings.Contains(got, "existing reply body") {
+		t.Fatalf("reply draft body = %q, want existing body", got)
+	}
+	if strings.Contains(got, "Pete Griffiths") {
+		t.Fatalf("reply draft body = %q, existing draft should not gain duplicate signature", got)
 	}
 }
 
@@ -413,6 +495,7 @@ func TestFullReplyCanToggleBackToInlineReply(t *testing.T) {
 		new(int),
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
+		"",
 	)
 	controls.Open()
 	controls.SetupReply(provider.Thread{
@@ -473,5 +556,6 @@ func setupTestComposeApp(t *testing.T, db *cache.Cache) (*App, mailbox.ComposeCo
 		new(int),
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
+		"",
 	)
 }

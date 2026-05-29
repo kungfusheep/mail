@@ -21,7 +21,7 @@ func TestLoadMissingSettingsReturnsEmpty(t *testing.T) {
 func TestSaveAndLoadSettings(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "mail", "settings.json")
 
-	if err := SaveAt(path, Settings{Theme: "mfd-flir-fusion"}); err != nil {
+	if err := SaveAt(path, Settings{Theme: "mfd-flir-fusion", Signature: "Pete"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := LoadAt(path)
@@ -30,6 +30,9 @@ func TestSaveAndLoadSettings(t *testing.T) {
 	}
 	if got.Theme != "mfd-flir-fusion" {
 		t.Fatalf("theme = %q, want mfd-flir-fusion", got.Theme)
+	}
+	if got.Signature != "Pete" {
+		t.Fatalf("signature = %q, want Pete", got.Signature)
 	}
 	info, err := os.Stat(path)
 	if err != nil {
