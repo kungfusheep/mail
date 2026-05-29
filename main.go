@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/url"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -485,10 +486,11 @@ func main() {
 		Backend: !offline,
 		IMAP:    cfg,
 	}, mailruntime.Callbacks{
-		Status:         model.NotifyRuntime,
-		FoldersChanged: model.FoldersChanged,
-		ThreadsChanged: model.QueueThreadsChanged,
-		Render:         app.RequestRender,
+		Status:            model.NotifyRuntime,
+		FoldersChanged:    model.FoldersChanged,
+		ThreadsChanged:    model.QueueThreadsChanged,
+		Render:            app.RequestRender,
+		DesktopNotifyMail: desktopMailNotification,
 	})
 	model.SetRuntime(rt.WatchActiveFolder, rt.SyncActiveFolder)
 	rt.Start()
@@ -519,6 +521,26 @@ func notificationRow(item *ui.Notification, model *mailbox.UI) Component {
 		),
 		Text(&item.Text).FG(&model.Bright),
 	)
+}
+
+func desktopMailNotification(title, body string) {
+	if title == "" {
+		title = "New email"
+	}
+	script := fmt.Sprintf(
+		`display notification %s with title %s`,
+		appleScriptString(body),
+		appleScriptString(title),
+	)
+	if err := exec.Command("osascript", "-e", script).Start(); err != nil {
+		log.Printf("desktop notification failed: %v", err)
+	}
+}
+
+func appleScriptString(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, `"`, `\"`)
+	return `"` + s + `"`
 }
 
 func runCacheCommand(args []string) error {

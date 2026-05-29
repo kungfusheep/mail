@@ -75,6 +75,90 @@ func TestRuntimeOfflineSyncRefreshesCacheProjection(t *testing.T) {
 	}
 }
 
+func TestRuntimeDesktopNotificationsOnlyForNewInboxThreads(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := db.PutFolders([]provider.Folder{{ID: "INBOX", Name: "INBOX"}}); err != nil {
+		t.Fatal(err)
+	}
+	existing := provider.Thread{
+		ID:      "old",
+		Subject: "already cached",
+		Date:    time.Date(2026, 5, 29, 8, 0, 0, 0, time.UTC),
+		Messages: []provider.Message{{
+			ID:      "old-msg",
+			Subject: "already cached",
+			From:    provider.Address{Name: "Old Sender", Email: "old@example.test"},
+		}},
+	}
+	if err := db.ReplaceThreads("INBOX", []provider.Thread{existing}); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := mailbox.NewState(db, "me@example.test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+
+	type notice struct {
+		title string
+		body  string
+	}
+	notices := make(chan notice, 2)
+	rt := New(db, mb, Config{}, Callbacks{
+		DesktopNotifyMail: func(title, body string) {
+			notices <- notice{title: title, body: body}
+		},
+	})
+	rt.Start()
+	t.Cleanup(rt.Close)
+
+	select {
+	case got := <-notices:
+		t.Fatalf("unexpected startup notification: %#v", got)
+	case <-time.After(30 * time.Millisecond):
+	}
+
+	newThread := provider.Thread{
+		ID:      "new",
+		Subject: "fresh invoice",
+		Date:    time.Date(2026, 5, 29, 9, 0, 0, 0, time.UTC),
+		Messages: []provider.Message{{
+			ID:      "new-msg",
+			Subject: "fresh invoice",
+			From:    provider.Address{Name: "Acme Billing", Email: "billing@example.test"},
+		}},
+	}
+	if err := db.ReplaceThreads("INBOX", []provider.Thread{newThread, existing}); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case got := <-notices:
+		if got.title != "Acme Billing" || got.body != "fresh invoice" {
+			t.Fatalf("notification = %#v, want Acme Billing/fresh invoice", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("no desktop notification for new inbox thread")
+	}
+
+	select {
+	case got := <-notices:
+		t.Fatalf("unexpected duplicate notification: %#v", got)
+	case <-time.After(30 * time.Millisecond):
+	}
+}
+
+func TestInboxNotificationTextFallsBackCleanly(t *testing.T) {
+	title, body := inboxNotificationText(provider.Thread{})
+	if title != "new email" || body != "(no subject)" {
+		t.Fatalf("fallback notification = %q/%q, want new email/(no subject)", title, body)
+	}
+}
+
 func TestSenderIdentityFreshRequiresColourSamplingForColourlessRows(t *testing.T) {
 	now := time.Now()
 	maxAge := 14 * 24 * time.Hour

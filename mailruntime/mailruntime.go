@@ -4,12 +4,14 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/contacts"
 	"github.com/kungfusheep/mail/imap"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/mail/senderid"
 )
 
@@ -19,10 +21,11 @@ type Config struct {
 }
 
 type Callbacks struct {
-	Status         func(string)
-	FoldersChanged func()
-	ThreadsChanged func()
-	Render         func()
+	Status            func(string)
+	FoldersChanged    func()
+	ThreadsChanged    func()
+	Render            func()
+	DesktopNotifyMail func(title, body string)
 }
 
 type Runtime struct {
@@ -35,6 +38,8 @@ type Runtime struct {
 	imapClient *imap.IMAP
 	idleCancel context.CancelFunc
 	labelUnsub func()
+	inboxUnsub func()
+	knownInbox map[string]bool
 }
 
 func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime {
@@ -48,6 +53,7 @@ func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime 
 
 func (r *Runtime) Start() {
 	if !r.cfg.Backend {
+		r.watchInboxNotifications()
 		r.WatchActiveFolder()
 		go r.enrichVisibleSenders()
 		return
@@ -71,6 +77,7 @@ func (r *Runtime) Start() {
 		r.foldersChanged()
 		r.render()
 
+		r.watchInboxNotifications()
 		r.mb.SyncSent()
 		r.mb.ProcessPendingCommands()
 		r.syncActiveFolderFromBackend()
@@ -82,6 +89,14 @@ func (r *Runtime) Start() {
 }
 
 func (r *Runtime) Close() {
+	r.closeActiveFolderWatch()
+	if r.inboxUnsub != nil {
+		r.inboxUnsub()
+		r.inboxUnsub = nil
+	}
+}
+
+func (r *Runtime) closeActiveFolderWatch() {
 	if r.idleCancel != nil {
 		r.idleCancel()
 		r.idleCancel = nil
@@ -93,7 +108,7 @@ func (r *Runtime) Close() {
 }
 
 func (r *Runtime) WatchActiveFolder() {
-	r.Close()
+	r.closeActiveFolderWatch()
 
 	label := r.mb.ActiveFolderID()
 	if label == "" {
@@ -121,6 +136,75 @@ func (r *Runtime) WatchActiveFolder() {
 			log.Printf("idle %s: %v", label, err)
 		}
 	}()
+}
+
+func (r *Runtime) watchInboxNotifications() {
+	if r.db == nil || r.mb == nil || r.cb.DesktopNotifyMail == nil || r.inboxUnsub != nil {
+		return
+	}
+	label := r.mb.FolderIDByDisplayName("Inbox")
+	if label == "" {
+		return
+	}
+	r.knownInbox = r.inboxSnapshot(label)
+	ch, unsub := r.db.Subscribe(label)
+	r.inboxUnsub = unsub
+	go func() {
+		for range ch {
+			r.notifyNewInboxThreads(label)
+		}
+	}()
+}
+
+func (r *Runtime) inboxSnapshot(label string) map[string]bool {
+	known := make(map[string]bool)
+	threads, err := r.db.GetThreads(label, 250)
+	if err != nil {
+		log.Printf("desktop notifications: inbox snapshot failed: %v", err)
+		return known
+	}
+	for _, thread := range threads {
+		if thread.ID != "" {
+			known[thread.ID] = true
+		}
+	}
+	return known
+}
+
+func (r *Runtime) notifyNewInboxThreads(label string) {
+	threads, err := r.db.GetThreads(label, 250)
+	if err != nil {
+		log.Printf("desktop notifications: inbox read failed: %v", err)
+		return
+	}
+	if r.knownInbox == nil {
+		r.knownInbox = make(map[string]bool)
+	}
+	for _, thread := range threads {
+		if thread.ID == "" || r.knownInbox[thread.ID] {
+			continue
+		}
+		r.knownInbox[thread.ID] = true
+		title, body := inboxNotificationText(thread)
+		r.cb.DesktopNotifyMail(title, body)
+	}
+}
+
+func inboxNotificationText(thread provider.Thread) (string, string) {
+	from := "new email"
+	if len(thread.Messages) > 0 {
+		msg := thread.Messages[len(thread.Messages)-1]
+		if msg.From.Name != "" {
+			from = msg.From.Name
+		} else if msg.From.Email != "" {
+			from = msg.From.Email
+		}
+	}
+	subject := strings.TrimSpace(thread.Subject)
+	if subject == "" {
+		subject = "(no subject)"
+	}
+	return from, subject
 }
 
 func (r *Runtime) SyncActiveFolder() {
