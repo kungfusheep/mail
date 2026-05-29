@@ -5906,7 +5906,7 @@ func (e *Editor) PasteStyle(r Range) {
 
 		pos := 0
 		for i := range b.Runs {
-			runEnd := pos + len(b.Runs[i].Text)
+			runEnd := pos + utf8.RuneCountInString(b.Runs[i].Text)
 			if pos >= start && runEnd <= end {
 				b.Runs[i].Style = e.yankStyle
 			}

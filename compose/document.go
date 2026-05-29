@@ -216,7 +216,7 @@ func (b *Block) ApplyStyle(start, end int, style InlineStyle) {
 	// toggle style on runs within range
 	pos := 0
 	for i := range b.Runs {
-		runEnd := pos + len(b.Runs[i].Text)
+		runEnd := pos + utf8.RuneCountInString(b.Runs[i].Text)
 		if pos >= start && runEnd <= end {
 			b.Runs[i].Style = b.Runs[i].Style.Toggle(style)
 		}
@@ -236,7 +236,7 @@ func (b *Block) ClearStyle(start, end int) {
 
 	pos := 0
 	for i := range b.Runs {
-		runEnd := pos + len(b.Runs[i].Text)
+		runEnd := pos + utf8.RuneCountInString(b.Runs[i].Text)
 		if pos >= start && runEnd <= end {
 			b.Runs[i].Style = StyleNone
 		}

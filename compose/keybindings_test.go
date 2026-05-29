@@ -1,6 +1,7 @@
 package compose
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/kungfusheep/glyph"
@@ -37,6 +38,76 @@ func TestRegisterNormalModeBindsOperatorTextObjectsToProvidedRouter(t *testing.T
 	}
 	if !enteredInsert {
 		t.Fatal("ciw did not enter insert mode through the provided callback")
+	}
+}
+
+func TestRegisterNormalModeStyleTextObjectsPastFirstSentence(t *testing.T) {
+	app := glyph.NewApp()
+	doc := &Document{Blocks: []Block{
+		{Type: BlockParagraph, Runs: []Run{{Text: "First sentence. Second sentence here."}}},
+		{Type: BlockParagraph, Runs: []Run{{Text: "Third sentence lives here."}}},
+	}}
+	ed := NewEditor(doc, "")
+	ed.screenWidth = 120
+	ed.screenHeight = 40
+	ed.ToggleRawMode()
+	router := riffkey.NewRouter()
+	RegisterNormalMode(router, app, ed, func() {}, func() {})
+	input := riffkey.NewInput(router)
+
+	ed.cursor = Pos{Block: 0, Col: strings.Index(doc.Blocks[0].Text(), "Second") + len("Second ")}
+	dispatchPattern(input, "gbis")
+	if got, want := doc.Blocks[0].Text(), "First sentence. **Second sentence here.**"; got != want {
+		t.Fatalf("gbis second sentence = %q, want %q", got, want)
+	}
+
+	ed.cursor = Pos{Block: 1, Col: strings.Index(doc.Blocks[1].Text(), "lives")}
+	dispatchPattern(input, "giis")
+	if got, want := doc.Blocks[1].Text(), "*Third sentence lives here.*"; got != want {
+		t.Fatalf("giis second block = %q, want %q", got, want)
+	}
+}
+
+func TestRegisterNormalModeStyleTextObjectsAfterVisualLineNavigation(t *testing.T) {
+	app := glyph.NewApp()
+	body := "Designing a subtle ambient screen effect taught us several techniques that generalise beyond this one case. Use Braille's 2×4 sub-cell resolution to get smooth spatial gradients without needing per-pixel graphics — but remember that visually \"natural\" motion requires varying the dot PATTERN. For organic movement, layer multiple drifting light sources."
+	ed := NewEditor(ParseMarkdown(body), "")
+	ed.screenWidth = 120
+	ed.screenHeight = 40
+	ed.ToggleRawMode()
+	router := riffkey.NewRouter()
+	RegisterNormalMode(router, app, ed, func() {}, func() {})
+	input := riffkey.NewInput(router)
+
+	dispatchPattern(input, "jj")
+	if ed.cursor.Col <= strings.Index(body, "Use Braille") {
+		t.Fatalf("cursor after jj = %d, want into later visual text", ed.cursor.Col)
+	}
+
+	dispatchPattern(input, "gbis")
+	got := ed.Markdown()
+	if !strings.Contains(got, "**Use Braille's 2×4 sub-cell resolution to get smooth spatial gradients without needing per-pixel graphics — but remember that visually \"natural\" motion requires varying the dot PATTERN.**") {
+		t.Fatalf("gbis after visual navigation markdown = %q", got)
+	}
+	if strings.Contains(got, "Designing**") {
+		t.Fatalf("gbis after visual navigation corrupted first sentence: %q", got)
+	}
+}
+
+func TestRegisterNormalModeStyleTextObjectsAfterUnicodeInRichMode(t *testing.T) {
+	app := glyph.NewApp()
+	body := "First × sentence. Second sentence here."
+	ed := NewEditor(ParseMarkdown(body), "")
+	ed.screenWidth = 120
+	ed.screenHeight = 40
+	router := riffkey.NewRouter()
+	RegisterNormalMode(router, app, ed, func() {}, func() {})
+	input := riffkey.NewInput(router)
+
+	ed.cursor = Pos{Block: 0, Col: strings.Index(body, "Second") + len("Second")}
+	dispatchPattern(input, "gbis")
+	if got, want := ed.Markdown(), "First × sentence. **Second sentence here.**\n"; got != want {
+		t.Fatalf("gbis after unicode markdown = %q, want %q", got, want)
 	}
 }
 
