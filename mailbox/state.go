@@ -510,10 +510,14 @@ func (m *State) SyncSent() {
 }
 
 func (m *State) SyncThreads() error {
+	id := m.ActiveFolderID()
+	return m.SyncFolder(id)
+}
+
+func (m *State) SyncFolder(id string) error {
 	if m.imap == nil {
 		return fmt.Errorf("not connected")
 	}
-	id := m.ActiveFolderID()
 	if id == "" {
 		return nil
 	}

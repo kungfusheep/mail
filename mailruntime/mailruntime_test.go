@@ -159,6 +159,33 @@ func TestInboxNotificationTextFallsBackCleanly(t *testing.T) {
 	}
 }
 
+func TestRuntimeSkipsActiveInboxIdleWhenDedicatedInboxIdleExists(t *testing.T) {
+	db, err := cache.NewMemory()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+
+	if err := db.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	mb := mailbox.NewState(db, "me@example.test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+
+	rt := New(db, mb, Config{Backend: true}, Callbacks{})
+	rt.inboxIdleCancel = func() {}
+	if rt.shouldStartActiveIdle("INBOX") {
+		t.Fatal("active inbox idle should be skipped while dedicated inbox idle is running")
+	}
+	if !rt.shouldStartActiveIdle("[Gmail]/Sent Mail") {
+		t.Fatal("non-inbox active folder should still get its own idle watcher")
+	}
+}
+
 func TestSenderIdentityFreshRequiresColourSamplingForColourlessRows(t *testing.T) {
 	now := time.Now()
 	maxAge := 14 * 24 * time.Hour

@@ -35,11 +35,12 @@ type Runtime struct {
 	cfg Config
 	cb  Callbacks
 
-	imapClient *imap.IMAP
-	idleCancel context.CancelFunc
-	labelUnsub func()
-	inboxUnsub func()
-	knownInbox map[string]bool
+	imapClient      *imap.IMAP
+	idleCancel      context.CancelFunc
+	inboxIdleCancel context.CancelFunc
+	labelUnsub      func()
+	inboxUnsub      func()
+	knownInbox      map[string]bool
 }
 
 func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime {
@@ -78,6 +79,7 @@ func (r *Runtime) Start() {
 		r.render()
 
 		r.watchInboxNotifications()
+		r.watchInboxRealtime()
 		r.mb.SyncSent()
 		r.mb.ProcessPendingCommands()
 		r.syncActiveFolderFromBackend()
@@ -93,6 +95,10 @@ func (r *Runtime) Close() {
 	if r.inboxUnsub != nil {
 		r.inboxUnsub()
 		r.inboxUnsub = nil
+	}
+	if r.inboxIdleCancel != nil {
+		r.inboxIdleCancel()
+		r.inboxIdleCancel = nil
 	}
 }
 
@@ -123,19 +129,55 @@ func (r *Runtime) WatchActiveFolder() {
 	if !r.cfg.Backend || r.imapClient == nil {
 		return
 	}
+	if !r.shouldStartActiveIdle(label) {
+		return
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	r.idleCancel = cancel
 	go func() {
 		if err := r.imapClient.Idle(ctx, label, func() {
 			log.Printf("idle: change on %s, syncing", label)
-			if err := r.mb.SyncThreads(); err != nil {
+			if err := r.syncFolderFromBackend(label); err != nil {
 				log.Printf("idle sync: %v", err)
 			}
 		}); err != nil && ctx.Err() == nil {
 			log.Printf("idle %s: %v", label, err)
 		}
 	}()
+}
+
+func (r *Runtime) watchInboxRealtime() {
+	if !r.cfg.Backend || r.imapClient == nil || r.inboxIdleCancel != nil {
+		return
+	}
+	label := r.inboxLabel()
+	if label == "" {
+		return
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	r.inboxIdleCancel = cancel
+	go func() {
+		if err := r.imapClient.Idle(ctx, label, func() {
+			log.Printf("idle: inbox change on %s, syncing", label)
+			if err := r.syncFolderFromBackend(label); err != nil {
+				log.Printf("idle inbox sync: %v", err)
+			}
+		}); err != nil && ctx.Err() == nil {
+			log.Printf("idle inbox %s: %v", label, err)
+		}
+	}()
+}
+
+func (r *Runtime) inboxLabel() string {
+	if r.mb == nil {
+		return ""
+	}
+	return r.mb.FolderIDByDisplayName("Inbox")
+}
+
+func (r *Runtime) shouldStartActiveIdle(label string) bool {
+	return label != "" && (label != r.inboxLabel() || r.inboxIdleCancel == nil)
 }
 
 func (r *Runtime) watchInboxNotifications() {
@@ -227,7 +269,7 @@ func (r *Runtime) FlushPending() {
 
 func (r *Runtime) syncActiveFolderFromBackend() {
 	r.mb.ProcessPendingCommands()
-	if err := r.mb.SyncThreads(); err != nil {
+	if err := r.syncFolderFromBackend(r.mb.ActiveFolderID()); err != nil {
 		r.status(fmt.Sprintf("sync: %v", err))
 	} else {
 		r.status("synced")
@@ -235,6 +277,13 @@ func (r *Runtime) syncActiveFolderFromBackend() {
 	r.threadsChanged()
 	r.render()
 	go r.enrichVisibleSenders()
+}
+
+func (r *Runtime) syncFolderFromBackend(label string) error {
+	if label == "" {
+		return nil
+	}
+	return r.mb.SyncFolder(label)
 }
 
 func (r *Runtime) cacheContacts() {
