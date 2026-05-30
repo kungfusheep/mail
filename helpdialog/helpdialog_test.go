@@ -24,6 +24,23 @@ func TestMailboxHelpRowsArePresent(t *testing.T) {
 	}
 }
 
+func TestMailboxHelpIncludesCurrentMailActions(t *testing.T) {
+	want := map[string]string{
+		"spam": "mark spam",
+		"z":    "snooze",
+		"ra":   "reply all",
+		"fwd":  "forward",
+	}
+	for _, r := range mailboxActionRows {
+		if want[r.key] == r.desc {
+			delete(want, r.key)
+		}
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing help rows: %#v", want)
+	}
+}
+
 func TestMailboxBuildsComponent(t *testing.T) {
 	open := true
 	var ref glyph.NodeRef

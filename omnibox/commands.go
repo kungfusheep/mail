@@ -33,6 +33,7 @@ type commandActions struct {
 	ArchiveSelected  func()
 	DeleteSelected   func()
 	SpamSelected     func()
+	SnoozeSelected   func()
 	MoveTargets      []moveTarget
 	MoveSelectedTo   func(folderID, folderName string)
 	ToggleStar       func()
@@ -62,6 +63,7 @@ func buildCommands(actions commandActions) []command {
 		{Label: "Archive Selected Thread", Description: "move the selected thread out of inbox", Key: "a", Section: "thread", Action: actions.ArchiveSelected},
 		{Label: "Delete Selected Thread", Description: "move the selected thread to trash", Key: "d", Section: "thread", Action: actions.DeleteSelected},
 		{Label: "Move Selected Thread to Spam", Description: "move the selected thread to spam", Key: "spam", Section: "thread", Action: actions.SpamSelected},
+		{Label: "Snooze Selected Thread Until Tomorrow", Description: "move the selected thread to Snoozed until tomorrow morning", Key: "z", Section: "thread", Action: actions.SnoozeSelected},
 	}
 	for _, target := range actions.MoveTargets {
 		target := target

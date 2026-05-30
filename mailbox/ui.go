@@ -326,14 +326,9 @@ func (m *UI) LoadFolder() {
 	if m.FolderSel == m.State.CanonEnd() {
 		return
 	}
-	actualIdx := m.FolderSel
-	if m.FolderSel > m.State.CanonEnd() {
-		actualIdx = m.FolderSel - 2
-	}
-	if actualIdx >= m.State.FolderCount() {
+	if !m.State.SelectFolder(m.FolderSel) {
 		return
 	}
-	m.State.SelectFolder(actualIdx)
 	m.State.LoadThreads()
 	m.State.BuildThreadDisplay()
 	m.ThreadSel = 0
@@ -675,6 +670,16 @@ func (m *UI) Spam() {
 	m.afterThreadAction(sel)
 }
 
+func (m *UI) SnoozeTomorrow() {
+	sel := m.ThreadSel
+	m.PushUndo(m.State.Snooze(m.ThreadSel, nextSnoozeMorning(time.Now())))
+	m.afterThreadAction(sel)
+}
+
+func (m *UI) SnoozeSelected() {
+	m.ThreadAction("snooze", m.SnoozeTomorrow)
+}
+
 func (m *UI) MoveSelectedToFolder(folderID, folderName string) {
 	m.ThreadAction("move", func() {
 		sel := m.ThreadSel
@@ -793,7 +798,14 @@ func undoMessage(desc string) string {
 		return "restored " + strings.TrimPrefix(desc, "deleted ")
 	case strings.HasPrefix(desc, "archived "):
 		return "restored " + strings.TrimPrefix(desc, "archived ")
+	case strings.HasPrefix(desc, "snoozed "):
+		return "restored " + strings.TrimPrefix(desc, "snoozed ")
 	default:
 		return "undid " + desc
 	}
+}
+
+func nextSnoozeMorning(now time.Time) time.Time {
+	tomorrow := now.AddDate(0, 0, 1)
+	return time.Date(tomorrow.Year(), tomorrow.Month(), tomorrow.Day(), 9, 0, 0, 0, now.Location())
 }

@@ -330,6 +330,7 @@ func main() {
 							Key("r", model.ReplySelected),
 							Key("a", model.ArchiveSelected),
 							Key("d", model.DeleteSelected),
+							Key("z", model.SnoozeSelected),
 							Key("s", model.ToggleStarSelected),
 							Key("e", model.ToggleReadSelected),
 							Key("u", model.UndoLast),

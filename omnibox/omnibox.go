@@ -324,6 +324,9 @@ func (b *OmniBox) actions() commandActions {
 		SpamSelected: func() {
 			model.ThreadAction("spam", model.Spam)
 		},
+		SnoozeSelected: func() {
+			model.ThreadAction("snooze", model.SnoozeTomorrow)
+		},
 		MoveTargets: moveTargets,
 		MoveSelectedTo: func(folderID, folderName string) {
 			model.MoveSelectedToFolder(folderID, folderName)

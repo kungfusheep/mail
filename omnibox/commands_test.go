@@ -22,6 +22,7 @@ func TestBuildKeepsOmniboxCatalogueOrder(t *testing.T) {
 		{Label: "Archive Selected Thread", Key: "a", Section: "thread"},
 		{Label: "Delete Selected Thread", Key: "d", Section: "thread"},
 		{Label: "Move Selected Thread to Spam", Key: "spam", Section: "thread"},
+		{Label: "Snooze Selected Thread Until Tomorrow", Key: "z", Section: "thread"},
 		{Label: "Toggle Star", Key: "s", Section: "thread"},
 		{Label: "Toggle Read", Key: "e", Section: "thread"},
 		{Label: "Copy Sender Address", Key: "copy sender", Section: "message"},

@@ -145,6 +145,7 @@ type Provider interface {
 
 	// folders
 	ListFolders() ([]Folder, error)
+	CreateFolder(name string) error
 
 	// threads
 	ListThreads(opts ListOptions) (ListResult, error)

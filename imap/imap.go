@@ -159,6 +159,16 @@ func (im *IMAP) ListFolders() ([]provider.Folder, error) {
 	})
 }
 
+func (im *IMAP) CreateFolder(name string) error {
+	_, err := withRetry(im, func() (struct{}, error) {
+		if err := im.client.Create(name, nil).Wait(); err != nil {
+			return struct{}{}, err
+		}
+		return struct{}{}, nil
+	})
+	return err
+}
+
 func (im *IMAP) SelectFolder(folder string) error {
 	_, err := withRetry(im, func() (struct{}, error) {
 		_, err := im.client.Select(folder, nil).Wait()

@@ -689,6 +689,207 @@ func TestSpamMovesThreadToSpamAndQueuesUndo(t *testing.T) {
 	}
 }
 
+func TestSnoozeMovesThreadToSnoozedFolderAndUndoRestores(t *testing.T) {
+	c := testCache(t)
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Mailbox]/Snoozed", Name: "Snoozed"},
+	})
+	if err := c.ReplaceThreads("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "later",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:        "m1",
+			MessageID: "<m1@test>",
+			Subject:   "later",
+			Date:      now,
+		}},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	wake := now.Add(24 * time.Hour)
+	undo, desc := mb.Snooze(0, wake)
+	if undo == nil {
+		t.Fatal("Snooze undo = nil")
+	}
+	if !strings.Contains(desc, "snoozed") {
+		t.Fatalf("Snooze desc = %q, want snoozed", desc)
+	}
+	if got := mb.ThreadLen(); got != 0 {
+		t.Fatalf("rows after snooze = %d, want 0", got)
+	}
+	snoozed, err := c.GetThreads("[Mailbox]/Snoozed", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snoozed) != 1 || snoozed[0].ID != "t1" {
+		t.Fatalf("snoozed threads = %#v, want t1", snoozed)
+	}
+	row, found, err := c.Snooze("t1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !found || row.OriginalFolder != "INBOX" || row.SnoozedFolder != "[Mailbox]/Snoozed" || !row.WakeAt.Equal(wake) {
+		t.Fatalf("snooze row = %#v found=%v, want stored wake/folders", row, found)
+	}
+
+	undo()
+	if _, found, err := c.Snooze("t1"); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("snooze row still present after undo")
+	}
+	inbox, err := c.GetThreads("INBOX", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != "t1" {
+		t.Fatalf("inbox threads after undo = %#v, want t1", inbox)
+	}
+}
+
+func TestProcessDueSnoozesRestoresThreadAndQueuesMove(t *testing.T) {
+	c := testCache(t)
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Mailbox]/Snoozed", Name: "Snoozed"},
+	})
+	thread := provider.Thread{
+		ID:      "t1",
+		Subject: "wake up",
+		Date:    now,
+		Messages: []provider.Message{{
+			ID:        "m1",
+			MessageID: "<m1@test>",
+			Subject:   "wake up",
+			Date:      now,
+		}},
+	}
+	if err := c.ReplaceThreads("[Mailbox]/Snoozed", []provider.Thread{thread}); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.PutSnooze(cache.Snooze{
+		ThreadID:       "t1",
+		OriginalFolder: "INBOX",
+		SnoozedFolder:  "[Mailbox]/Snoozed",
+		WakeAt:         now,
+		CreatedAt:      now.Add(-time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.LoadThreads()
+	mb.BuildThreadDisplay()
+
+	if got := mb.ProcessDueSnoozes(now); got != 1 {
+		t.Fatalf("restored snoozes = %d, want 1", got)
+	}
+	if _, found, err := c.Snooze("t1"); err != nil {
+		t.Fatal(err)
+	} else if found {
+		t.Fatal("snooze row still present after due restore")
+	}
+	inbox, err := c.GetThreads("INBOX", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 1 || inbox[0].ID != "t1" {
+		t.Fatalf("inbox threads after due restore = %#v, want t1", inbox)
+	}
+	cmds, err := c.PendingCommands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cmds) != 1 || cmds[0].Action != "move" || cmds[0].Params["source"] != "[Mailbox]/Snoozed" || cmds[0].Params["folder"] != "INBOX" {
+		t.Fatalf("pending commands = %#v, want one move from Snoozed to INBOX", cmds)
+	}
+}
+
+func TestApplySyncResultAppliesLocalRules(t *testing.T) {
+	c := testCache(t)
+	now := time.Date(2026, 5, 29, 12, 0, 0, 0, time.UTC)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "Receipts", Name: "Receipts"},
+	})
+	if err := c.PutRule(cache.Rule{
+		ID:              "stripe-receipts",
+		Enabled:         true,
+		FromContains:    "stripe",
+		SubjectContains: "invoice",
+		MoveTo:          "Receipts",
+		MarkRead:        true,
+		Star:            true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	mb := NewState(c, "me@test")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(false)
+	mb.applySyncResult("INBOX", []provider.Thread{{
+		ID:      "t1",
+		Subject: "Your invoice",
+		Date:    now,
+		Unread:  1,
+		Messages: []provider.Message{{
+			ID:        "m1",
+			MessageID: "<m1@test>",
+			From:      provider.Address{Name: "Stripe", Email: "billing@stripe.com"},
+			Subject:   "Your invoice",
+			Date:      now,
+			Read:      false,
+		}},
+	}})
+
+	inbox, err := c.GetThreads("INBOX", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(inbox) != 0 {
+		t.Fatalf("inbox threads = %#v, want rule to move thread out", inbox)
+	}
+	receipts, err := c.GetThreads("Receipts", 25)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(receipts) != 1 {
+		t.Fatalf("receipt threads = %d, want 1", len(receipts))
+	}
+	if receipts[0].Unread != 0 || !receipts[0].Messages[0].Read || !receipts[0].Messages[0].Starred {
+		t.Fatalf("receipt thread = %#v, want read and starred", receipts[0])
+	}
+	cmds, err := c.PendingCommands()
+	if err != nil {
+		t.Fatal(err)
+	}
+	actions := map[string]bool{}
+	for _, cmd := range cmds {
+		actions[cmd.Action] = true
+		if cmd.Params["source"] != "INBOX" {
+			t.Fatalf("command %#v source = %q, want INBOX", cmd, cmd.Params["source"])
+		}
+	}
+	for _, action := range []string{"mark_read", "star", "move"} {
+		if !actions[action] {
+			t.Fatalf("pending actions = %#v, want %s", cmds, action)
+		}
+	}
+}
+
 func TestAttachmentMetadataFormatsKindAndSize(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -1798,6 +1999,44 @@ func TestBuildFolderDisplay_LabelsToggle(t *testing.T) {
 	mb.BuildFolderDisplay(true)
 	if mb.FolderLen() != 4 {
 		t.Errorf("open: got %d names, want 4", mb.FolderLen())
+	}
+}
+
+func TestLoadFolderUsesSelectedFolderRow(t *testing.T) {
+	c := testCache(t)
+	c.PutFolders([]provider.Folder{
+		{ID: "INBOX", Name: "INBOX"},
+		{ID: "[Gmail]/Sent Mail", Name: "Sent Mail"},
+		{ID: "MyLabel", Name: "MyLabel"},
+		{ID: "Work", Name: "Work"},
+	})
+	mb := NewState(c, "test@example.com")
+	mb.LoadFolders()
+	mb.BuildFolderDisplay(true)
+
+	model := NewUI(UIConfig{
+		App:   glyph.NewApp(),
+		Cache: c,
+		State: mb,
+		Theme: theme.Dark(),
+	})
+
+	model.FolderSel = mb.CanonEnd() + 1
+	model.LoadFolder()
+	if got := mb.ActiveFolderID(); got != "MyLabel" {
+		t.Fatalf("first label active folder = %q, want MyLabel", got)
+	}
+	if got := model.FolderTitle; got != "MyLabel" {
+		t.Fatalf("first label title = %q, want MyLabel", got)
+	}
+
+	model.FolderSel = mb.CanonEnd() + 2
+	model.LoadFolder()
+	if got := mb.ActiveFolderID(); got != "Work" {
+		t.Fatalf("second label active folder = %q, want Work", got)
+	}
+	if got := model.FolderTitle; got != "Work" {
+		t.Fatalf("second label title = %q, want Work", got)
 	}
 }
 

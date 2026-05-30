@@ -174,10 +174,12 @@ func (m *State) SyncFolders() error {
 // displayFolders is the ordered folder list used for index lookups from the view.
 // it's rebuilt each time BuildFolderDisplay is called, without mutating the source folders.
 var displayFolders []provider.Folder
+var displayFolderRows []int
 
 func (m *State) BuildFolderDisplay(labelsOpen bool) {
 	m.folderNames = nil
 	displayFolders = nil
+	displayFolderRows = nil
 
 	// collect canonical folders, dedup by display name (prefer the one with more messages)
 	type ranked struct {
@@ -223,6 +225,7 @@ func (m *State) BuildFolderDisplay(labelsOpen bool) {
 			name = fmt.Sprintf("%s (%d)", name, r.folder.Unread)
 		}
 		m.folderNames = append(m.folderNames, name)
+		displayFolderRows = append(displayFolderRows, len(displayFolders)-1)
 	}
 
 	m.canonEnd = len(m.folderNames)
@@ -233,9 +236,10 @@ func (m *State) BuildFolderDisplay(labelsOpen bool) {
 		} else {
 			m.folderNames = append(m.folderNames, "▸ Labels")
 		}
+		displayFolderRows = append(displayFolderRows, -1)
 		if labelsOpen {
-			displayFolders = append(displayFolders, custom...)
 			for _, f := range custom {
+				displayFolders = append(displayFolders, f)
 				name := f.Name
 				if f.Unread > 0 {
 					name = fmt.Sprintf("  %s (%d)", name, f.Unread)
@@ -243,22 +247,33 @@ func (m *State) BuildFolderDisplay(labelsOpen bool) {
 					name = "  " + name
 				}
 				m.folderNames = append(m.folderNames, name)
+				displayFolderRows = append(displayFolderRows, len(displayFolders)-1)
 			}
 		}
 	}
 }
 
 func (m *State) displayFolder(idx int) *provider.Folder {
-	if idx < len(displayFolders) {
-		return &displayFolders[idx]
+	if idx < 0 || idx >= len(displayFolderRows) {
+		return nil
+	}
+	folderIdx := displayFolderRows[idx]
+	if folderIdx >= 0 && folderIdx < len(displayFolders) {
+		return &displayFolders[folderIdx]
 	}
 	return nil
 }
 
-func (m *State) SelectFolder(idx int) {
-	if idx < len(displayFolders) {
-		m.active = idx
+func (m *State) SelectFolder(idx int) bool {
+	if idx < 0 || idx >= len(displayFolderRows) {
+		return false
 	}
+	folderIdx := displayFolderRows[idx]
+	if folderIdx < 0 || folderIdx >= len(displayFolders) {
+		return false
+	}
+	m.active = folderIdx
+	return true
 }
 
 func (m *State) ActiveFolderID() string {
@@ -319,8 +334,8 @@ func (m *State) FolderCount() int {
 }
 
 func (m *State) FolderName(idx int) string {
-	if idx < len(displayFolders) {
-		return displayFolders[idx].Name
+	if idx >= 0 && idx < len(m.folderNames) {
+		return strings.TrimSpace(m.folderNames[idx])
 	}
 	return ""
 }
@@ -552,7 +567,79 @@ func (m *State) applySyncResult(folderID string, threads []provider.Thread) {
 	}
 	m.preserveCachedBodies(folderID, threads)
 	m.cache.ReplaceThreads(folderID, threads)
+	m.applyLocalRules(folderID, threads)
 	m.LoadThreads()
+}
+
+func (m *State) applyLocalRules(source string, threads []provider.Thread) {
+	if m.cache == nil || source == "" {
+		return
+	}
+	rules, err := m.cache.Rules()
+	if err != nil || len(rules) == 0 {
+		if err != nil {
+			log.Printf("rules: load failed: %v", err)
+		}
+		return
+	}
+	for _, thread := range threads {
+		appliedMove := false
+		for _, rule := range rules {
+			if !rule.Matches(thread) {
+				continue
+			}
+			if rule.MarkRead {
+				m.applyRuleMarkRead(source, &thread)
+			}
+			if rule.Star {
+				m.applyRuleStar(source, &thread)
+			}
+			if rule.MoveTo != "" && !appliedMove && rule.MoveTo != source {
+				m.queueMoveCommands(&thread, source, rule.MoveTo)
+				if err := m.cache.MoveThreadLabel(thread.ID, source, rule.MoveTo); err != nil {
+					log.Printf("rules: move thread=%q to %q failed: %v", thread.ID, rule.MoveTo, err)
+				}
+				appliedMove = true
+			}
+		}
+	}
+}
+
+func (m *State) applyRuleMarkRead(source string, thread *provider.Thread) {
+	changed := false
+	for i := range thread.Messages {
+		if thread.Messages[i].Read || thread.Messages[i].ID == "" {
+			continue
+		}
+		m.queueCommand("mark_read", thread.Messages[i].ID, map[string]string{"source": source})
+		thread.Messages[i].Read = true
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	thread.Unread = 0
+	if err := m.cache.PutThread(*thread); err != nil {
+		log.Printf("rules: mark read save failed: %v", err)
+	}
+}
+
+func (m *State) applyRuleStar(source string, thread *provider.Thread) {
+	changed := false
+	for i := range thread.Messages {
+		if thread.Messages[i].Starred || thread.Messages[i].ID == "" {
+			continue
+		}
+		m.queueCommand("star", thread.Messages[i].ID, map[string]string{"source": source})
+		thread.Messages[i].Starred = true
+		changed = true
+	}
+	if !changed {
+		return
+	}
+	if err := m.cache.PutThread(*thread); err != nil {
+		log.Printf("rules: star save failed: %v", err)
+	}
 }
 
 // reconcileDrafts brings the local drafts table in line with what the
@@ -1671,6 +1758,103 @@ func (m *State) Move(sel int, dest, destName string) (undo func(), desc string) 
 	}, fmt.Sprintf("moved '%s' to %s", truncate(thread.Subject, 30), destName)
 }
 
+func (m *State) Snooze(sel int, wakeAt time.Time) (undo func(), desc string) {
+	t := m.SelectedThread(sel)
+	if t == nil {
+		return nil, ""
+	}
+	if m.cache == nil {
+		return nil, "snooze unavailable: no cache"
+	}
+	source := m.ActiveFolderID()
+	dest := m.FolderIDByName("Snoozed")
+	if dest == "" {
+		dest = m.FolderIDByName("[Mailbox]/Snoozed")
+	}
+	if dest == "" {
+		dest = m.ensureSnoozedFolder()
+	}
+	if dest == "" {
+		return nil, "snooze unavailable: couldn't create Snoozed folder"
+	}
+	if source == dest {
+		return nil, "already snoozed"
+	}
+	thread := *t
+	threadIdx := m.removeThreadAtSelection(sel)
+	m.queueMoveCommands(&thread, source, dest)
+	m.cache.MoveThreadLabel(thread.ID, source, dest)
+	if err := m.cache.PutSnooze(cache.Snooze{
+		ThreadID:       thread.ID,
+		OriginalFolder: source,
+		SnoozedFolder:  dest,
+		WakeAt:         wakeAt,
+		CreatedAt:      time.Now(),
+	}); err != nil {
+		log.Printf("snooze: save failed: %v", err)
+	}
+
+	return func() {
+		m.cache.DeleteSnooze(thread.ID)
+		m.cache.PutThread(thread)
+		m.cache.MoveThreadLabel(thread.ID, dest, source)
+		m.queueMoveCommands(&thread, dest, source)
+		m.insertThreadAt(threadIdx, thread)
+		m.SetSelected(sel)
+	}, fmt.Sprintf("snoozed '%s' until %s", truncate(thread.Subject, 30), formatSnoozeTime(wakeAt))
+}
+
+func (m *State) ensureSnoozedFolder() string {
+	if m.imap == nil {
+		return ""
+	}
+	const name = "Snoozed"
+	if err := m.imap.CreateFolder(name); err != nil {
+		log.Printf("snooze: create folder %q failed: %v", name, err)
+	}
+	if err := m.SyncFolders(); err != nil {
+		log.Printf("snooze: refresh folders after create failed: %v", err)
+	}
+	return m.FolderIDByName(name)
+}
+
+func (m *State) ProcessDueSnoozes(now time.Time) int {
+	if m.cache == nil {
+		return 0
+	}
+	due, err := m.cache.DueSnoozes(now)
+	if err != nil {
+		log.Printf("snooze: due read failed: %v", err)
+		return 0
+	}
+	restored := 0
+	for _, s := range due {
+		thread, err := m.cache.GetThread(s.ThreadID)
+		if err != nil {
+			log.Printf("snooze: thread %q missing: %v", s.ThreadID, err)
+			_ = m.cache.DeleteSnooze(s.ThreadID)
+			continue
+		}
+		m.queueMoveCommands(&thread, s.SnoozedFolder, s.OriginalFolder)
+		if err := m.cache.MoveThreadLabel(s.ThreadID, s.SnoozedFolder, s.OriginalFolder); err != nil {
+			log.Printf("snooze: restore label failed thread=%q: %v", s.ThreadID, err)
+			continue
+		}
+		if err := m.cache.DeleteSnooze(s.ThreadID); err != nil {
+			log.Printf("snooze: delete row failed thread=%q: %v", s.ThreadID, err)
+		}
+		restored++
+	}
+	if restored > 0 {
+		m.LoadThreads()
+	}
+	return restored
+}
+
+func formatSnoozeTime(t time.Time) string {
+	return t.Format("Mon 15:04")
+}
+
 func (m *State) removeThreadAtSelection(sel int) int {
 	row := m.ThreadRowAt(sel)
 	if row == nil || row.ThreadIdx < 0 || row.ThreadIdx >= len(m.threads) {
@@ -2129,6 +2313,17 @@ func (m *State) FolderIDByDisplayName(display string) string {
 		}
 	}
 	return bestID
+}
+
+func (m *State) FolderIDByName(name string) string {
+	want := strings.ToLower(strings.TrimSpace(name))
+	for _, f := range m.folders {
+		if strings.ToLower(strings.TrimSpace(f.ID)) == want ||
+			strings.ToLower(strings.TrimSpace(f.Name)) == want {
+			return f.ID
+		}
+	}
+	return ""
 }
 
 // helpers

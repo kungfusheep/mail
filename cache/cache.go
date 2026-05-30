@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -217,6 +218,21 @@ func (c *Cache) migrate() error {
 			synced_at INTEGER NOT NULL DEFAULT 0,
 			updated_at INTEGER NOT NULL
 		);
+
+		CREATE TABLE IF NOT EXISTS snoozes (
+			thread_id TEXT PRIMARY KEY,
+			original_folder TEXT NOT NULL,
+			snoozed_folder TEXT NOT NULL,
+			wake_at INTEGER NOT NULL,
+			created_at INTEGER NOT NULL
+		);
+		CREATE INDEX IF NOT EXISTS idx_snoozes_wake ON snoozes(wake_at);
+
+		CREATE TABLE IF NOT EXISTS rules (
+			id TEXT PRIMARY KEY,
+			data TEXT NOT NULL,
+			created_at INTEGER NOT NULL
+		);
 	`)
 	if err != nil {
 		return err
@@ -264,6 +280,14 @@ type Command struct {
 	Status    string // pending, syncing, synced, failed
 	Error     string
 	CreatedAt time.Time
+}
+
+type Snooze struct {
+	ThreadID       string
+	OriginalFolder string
+	SnoozedFolder  string
+	WakeAt         time.Time
+	CreatedAt      time.Time
 }
 
 func (c *Cache) PutCommand(cmd Command) error {
@@ -321,6 +345,70 @@ func (c *Cache) DeleteCommands(ids ...string) error {
 func (c *Cache) ClearSyncedCommands() error {
 	_, err := c.db.Exec("DELETE FROM commands WHERE status = 'synced'")
 	return err
+}
+
+func (c *Cache) PutSnooze(s Snooze) error {
+	if s.CreatedAt.IsZero() {
+		s.CreatedAt = time.Now()
+	}
+	_, err := c.db.Exec(
+		`INSERT OR REPLACE INTO snoozes
+		 (thread_id, original_folder, snoozed_folder, wake_at, created_at)
+		 VALUES (?, ?, ?, ?, ?)`,
+		s.ThreadID, s.OriginalFolder, s.SnoozedFolder, s.WakeAt.Unix(), s.CreatedAt.Unix(),
+	)
+	return err
+}
+
+func (c *Cache) DueSnoozes(now time.Time) ([]Snooze, error) {
+	rows, err := c.db.Query(
+		`SELECT thread_id, original_folder, snoozed_folder, wake_at, created_at
+		 FROM snoozes
+		 WHERE wake_at <= ?
+		 ORDER BY wake_at, created_at`,
+		now.Unix(),
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Snooze
+	for rows.Next() {
+		var s Snooze
+		var wakeAt, createdAt int64
+		if err := rows.Scan(&s.ThreadID, &s.OriginalFolder, &s.SnoozedFolder, &wakeAt, &createdAt); err != nil {
+			return nil, err
+		}
+		s.WakeAt = time.Unix(wakeAt, 0)
+		s.CreatedAt = time.Unix(createdAt, 0)
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func (c *Cache) DeleteSnooze(threadID string) error {
+	_, err := c.db.Exec("DELETE FROM snoozes WHERE thread_id = ?", threadID)
+	return err
+}
+
+func (c *Cache) Snooze(threadID string) (Snooze, bool, error) {
+	var s Snooze
+	var wakeAt, createdAt int64
+	err := c.db.QueryRow(
+		`SELECT thread_id, original_folder, snoozed_folder, wake_at, created_at
+		 FROM snoozes
+		 WHERE thread_id = ?`,
+		threadID,
+	).Scan(&s.ThreadID, &s.OriginalFolder, &s.SnoozedFolder, &wakeAt, &createdAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return Snooze{}, false, nil
+	}
+	if err != nil {
+		return Snooze{}, false, err
+	}
+	s.WakeAt = time.Unix(wakeAt, 0)
+	s.CreatedAt = time.Unix(createdAt, 0)
+	return s, true, nil
 }
 
 // journal

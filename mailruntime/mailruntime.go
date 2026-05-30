@@ -36,6 +36,7 @@ type Runtime struct {
 	cb  Callbacks
 
 	imapClient      *imap.IMAP
+	runtimeCancel   context.CancelFunc
 	idleCancel      context.CancelFunc
 	inboxIdleCancel context.CancelFunc
 	labelUnsub      func()
@@ -53,6 +54,9 @@ func New(db *cache.Cache, mb *mailbox.State, cfg Config, cb Callbacks) *Runtime 
 }
 
 func (r *Runtime) Start() {
+	ctx, cancel := context.WithCancel(context.Background())
+	r.runtimeCancel = cancel
+	go r.snoozeLoop(ctx)
 	if !r.cfg.Backend {
 		r.watchInboxNotifications()
 		r.WatchActiveFolder()
@@ -90,7 +94,37 @@ func (r *Runtime) Start() {
 	}()
 }
 
+func (r *Runtime) snoozeLoop(ctx context.Context) {
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	r.processDueSnoozes(time.Now())
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-ticker.C:
+			r.processDueSnoozes(now)
+		}
+	}
+}
+
+func (r *Runtime) processDueSnoozes(now time.Time) {
+	if r.mb == nil {
+		return
+	}
+	if restored := r.mb.ProcessDueSnoozes(now); restored > 0 {
+		r.status(fmt.Sprintf("restored %d snoozed", restored))
+		r.threadsChanged()
+		r.render()
+		r.FlushPending()
+	}
+}
+
 func (r *Runtime) Close() {
+	if r.runtimeCancel != nil {
+		r.runtimeCancel()
+		r.runtimeCancel = nil
+	}
 	r.closeActiveFolderWatch()
 	if r.inboxUnsub != nil {
 		r.inboxUnsub()
