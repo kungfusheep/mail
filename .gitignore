@@ -5,3 +5,4 @@ iftest
 /palette-canvas
 /send-effect
 *.prof
+/fixtures/
