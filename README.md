@@ -99,6 +99,12 @@ Useful normal-mode commands include:
 
 <img width="2552" height="1528" alt="image" src="https://github.com/user-attachments/assets/11303957-92c6-4d6e-a214-484270839eca" />
 
+## Themes
+
+A bunch of colour themes are included, accessed via the omnibox
+
+<img width="2424" height="1460" alt="image" src="https://github.com/user-attachments/assets/c0219740-4c15-47f2-b6e9-70d67dceb859" />
+
 
 ## Release Assets
 
