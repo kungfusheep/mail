@@ -4,6 +4,9 @@ A keyboard-first terminal mail client built with [glyph](https://github.com/kung
 
 `mail` is a local-first IMAP/SMTP client with a cached mailbox model, vim-flavoured distraction-free compose editor, rich preview rendering, attachment handling, and a quiet three-pane TUI.
 
+<img width="2427" height="1496" alt="image" src="https://github.com/user-attachments/assets/34c44313-147b-44a5-b3ad-af8d630c26b2" />
+
+
 ## Status
 
 This is pre-release software. It is useful locally, but the configuration and release story are still being shaped.
@@ -88,6 +91,14 @@ Useful normal-mode commands include:
 - `z=` for spell suggestions when `aspell` is available.
 - `gmh`, `gml`, `gmq`, `gmc`, `gmt`, `gmd`, `gmP`, `gms` for block maps.
 - `gmf`, `gm"`, `gm'`, ``gm` ``, `gm(`, `gm[`, `gm{`, `gm<` and matching closing variants for text maps.
+
+
+<img width="2422" height="1495" alt="image" src="https://github.com/user-attachments/assets/c2f324f4-9aac-4a96-aa3a-6e8f1b865504" />
+
+<img width="2556" height="1542" alt="image" src="https://github.com/user-attachments/assets/74b18c71-c88f-4652-bba7-ff217e6e1175" />
+
+<img width="2552" height="1528" alt="image" src="https://github.com/user-attachments/assets/11303957-92c6-4d6e-a214-484270839eca" />
+
 
 ## Release Assets
 
