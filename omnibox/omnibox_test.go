@@ -108,6 +108,69 @@ func TestThemePickerPreviewsWhenFilterListMovesSelection(t *testing.T) {
 	}
 }
 
+func TestCustomItemsPreviewCommitAndCancel(t *testing.T) {
+	model := mailbox.NewUI(mailbox.UIConfig{
+		App:   NewApp(),
+		State: mailbox.NewState(nil, "test@example.com"),
+		Theme: theme.Dark(),
+	})
+	box := New(Config{
+		App:   model.App,
+		Theme: theme.Dark(),
+		Model: model,
+	})
+	previewed := []string{}
+	acted := []string{}
+	closed := []bool{}
+
+	box.OpenItems("map", []Item{
+		{
+			Label:   "first",
+			Preview: func() { previewed = append(previewed, "first") },
+			Action:  func() { acted = append(acted, "first") },
+		},
+		{
+			Label:   "second",
+			Preview: func() { previewed = append(previewed, "second") },
+			Action:  func() { acted = append(acted, "second") },
+		},
+	}, func(committed bool) {
+		closed = append(closed, committed)
+	})
+	renderOmnibox(box)
+	if last(previewed) != "first" {
+		t.Fatalf("initial custom preview = %q, want first", last(previewed))
+	}
+	box.move(1)
+	if last(previewed) != "second" {
+		t.Fatalf("moved custom preview = %q, want second", last(previewed))
+	}
+	box.Close()
+	if len(acted) != 0 {
+		t.Fatalf("cancel ran action = %#v, want none", acted)
+	}
+	if len(closed) != 1 || closed[0] {
+		t.Fatalf("cancel close state = %#v, want [false]", closed)
+	}
+
+	box.OpenItems("map", []Item{
+		{
+			Label:  "commit",
+			Action: func() { acted = append(acted, "commit") },
+		},
+	}, func(committed bool) {
+		closed = append(closed, committed)
+	})
+	renderOmnibox(box)
+	box.exec()
+	if last(acted) != "commit" {
+		t.Fatalf("commit action = %#v, want commit", acted)
+	}
+	if len(closed) != 2 || !closed[1] {
+		t.Fatalf("commit close state = %#v, want trailing true", closed)
+	}
+}
+
 func TestThemePickerIncludesMFDThemes(t *testing.T) {
 	model := mailbox.NewUI(mailbox.UIConfig{
 		App:   NewApp(),

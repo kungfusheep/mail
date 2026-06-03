@@ -11,6 +11,26 @@ type command struct {
 	Preview     func()
 }
 
+type Item struct {
+	Label       string
+	Description string
+	Key         string
+	Section     string
+	Action      func()
+	Preview     func()
+}
+
+func commandFromItem(item Item) command {
+	return command{
+		Label:       item.Label,
+		Description: item.Description,
+		Key:         item.Key,
+		Section:     item.Section,
+		Action:      item.Action,
+		Preview:     item.Preview,
+	}
+}
+
 type moveTarget struct {
 	ID   string
 	Name string

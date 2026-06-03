@@ -202,6 +202,28 @@ func TestRegisterNormalModeBindsMatchersToProvidedRouter(t *testing.T) {
 	}
 }
 
+func TestMatcherRegistriesReturnCopies(t *testing.T) {
+	blocks := BlockMatchers()
+	if len(blocks) == 0 {
+		t.Fatal("BlockMatchers returned no definitions")
+	}
+	original := blocks[0].Name
+	blocks[0].Name = "mutated"
+	if got := BlockMatchers()[0].Name; got != original {
+		t.Fatalf("BlockMatchers shared backing storage, got %q want %q", got, original)
+	}
+
+	text := TextMatchers()
+	if len(text) == 0 {
+		t.Fatal("TextMatchers returned no definitions")
+	}
+	original = text[0].Name
+	text[0].Name = "mutated"
+	if got := TextMatchers()[0].Name; got != original {
+		t.Fatalf("TextMatchers shared backing storage, got %q want %q", got, original)
+	}
+}
+
 func TestRegisterNormalModeSubstituteChar(t *testing.T) {
 	app := glyph.NewApp()
 	ed := &Editor{

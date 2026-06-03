@@ -34,6 +34,8 @@ type OmniBox struct {
 	themeBeforeName string
 	themeBefore     theme.Theme
 	themeCommitted  bool
+	customCommitted bool
+	customOnClose   func(committed bool)
 }
 
 func New(cfg Config) *OmniBox {
@@ -84,6 +86,9 @@ func (b *OmniBox) Close() {
 	if b.mode == "themes" && !b.themeCommitted {
 		b.applyTheme(b.themeBeforeName, b.themeBefore)
 	}
+	if b.mode == "custom" && b.customOnClose != nil {
+		b.customOnClose(b.customCommitted)
+	}
 	if b.list != nil {
 		b.list.Clear()
 		b.resetSelection()
@@ -94,6 +99,8 @@ func (b *OmniBox) Close() {
 	b.mode = "commands"
 	b.title = "commands"
 	b.themeCommitted = false
+	b.customCommitted = false
+	b.customOnClose = nil
 	b.app.HideCursor()
 	b.app.RequestRender()
 }
@@ -226,6 +233,9 @@ func (b *OmniBox) exec() {
 	action := cmd.Action
 	if b.mode == "themes" {
 		b.themeCommitted = true
+	}
+	if b.mode == "custom" {
+		b.customCommitted = true
 	}
 	b.Close()
 	if action != nil {
@@ -361,7 +371,30 @@ func (b *OmniBox) OpenThemePicker() {
 	}
 	b.refresh()
 	b.open = true
-	b.previewSelected()
+	b.previewCurrent()
+	b.app.HideCursor()
+	b.app.RequestRender()
+}
+
+func (b *OmniBox) OpenItems(title string, items []Item, onClose func(committed bool)) {
+	b.mode = "custom"
+	b.title = title
+	b.themeCommitted = false
+	b.customCommitted = false
+	b.customOnClose = onClose
+	b.items = make([]command, 0, len(items))
+	for _, item := range items {
+		b.items = append(b.items, commandFromItem(item))
+	}
+	b.lastQuery = ""
+	if b.list != nil {
+		b.list.Clear()
+		b.list.Refresh()
+		b.resetSelection()
+	}
+	b.refresh()
+	b.open = true
+	b.previewCurrent()
 	b.app.HideCursor()
 	b.app.RequestRender()
 }
@@ -394,14 +427,24 @@ func (b *OmniBox) themeCommand(named theme.NamedTheme) command {
 }
 
 func (b *OmniBox) previewSelected() {
-	if b.mode != "themes" || b.list == nil {
+	if b.list == nil {
 		return
 	}
 	b.previewCommand(b.list.Selected())
 }
 
+func (b *OmniBox) previewCurrent() {
+	if b.list != nil {
+		b.previewSelected()
+		return
+	}
+	if len(b.items) > 0 {
+		b.previewCommand(&b.items[0])
+	}
+}
+
 func (b *OmniBox) previewCommand(cmd *command) {
-	if b.mode != "themes" || cmd == nil || cmd.Preview == nil {
+	if cmd == nil || cmd.Preview == nil {
 		return
 	}
 	cmd.Preview()

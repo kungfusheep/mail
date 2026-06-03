@@ -366,6 +366,14 @@ func (e *Editor) Dirty() bool {
 	return e.dirty
 }
 
+func (e *Editor) WordAtCursor() string {
+	return e.wordAtCursor()
+}
+
+func (e *Editor) HasSpellChecker() bool {
+	return e.spellChecker != nil
+}
+
 // =============================================================================
 // Cursor Management (core primitives)
 // =============================================================================

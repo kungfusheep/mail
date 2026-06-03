@@ -47,6 +47,10 @@ var blockMatchers = []BlockMatcherDef{
 	{"s", "Scene Heading", "󰕐", func(b *Block) bool { return b.Type == BlockSceneHeading }},
 }
 
+func BlockMatchers() []BlockMatcherDef {
+	return append([]BlockMatcherDef(nil), blockMatchers...)
+}
+
 func isHeadingType(t BlockType) bool {
 	return t == BlockH1 || t == BlockH2 || t == BlockH3 ||
 		t == BlockH4 || t == BlockH5 || t == BlockH6
@@ -83,6 +87,10 @@ var textMatchers = []TextMatcherDef{
 	{"}", "Curly Braces", "󰅩", makeBracketMatcher('{', '}')},
 	{"<", "Angle Brackets", "󰅤", makeBracketMatcher('<', '>')},
 	{">", "Angle Brackets", "󰅤", makeBracketMatcher('<', '>')},
+}
+
+func TextMatchers() []TextMatcherDef {
+	return append([]TextMatcherDef(nil), textMatchers...)
 }
 
 // =============================================================================

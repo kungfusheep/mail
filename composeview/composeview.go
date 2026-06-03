@@ -13,6 +13,7 @@ import (
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/omnibox"
 	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/mail/smtp"
 	"github.com/kungfusheep/mail/theme"
@@ -131,7 +132,7 @@ func quotedDocument(body string) *compose.Document {
 	return doc
 }
 
-func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme, signature string) mailbox.ComposeControls {
+func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMTP, db *cache.Cache, notify func(string), frame *int, tr *transition.Transition, palette theme.Theme, signature string, editorOmni *omnibox.OmniBox) mailbox.ComposeControls {
 	if notify == nil {
 		notify = func(string) {}
 	}
@@ -485,6 +486,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 					),
 				),
 			),
+			editorOmniboxView(editorOmni),
 		),
 	).NoCounts()
 
@@ -817,6 +819,7 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 		}
 		router.Handle("/", func(_ riffkey.Match) { composeStartSearch(true) })
 		router.Handle("?", func(_ riffkey.Match) { composeStartSearch(false) })
+		registerEditorOmnibox(app, editorOmni, router, ed, notify, scheduleDraftSave)
 
 		compose.RegisterNormalMode(router, app, ed,
 			func() { enterInsertMode() },
@@ -932,6 +935,10 @@ func Setup(app *App, ed *compose.Editor, mb *mailbox.State, smtpClient *smtp.SMT
 			}
 		})
 		r.Handle("<C-o>", func(_ riffkey.Match) { promoteInlineReply() })
+		registerEditorOmnibox(app, editorOmni, r, inlineEd, notify, func() {
+			syncInlineCursor()
+			scheduleDraftSave()
+		})
 		compose.RegisterNormalMode(r, app, inlineEd,
 			enterInlineInsert,
 			func() { compose.RegisterVisualMode(app, inlineEd) },

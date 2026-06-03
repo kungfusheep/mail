@@ -11,10 +11,18 @@ import (
 	"github.com/kungfusheep/mail/cache"
 	"github.com/kungfusheep/mail/compose"
 	"github.com/kungfusheep/mail/mailbox"
+	"github.com/kungfusheep/mail/omnibox"
 	"github.com/kungfusheep/mail/provider"
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
+	"github.com/kungfusheep/riffkey"
 )
+
+func dispatchPattern(input *riffkey.Input, pattern string) {
+	for _, key := range riffkey.ParsePattern(pattern) {
+		input.Dispatch(key)
+	}
+}
 
 func TestSetupReplyRepairsBlankDraftHeaders(t *testing.T) {
 	db, err := cache.NewMemory()
@@ -57,6 +65,109 @@ func TestSetupReplyRepairsBlankDraftHeaders(t *testing.T) {
 	}
 	if got.Body != "existing reply body\n" {
 		t.Fatalf("draft Body = %q", got.Body)
+	}
+}
+
+func TestEditorOmniboxDocumentMapPreviewsAndRestores(t *testing.T) {
+	palette := theme.Dark()
+	app := NewApp()
+	ed := compose.NewEditor(&compose.Document{Blocks: []compose.Block{
+		{Type: compose.BlockParagraph, Runs: []compose.Run{{Text: "intro"}}},
+		{Type: compose.BlockH2, Runs: []compose.Run{{Text: "Target Heading"}}},
+	}}, "")
+	ed.SetApp(app)
+	ed.SetTheme(theme.ComposeTheme(palette))
+
+	model := mailbox.NewUI(mailbox.UIConfig{
+		App:   app,
+		State: mailbox.NewState(nil, "me@example.test"),
+		Theme: palette,
+	})
+	box := omnibox.New(omnibox.Config{
+		App:   app,
+		Model: model,
+		Theme: palette,
+	})
+	router := riffkey.NewRouter()
+	registerEditorOmnibox(app, box, router, ed, func(string) {}, nil)
+
+	input := riffkey.NewInput(router)
+	dispatchPattern(input, "gmh")
+
+	if got := ed.Cursor().Block; got != 1 {
+		t.Fatalf("gmh preview cursor block = %d, want heading block 1", got)
+	}
+	buf := NewBuffer(100, 40)
+	Build(box.View()).Execute(buf, 100, 40)
+	if x, _ := findText(buf, "Target Heading"); x < 0 {
+		t.Fatalf("document map did not render heading entry:\n%s", buf.String())
+	}
+
+	box.Close()
+	if got := ed.Cursor().Block; got != 0 {
+		t.Fatalf("cancelled gmh cursor block = %d, want original block 0", got)
+	}
+}
+
+func TestEditorOmniboxViewRendersOpenItems(t *testing.T) {
+	palette := theme.Dark()
+	app := NewApp()
+	model := mailbox.NewUI(mailbox.UIConfig{
+		App:   app,
+		State: mailbox.NewState(nil, "me@example.test"),
+		Theme: palette,
+	})
+	box := omnibox.New(omnibox.Config{
+		App:   app,
+		Model: model,
+		Theme: palette,
+	})
+	box.OpenItems("compose map", []omnibox.Item{{
+		Label:   "Target Heading",
+		Section: "compose",
+		Key:     "gmh",
+	}}, nil)
+
+	buf := NewBuffer(100, 40)
+	Build(editorOmniboxView(box)).Execute(buf, 100, 40)
+	if x, _ := findText(buf, "Target Heading"); x < 0 {
+		t.Fatalf("compose omnibox view did not render open item:\n%s", buf.String())
+	}
+}
+
+func TestEditorOmniboxUsesComposeSpecificBox(t *testing.T) {
+	palette := theme.Dark()
+	app := NewApp()
+	model := mailbox.NewUI(mailbox.UIConfig{
+		App:   app,
+		State: mailbox.NewState(nil, "me@example.test"),
+		Theme: palette,
+	})
+	mainBox := omnibox.New(omnibox.Config{
+		App:   app,
+		Model: model,
+		Theme: palette,
+	})
+	composeBox := omnibox.New(omnibox.Config{
+		App:   app,
+		Model: model,
+		Theme: palette,
+	})
+
+	renderComponent(mainBox.View())
+	renderComponent(editorOmniboxView(composeBox))
+	composeBox.OpenItems("compose map", []omnibox.Item{{
+		Label:   "Target Heading",
+		Section: "compose",
+		Key:     "gmh",
+	}}, nil)
+
+	buf := renderComponent(editorOmniboxView(composeBox))
+	if x, _ := findText(buf, "Target Heading"); x < 0 {
+		t.Fatalf("compose box did not render custom item:\n%s", buf.String())
+	}
+	if x, _ := findText(buf, "Compose New"); x >= 0 {
+		t.Fatalf("compose box rendered stale main commands:\n%s", buf.String())
 	}
 }
 
@@ -122,6 +233,7 @@ func TestSetupReplyStartsWithBlankBody(t *testing.T) {
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"",
+		nil,
 	)
 
 	controls.SetupReply(provider.Thread{
@@ -160,6 +272,7 @@ func TestSetupReplyAllStartsWithBlankBody(t *testing.T) {
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"",
+		nil,
 	)
 
 	controls.SetupReplyAll(provider.Thread{
@@ -199,6 +312,7 @@ func TestComposeSignatureSeedsNewDrafts(t *testing.T) {
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"Pete Griffiths",
+		nil,
 	)
 
 	controls.Open()
@@ -238,6 +352,7 @@ func TestComposeSignatureDoesNotOverwriteExistingReplyDraft(t *testing.T) {
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"Pete Griffiths",
+		nil,
 	)
 
 	controls.SetupReply(provider.Thread{
@@ -496,6 +611,7 @@ func TestFullReplyCanToggleBackToInlineReply(t *testing.T) {
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"",
+		nil,
 	)
 	controls.Open()
 	controls.SetupReply(provider.Thread{
@@ -540,6 +656,12 @@ func findText(buf *Buffer, text string) (int, int) {
 	return -1, -1
 }
 
+func renderComponent(c Component) *Buffer {
+	buf := NewBuffer(100, 40)
+	Build(c).Execute(buf, 100, 40)
+	return buf
+}
+
 func setupTestComposeApp(t *testing.T, db *cache.Cache) (*App, mailbox.ComposeControls) {
 	t.Helper()
 	palette := theme.Dark()
@@ -557,5 +679,6 @@ func setupTestComposeApp(t *testing.T, db *cache.Cache) (*App, mailbox.ComposeCo
 		transition.New(time.Millisecond, palette.BG, Hex(0x3a3a3a)),
 		palette,
 		"",
+		nil,
 	)
 }

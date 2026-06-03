@@ -152,10 +152,9 @@ func main() {
 	editor.SetTheme(composeTheme)
 	editor.SetApp(app)
 	editor.StartSpellResultWorker(app.RequestRender)
-	comp := composeview.Setup(app, editor, mb, smtpClient, db, model.NotifyCompose, &model.Frame, composeTransition, t, userSettings.Signature)
-	model.SetCompose(comp)
 
 	var rt *mailruntime.Runtime
+	var comp mailbox.ComposeControls
 
 	omniBox := omnibox.New(omnibox.Config{
 		App:   app,
@@ -179,15 +178,25 @@ func main() {
 			}
 		},
 	})
+	composeOmniBox := omnibox.New(omnibox.Config{
+		App:   app,
+		Theme: t,
+		Model: model,
+	})
+
+	comp = composeview.Setup(app, editor, mb, smtpClient, db, model.NotifyCompose, &model.Frame, composeTransition, t, userSettings.Signature, composeOmniBox)
+	model.SetCompose(comp)
 
 	app.OnBeforeRender(func() {
 		model.ProcessPending()
 		omniBox.BeforeRender()
+		composeOmniBox.BeforeRender()
 		model.UpdatePreviewScroll()
 	})
 
 	app.OnResize(func(width, height int) {
 		omniBox.Resize(width, height)
+		composeOmniBox.Resize(width, height)
 		model.UpdateStatusOverlay()
 	})
 
