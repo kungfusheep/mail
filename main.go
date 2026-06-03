@@ -9,7 +9,6 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	. "github.com/kungfusheep/glyph"
@@ -28,6 +27,7 @@ import (
 	"github.com/kungfusheep/mail/theme"
 	"github.com/kungfusheep/mail/transition"
 	"github.com/kungfusheep/mail/ui"
+	"golang.org/x/sys/unix"
 )
 
 func main() {
@@ -46,7 +46,7 @@ func main() {
 	if err == nil {
 		log.SetOutput(logFile)
 		// redirect stderr to the log so panics/runtime errors don't corrupt the TUI
-		syscall.Dup2(int(logFile.Fd()), int(os.Stderr.Fd()))
+		_ = unix.Dup2(int(logFile.Fd()), int(os.Stderr.Fd()))
 		defer logFile.Close()
 	}
 	log.Println("starting mail")

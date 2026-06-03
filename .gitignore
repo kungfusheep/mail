@@ -4,5 +4,6 @@ iftest
 /dedupe-drafts
 /palette-canvas
 /send-effect
+/dist/
 *.prof
 /fixtures/
